@@ -62,6 +62,29 @@ def test_backfill_symbol_skips_existing_year(tmp_path):
     assert n_files_first == n_files_second
 
 
+def test_backfill_retries_on_rate_limit_then_succeeds(tmp_path):
+    """A throttled window must be retried (with backoff), not silently saved as empty."""
+    from signal_engine.brokers.dhan import DhanRateLimitError
+
+    class _ThrottledBroker(_FakeBroker):
+        def __init__(self):
+            super().__init__()
+            self.hits = 0
+
+        def historical(self, symbol, timeframe, start, end):
+            self.hits += 1
+            if self.hits == 1:  # first call throttled, retry succeeds
+                raise DhanRateLimitError("DH-904")
+            return super().historical(symbol, timeframe, start, end)
+
+    broker = _ThrottledBroker()
+    store = ParquetBarStore(str(tmp_path))
+    saved = backfill_symbol(broker, store, "RELIANCE", years=1, end=date(2026, 6, 23),
+                            sleep_fn=lambda *_: None)
+    assert saved > 0  # recovered after the rate-limit retry, no silent gap
+    assert broker.hits >= 2
+
+
 def test_backfill_universe_best_effort_on_symbol_error(tmp_path):
     class _FlakyBroker(_FakeBroker):
         def historical(self, symbol, timeframe, start, end):

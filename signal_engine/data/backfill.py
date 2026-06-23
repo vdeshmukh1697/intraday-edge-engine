@@ -52,19 +52,31 @@ def backfill_symbol(
     start_floor = end - timedelta(days=int(years * 365.25))
     by_year: dict = {}
 
+    from signal_engine.brokers.dhan import DhanRateLimitError
+
     win_end = end
     while win_end > start_floor:
         win_start = max(start_floor, win_end - timedelta(days=window_days))
-        try:
-            bars = broker.historical(
-                symbol, "1m",
-                IST.localize(datetime.combine(win_start, datetime.min.time())),
-                IST.localize(datetime.combine(win_end, datetime.min.time())),
-            )
-            for b in bars:
-                by_year.setdefault(b.ts.year, []).append(b)
-        except Exception as exc:  # noqa: BLE001 - skip a bad window, keep going
-            log.warning("backfill %s [%s..%s] failed: %s", symbol, win_start, win_end, exc)
+        # Retry the window on rate-limit with exponential backoff. A throttled response must
+        # NOT be mistaken for "no data" (that silently lost ~half the universe the first run).
+        for attempt in range(5):
+            try:
+                bars = broker.historical(
+                    symbol, "1m",
+                    IST.localize(datetime.combine(win_start, datetime.min.time())),
+                    IST.localize(datetime.combine(win_end, datetime.min.time())),
+                )
+                for b in bars:
+                    by_year.setdefault(b.ts.year, []).append(b)
+                break
+            except DhanRateLimitError:
+                wait = pause_s * (2 ** attempt) + 0.5
+                log.info("backfill %s: rate-limited, backing off %.1fs (try %d/5)",
+                         symbol, wait, attempt + 1)
+                sleep_fn(wait)
+            except Exception as exc:  # noqa: BLE001 - skip a genuinely bad window, keep going
+                log.warning("backfill %s [%s..%s] failed: %s", symbol, win_start, win_end, exc)
+                break
         win_end = win_start
         if pause_s:
             sleep_fn(pause_s)

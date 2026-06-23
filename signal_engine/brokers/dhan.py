@@ -37,6 +37,11 @@ class DhanDataNotSubscribedError(RuntimeError):
     """Raised when the token is valid but the account lacks the paid Data API subscription."""
 
 
+class DhanRateLimitError(RuntimeError):
+    """Raised on DH-904 / HTTP 429. Distinct from 'no data' so callers can retry/back off
+    instead of silently treating a throttled response as an empty result."""
+
+
 def token_expiry(access_token: str) -> Optional[datetime]:
     """Decode the JWT ``exp`` (UTC) without verifying the signature. None if unparseable."""
     try:
@@ -127,6 +132,21 @@ class DhanBroker(BrokerAdapter):
                 "or use the free Yahoo Finance NSE data source (SE_DATA_SOURCE=yahoo_nse)."
             )
 
+    @staticmethod
+    def _check_rate_limit(status, resp) -> None:
+        """Raise on a throttle response so callers retry instead of seeing a false 'empty'.
+
+        Dhan signals rate limiting as HTTP 429 and/or errorCode DH-904 (Rate_Limit). If this
+        slips through as a plain dict with no OHLC arrays, the normalizer would return [] and
+        the throttle would masquerade as 'no data' — exactly what silently lost symbols in the
+        first full backfill.
+        """
+        text = json.dumps(resp) if isinstance(resp, dict) else str(resp)
+        if status == 429 or "DH-904" in text or "Rate_Limit" in text:
+            raise DhanRateLimitError(
+                "Dhan rate limit hit (DH-904 / HTTP 429). Throttle to <=5 req/s for Data APIs."
+            )
+
     # --- data --------------------------------------------------------------
     def historical(self, symbol: str, timeframe: str, start: datetime, end: datetime) -> List[Bar]:
         self.connect()
@@ -143,6 +163,7 @@ class DhanBroker(BrokerAdapter):
         }
         status, resp = self._post(f"{_BASE}/charts/intraday", body, self._headers())
         self._check_subscription(status, resp)
+        self._check_rate_limit(status, resp)
         return self._normalize_historical(symbol, resp)
 
     @staticmethod
@@ -181,6 +202,7 @@ class DhanBroker(BrokerAdapter):
             sid_to_sym[str(ref.security_id)] = s
         status, resp = self._post(f"{_BASE}/marketfeed/ltp", by_seg, self._headers())
         self._check_subscription(status, resp)
+        self._check_rate_limit(status, resp)
         out: Dict[str, Tick] = {}
         now = datetime.now(IST)
         data = resp.get("data", {}) if isinstance(resp, dict) else {}
