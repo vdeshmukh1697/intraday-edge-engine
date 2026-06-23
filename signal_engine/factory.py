@@ -52,8 +52,13 @@ def build_broker(
         )
     if cfg.env.data_source == "dhan":
         from signal_engine.brokers.dhan import DhanBroker
+        from signal_engine.universe.instruments import DhanInstrumentMaster
 
-        return DhanBroker(cfg.env.dhan_client_id, cfg.env.dhan_access_token)
+        # Dhan addresses instruments by numeric security_id, so quote/historical and the
+        # live feed need the (free, no-auth) scrip master loaded to map symbols both ways.
+        instruments = DhanInstrumentMaster.fetch()
+        return DhanBroker(cfg.env.dhan_client_id, cfg.env.dhan_access_token,
+                          instruments=instruments)
     from signal_engine.brokers.mock import MockBroker
 
     return MockBroker(day=day, seed=seed, regime_map=regime_map)

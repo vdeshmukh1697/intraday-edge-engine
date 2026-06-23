@@ -69,11 +69,15 @@ class DhanBroker(BrokerAdapter):
         access_token: Optional[str] = None,
         instruments: Optional[DhanInstrumentMaster] = None,
         http_post: Optional[Callable] = None,  # injectable (url, body, headers) -> (status, json)
+        feed_mode: str = "quote",              # "ticker" | "quote" | "full"
+        ws_factory: Optional[Callable] = None,  # injectable ws_factory(url) -> ws (tests)
     ):
         self.client_id = client_id
         self.access_token = access_token
         self.instruments = instruments
         self._post = http_post or _default_post
+        self._feed_mode = feed_mode
+        self._ws_factory = ws_factory
         self._cb: Optional[TickCallback] = None
         self._symbols: List[str] = []
         self._last: Dict[str, Tick] = {}
@@ -198,8 +202,27 @@ class DhanBroker(BrokerAdapter):
     def set_tick_callback(self, callback: TickCallback) -> None:
         self._cb = callback
 
-    def run(self) -> None:
-        raise NotImplementedError(
-            "Live Dhan websocket feed requires the paid Data API subscription and is not "
-            "wired yet. Use SE_DATA_SOURCE=yahoo_nse (free, delayed) or mock until subscribed."
+    def run(self, stop: Optional[Callable[[], bool]] = None) -> None:
+        """Stream the live Dhan feed, invoking the tick callback for every update.
+
+        Blocks until ``stop()`` returns True or the feed ends. Requires the paid Data API
+        subscription (otherwise the connection is rejected) and the instrument master, so
+        security ids can be resolved back to symbols. Never places orders.
+        """
+        self.connect()
+        if self.instruments is None:
+            raise RuntimeError("No Dhan instrument master loaded; cannot map security ids.")
+        if self._cb is None:
+            raise RuntimeError("No tick callback set (call set_tick_callback first).")
+
+        from signal_engine.brokers import dhan_ws
+
+        refs = [self._ref(s) for s in self._symbols]
+        # security_id (int) -> symbol, for decoding the binary feed back to tickers.
+        rev = {int(r.security_id): r.symbol for r in refs}
+        url = dhan_ws.build_ws_url(self.client_id, self.access_token)
+        msgs = dhan_ws.subscribe_messages(refs, mode=self._feed_mode)
+        dhan_ws.run_feed(
+            url, msgs, resolve=rev.get, on_tick=self._cb,
+            ws_factory=self._ws_factory, stop=stop,
         )

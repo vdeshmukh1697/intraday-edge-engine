@@ -7,6 +7,10 @@ pyarrow
 python-dateutil
 pytz
 
+# Real data sources (optional; install for live/real feeds)
+# yfinance          # free, delayed NSE data (SE_DATA_SOURCE=yahoo_nse)
+# websocket-client  # Dhan v2 live market feed (SE_DATA_SOURCE=dhan, paid Data API)
+
 # Dashboard (optional; only needed to run the Streamlit cockpit)
 # streamlit
 

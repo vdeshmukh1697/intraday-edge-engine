@@ -23,6 +23,8 @@ dependencies = [
 dashboard = ["streamlit"]
 api = ["fastapi", "uvicorn[standard]", "httpx"]
 ml = ["lightgbm"]
+yahoo = ["yfinance"]              # free, delayed NSE data (default real source)
+dhan = ["websocket-client"]      # paid Dhan v2 live market feed (real-time WebSocket)
 dev = ["pytest", "ruff", "mypy", "fastapi", "uvicorn[standard]", "httpx"]
 
 [project.scripts]

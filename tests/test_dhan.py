@@ -37,13 +37,60 @@ def test_dhan_connect_requires_credentials():
         b.connect()
 
 
-def test_dhan_supports_no_live_orders_and_no_run():
+def test_dhan_supports_no_live_orders():
+    # This is a decision-support tool: the order path must never exist.
+    assert DhanBroker.supports_live_orders is False
+    assert not hasattr(DhanBroker, "place_order")
+
+
+def test_dhan_run_requires_credentials():
+    # The live feed needs auth (and the paid subscription); with no creds it refuses early
+    # rather than silently no-op'ing. connect() guards this before any socket is opened.
     b = DhanBroker()
-    assert b.supports_live_orders is False
-    # live feed is intentionally not yet verified -> guarded
     b.subscribe(["RELIANCE"])
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(RuntimeError, match="DHAN_CLIENT_ID"):
         b.run()
+
+
+def test_dhan_run_streams_ticks_end_to_end():
+    """Broker-level wiring: subscribe -> feed -> security_id resolved back to symbol -> Tick.
+
+    Uses a fake socket emitting one Quote packet for RELIANCE's security_id (2885). No
+    network, no creds beyond a dummy token (token_expiry returns None for non-JWT strings).
+    """
+    import struct
+
+    from signal_engine.brokers import dhan_ws
+
+    sid = 2885  # RELIANCE in the _CSV fixture
+    body = struct.pack("<fhifiiiffff", 2950.0, 5, 1_750_000_000, 2950.0, 42000,
+                       0, 0, 0.0, 0.0, 0.0, 0.0)
+    frame = struct.pack("<BHBI", dhan_ws.RESP_QUOTE, len(body), 1, sid) + body
+
+    class _FakeWS:
+        def __init__(self):
+            self._frames = [frame]
+            self.sent = []
+
+        def send(self, m):
+            self.sent.append(m)
+
+        def recv(self):
+            return self._frames.pop(0) if self._frames else b""
+
+        def close(self):
+            pass
+
+    b = DhanBroker(client_id="100x", access_token="dummy",
+                   instruments=DhanInstrumentMaster.from_csv_text(_CSV),
+                   ws_factory=lambda url: _FakeWS())
+    got = []
+    b.set_tick_callback(got.append)
+    b.subscribe(["RELIANCE"])
+    b.run()
+
+    assert len(got) == 1
+    assert got[0].symbol == "RELIANCE" and got[0].ltp == 2950.0 and got[0].volume == 42000
 
 
 def test_normalize_historical_to_bars():
