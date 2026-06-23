@@ -29,7 +29,7 @@ prev=0
 for pass in 1 2 3 4; do
   cur=$(nsym)
   say "sweep $pass start (symbols=$cur)"
-  PORT_UNUSED=1 $PY -m signal_engine.cli backfill --years 5 --workers 3 >>"$LOG" 2>&1 \
+  "$PY" -m signal_engine.cli backfill --years 5 --workers 3 >>"$LOG" 2>&1 \
     || say "sweep $pass returned non-zero"
   cur2=$(nsym)
   say "sweep $pass done (symbols=$cur2)"
@@ -40,13 +40,13 @@ say "backfill final coverage: $(nsym) symbols"
 
 # 3) Train the ML scorer on the real corpus (most-liquid 400 names).
 say "training ML on real 5y archive ..."
-$PY -m signal_engine.cli train --source archive --max-symbols 400 --stride 3 \
+"$PY" -m signal_engine.cli train --source archive --max-symbols 400 --stride 3 \
     --out "$REPO/data/models/signal_model.json" >"$REPO/logs/ml_train.out" 2>>"$LOG" \
     && say "ML training done" || say "ML training FAILED (see logs/ml_train.out)"
 
 # 4) Verify paper trading (synthetic backtest is the deterministic machinery check).
 say "verifying paper-trading backtest ..."
-$PY -m signal_engine.cli backtest --days 20 >"$REPO/logs/backtest.out" 2>>"$LOG" \
+"$PY" -m signal_engine.cli backtest --days 20 >"$REPO/logs/backtest.out" 2>>"$LOG" \
     || say "backtest errored"
 
 # 5) Assemble the morning report.
