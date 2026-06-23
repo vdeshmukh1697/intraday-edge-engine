@@ -39,6 +39,43 @@ _DISCLAIMER = (
 _PENDING_AUTH: dict = {}
 _AUTH_TTL_S = 600
 
+# Cache the (expensive) real-archive leaderboard for the process; recomputing per request
+# would re-read the whole archived universe each time.
+_LEADERBOARD_CACHE: dict = {}
+_REAL_SCAN_CAP = 600  # scan at most the N most-liquid archived names (keeps it responsive)
+
+
+def _archive_leaderboard(cfg, top: int, news: bool):
+    """Build the leaderboard from the REAL backfilled Parquet corpus (no network).
+
+    Reads each archived symbol's latest session, derives a real liquidity snapshot, keeps the
+    most-liquid names, and runs the same Scanner used everywhere else. Returns None if the
+    archive is empty (caller falls back to synthetic)."""
+    from signal_engine.scan.real_harness import run_real_scan
+    from signal_engine.storage.bars import ParquetBarStore
+    from signal_engine.universe.nse import NSEUniverseProvider
+
+    store = ParquetBarStore(cfg.env.parquet_dir)
+    sessions, metrics = {}, {}
+    day = None
+    for sym in store.list_symbols():
+        df = store.load_latest_session(sym)
+        if df is None or df.empty:
+            continue
+        sessions[sym] = df
+        metrics[sym] = {"last_price": float(df["close"].iloc[-1]),
+                        "avg_daily_turnover_cr": float((df["close"] * df["volume"]).sum()) / 1e7}
+        day = df.index.max().date()
+    if not sessions:
+        return None
+    # Keep the most-liquid N so the deep scan stays responsive.
+    top_syms = sorted(sessions, key=lambda s: metrics[s]["avg_daily_turnover_cr"],
+                      reverse=True)[:_REAL_SCAN_CAP]
+    uni = NSEUniverseProvider([s for s in top_syms], {s: metrics[s] for s in top_syms})
+    res = run_real_scan(cfg, uni, day, top_n=top, with_news=news,
+                        intraday_fetch=lambda syms: {s: sessions[s] for s in syms if s in sessions})
+    return leaderboard_to_json(res, day)
+
 
 def _require_token(x_api_key: str = Header(default=None)) -> None:
     expected = os.getenv("SE_API_TOKEN")
@@ -135,6 +172,18 @@ def create_app() -> FastAPI:
         top: int = Query(default=20, ge=1, le=100),
         seed: int = 42, news: bool = True, ml: bool = False,
     ):
+        # Real data: scan the backfilled NSE corpus (recognizable names, real prices).
+        # Falls back to the synthetic universe only if the archive is empty or SE_DATA_SOURCE=mock.
+        if cfg.env.data_source != "mock":
+            ckey = (top, news)
+            if ckey not in _LEADERBOARD_CACHE:
+                real = _archive_leaderboard(cfg, top, news)
+                if real is not None:
+                    _LEADERBOARD_CACHE.clear()
+                    _LEADERBOARD_CACHE[ckey] = real
+            if ckey in _LEADERBOARD_CACHE:
+                return _LEADERBOARD_CACHE[ckey]
+
         from signal_engine.scan.harness import run_scan
         from signal_engine.universe.mock import MockUniverseProvider
 
@@ -166,6 +215,14 @@ def create_app() -> FastAPI:
 
     @app.get("/api/chart/{symbol}", dependencies=[Depends(_require_token)])
     def chart(symbol: str, date_str: str = Query(default=None, alias="date"), seed: int = 42):
+        # Real bars from the backfilled archive when available; else synthetic (mock mode
+        # or a symbol we haven't archived yet).
+        if cfg.env.data_source != "mock":
+            from signal_engine.storage.bars import ParquetBarStore
+
+            df = ParquetBarStore(cfg.env.parquet_dir).load_latest_session(symbol.upper())
+            if df is not None and not df.empty:
+                return chart_to_json(symbol, df, dict(cfg.settings.strategy.params))
         d = _parse_date(date_str)
         df = generate_session(symbol, d, seed=seed, regime="trend_up")
         return chart_to_json(symbol, df, dict(cfg.settings.strategy.params))

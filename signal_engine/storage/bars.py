@@ -51,6 +51,26 @@ class ParquetBarStore:
         frames = [pd.read_parquet(f) for f in files]
         return pd.concat(frames).sort_index()
 
+    def load_latest_session(self, symbol: str) -> Optional[pd.DataFrame]:
+        """The most recent single trading day of bars — reads only the newest year file.
+
+        Cheap (one ~1 MB file, not the whole multi-year history), so it scales to scanning the
+        whole archived universe per request.
+        """
+        base = self.root / f"symbol={symbol}"
+        files = sorted(base.glob("year=*/bars.parquet"))
+        if not files:
+            return None
+        df = pd.read_parquet(files[-1])
+        if df.empty:
+            return None
+        last_day = df.index.max().normalize()
+        return df[df.index.normalize() == last_day]
+
+    def list_symbols(self) -> List[str]:
+        """All symbols present in the archive (by directory)."""
+        return sorted(p.name.split("=", 1)[1] for p in self.root.glob("symbol=*") if p.is_dir())
+
     def save_bars(self, bars: List[Bar]) -> Optional[Path]:
         if not bars:
             return None

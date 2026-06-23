@@ -1,7 +1,5 @@
 """Tests for the FastAPI engine API (Phase 6). Uses Starlette's TestClient (no network)."""
 
-import os
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -9,8 +7,11 @@ from signal_engine.api.app import create_app
 
 
 @pytest.fixture()
-def client():
-    os.environ.pop("SE_API_TOKEN", None)  # open in dev for these tests
+def client(monkeypatch):
+    monkeypatch.delenv("SE_API_TOKEN", raising=False)  # open in dev for these tests
+    # Pin the synthetic data path so the leaderboard/chart contract tests are deterministic
+    # and offline (the real path reads the local Parquet archive / .env data source).
+    monkeypatch.setenv("SE_DATA_SOURCE", "mock")
     return TestClient(create_app())
 
 
@@ -45,6 +46,31 @@ def test_leaderboard_with_ml_shadow(client):
 def test_leaderboard_rejects_non_trading_day(client):
     r = client.get("/api/leaderboard", params={"date": "2025-08-15"})  # holiday
     assert r.status_code == 400
+
+
+def test_leaderboard_uses_real_archive_when_present(tmp_path, monkeypatch):
+    """With a real data source + a populated archive, the leaderboard serves REAL symbols
+    (not the synthetic SYN#### universe)."""
+    import datetime
+
+    from signal_engine.data.synthetic import generate_session
+    from signal_engine.storage.bars import ParquetBarStore
+
+    store = ParquetBarStore(str(tmp_path))
+    for sym in ["RELIANCE", "TCS", "INFY"]:
+        df = generate_session(sym, datetime.date(2026, 6, 23), start_price=2000,
+                              seed=7, regime="trend_up")
+        store.save_symbol_year(sym, 2026, df)
+
+    monkeypatch.delenv("SE_API_TOKEN", raising=False)
+    monkeypatch.setenv("SE_DATA_SOURCE", "dhan")        # real path
+    monkeypatch.setenv("SE_PARQUET_DIR", str(tmp_path))  # point at the temp archive
+    c = TestClient(create_app())
+
+    data = c.get("/api/leaderboard", params={"news": "false", "top": 5}).json()
+    assert data["stats"]["universe"] == 3            # scanned the 3 archived names
+    syms = {e["symbol"] for e in data["entries"]}
+    assert syms <= {"RELIANCE", "TCS", "INFY"}        # real names, never SYN####
 
 
 # --- Dhan auth gate endpoints (offline; no Dhan network hit) ----------------
