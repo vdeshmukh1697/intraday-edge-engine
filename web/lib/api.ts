@@ -194,6 +194,94 @@ export function dhanLoginUrl(): string {
   return `${API_BASE}/api/auth/dhan/start`;
 }
 
+// --- Paper-trading tracker -------------------------------------------------
+
+export interface PaperTrade {
+  id: string;
+  symbol: string;
+  strategy: string;
+  direction: Direction;
+  entry_fill: number;
+  exit_fill: number;
+  entry_ts: string;
+  exit_ts: string;
+  exit_reason: string;
+  confidence: number;
+  stop_loss: number | null;
+  target: number | null;
+  qty: number;
+  gross_pnl_abs: number;
+  costs_abs: number;
+  net_pnl_abs: number;
+  net_pnl_pct: number;
+  tod: string;
+}
+
+export interface PaperSummary {
+  n_trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  total_pnl_abs: number;
+  total_pnl_pct: number;
+  avg_win: number;
+  avg_loss: number;
+  profit_factor: number | null;
+  max_drawdown: number;
+  expectancy: number;
+  best_trade: { symbol: string; net_pnl_abs: number } | null;
+  worst_trade: { symbol: string; net_pnl_abs: number } | null;
+}
+
+export interface GroupRow {
+  strategy?: string;
+  symbol?: string;
+  tod?: string;
+  n_trades: number;
+  win_rate: number;
+  total_pnl_abs: number;
+  profit_factor: number | null;
+}
+
+export interface PaperReport {
+  summary: PaperSummary;
+  equity_curve: { ts: string; cum_pnl: number; pnl: number; symbol: string }[];
+  drawdown: { ts: string; drawdown: number }[];
+  histogram: { lo: number; hi: number; count: number }[];
+  by_strategy: GroupRow[];
+  by_symbol: GroupRow[];
+  by_time_of_day: GroupRow[];
+  auto_summary: string[];
+  notional_per_trade: number;
+}
+
+export interface PaperFilter {
+  start?: string;
+  end?: string;
+  symbol?: string;
+  strategy?: string;
+}
+
+function paperQuery(p: PaperFilter): string {
+  const q = new URLSearchParams();
+  if (p.start) q.set("start", p.start);
+  if (p.end) q.set("end", p.end);
+  if (p.symbol) q.set("symbol", p.symbol);
+  if (p.strategy) q.set("strategy", p.strategy);
+  const qs = q.toString();
+  return qs ? `?${qs}` : "";
+}
+
+export function getPaperAnalytics(p: PaperFilter = {}): Promise<PaperReport> {
+  return getJSON<PaperReport>(`/api/paper/analytics${paperQuery(p)}`);
+}
+
+export function getPaperTrades(
+  p: PaperFilter = {}
+): Promise<{ notional_per_trade: number; count: number; trades: PaperTrade[] }> {
+  return getJSON(`/api/paper/trades${paperQuery(p)}`);
+}
+
 export function getLeaderboard(
   params: LeaderboardParams = {}
 ): Promise<LeaderboardResponse> {

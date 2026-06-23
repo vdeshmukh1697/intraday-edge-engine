@@ -522,3 +522,45 @@ tbody tr:hover {
   font-size: 12px;
   color: var(--text-faint);
 }
+
+/* ---------- Paper Trading page ---------- */
+.paper { display: flex; flex-direction: column; gap: 16px; }
+.page-head h1 { margin: 0 0 4px; }
+.muted { color: var(--text-dim); font-size: 13px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.empty { color: var(--text-dim); }
+.filters { display: flex; gap: 16px; align-items: end; flex-wrap: wrap; }
+.filters label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-dim); }
+.filters input { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 8px; }
+.filters button { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 8px 18px; font-weight: 600; cursor: pointer; }
+.cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.metric { background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
+.metric-label { font-size: 12px; color: var(--text-dim); }
+.metric-value { font-size: 20px; font-weight: 700; margin-top: 2px; }
+.metric-sub { font-size: 11px; color: var(--text-faint); margin-top: 2px; }
+.auto ul { margin: 6px 0 0; padding-left: 18px; }
+.auto li { font-size: 13px; color: var(--text); margin: 3px 0; }
+.chart-svg { width: 100%; height: auto; }
+.chart-svg .line { fill: none; stroke: var(--accent); stroke-width: 1.8; }
+.chart-svg .area { fill: rgba(63,185,80,0.18); stroke: var(--green); stroke-width: 1; }
+.chart-svg .area-neg { fill: rgba(248,81,73,0.18); stroke: var(--red); stroke-width: 1; }
+.chart-svg .axis { stroke: var(--border); stroke-dasharray: 3 3; }
+.chart-svg .lbl { fill: var(--text-faint); font-size: 10px; }
+.hist { display: flex; align-items: flex-end; gap: 3px; height: 140px; padding-top: 8px; }
+.hist-col { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; }
+.hist-bar { width: 80%; border-radius: 2px 2px 0 0; min-height: 1px; }
+.hist-bar.pos { background: var(--green); } .hist-bar.neg { background: var(--red); }
+.hist-x { font-size: 9px; color: var(--text-faint); margin-top: 3px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tbl th, .tbl td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.tbl th { color: var(--text-dim); font-weight: 600; }
+.tbl-scroll { overflow-x: auto; max-height: 460px; overflow-y: auto; }
+.tod { display: flex; flex-direction: column; gap: 8px; }
+.tod-row { display: grid; grid-template-columns: 180px 1fr 220px; align-items: center; gap: 10px; }
+.tod-label { font-size: 12px; color: var(--text-dim); }
+.tod-track { background: var(--bg); border-radius: 4px; height: 16px; overflow: hidden; }
+.tod-bar { height: 100%; border-radius: 4px; }
+.tod-bar.pos { background: var(--green); } .tod-bar.neg { background: var(--red); }
+.tod-val { font-size: 12px; text-align: right; }
+@media (max-width: 800px) { .cards { grid-template-columns: repeat(2, 1fr); } .grid2 { grid-template-columns: 1fr; } }

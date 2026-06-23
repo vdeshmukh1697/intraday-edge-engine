@@ -48,6 +48,55 @@ def test_leaderboard_rejects_non_trading_day(client):
     assert r.status_code == 400
 
 
+def test_paper_analytics_empty_is_graceful(client):
+    r = client.get("/api/paper/analytics")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["summary"]["n_trades"] >= 0
+    assert isinstance(body["auto_summary"], list)
+    assert "equity_curve" in body and "by_strategy" in body
+
+
+def test_paper_trades_and_analytics_with_seeded_db(tmp_path, monkeypatch):
+    import datetime
+
+    import pytz
+
+    from signal_engine.domain.enums import Direction, ExitReason, PositionStatus
+    from signal_engine.domain.models import PaperPosition, TradePlan
+    from signal_engine.storage.repository import SignalRepository
+
+    db = f"sqlite:///{tmp_path}/api.sqlite3"
+    ts = pytz.timezone("Asia/Kolkata").localize(datetime.datetime(2026, 6, 23, 9, 30))
+
+    def pos(pid, sym, exit_fill):
+        plan = TradePlan(symbol=sym, ts=ts, direction=Direction.LONG, strategy="vwap_ema_adx",
+                         entry=100.0, stop_loss=99.0, stop_pct=1.0, targets=[102.0, 103.0],
+                         target_pcts=[2.0, 3.0], expected_move_pct=2.0, risk_reward=2.0,
+                         cost_to_break_even_pct=0.1, confidence=70.0)
+        return PaperPosition(id=pid, plan=plan, status=PositionStatus.CLOSED, entry_fill=100.0,
+                             entry_ts=ts, exit_fill=exit_fill, exit_ts=ts,
+                             exit_reason=ExitReason.TARGET, pnl_pct_net=1.0, r_multiple=1.0,
+                             hold_minutes=10.0, won=exit_fill > 100)
+
+    repo = SignalRepository(db)
+    repo.save_position(pos("w", "RELIANCE", 102.0))  # winner
+    repo.save_position(pos("l", "TCS", 99.0))         # loser
+    repo.close()
+
+    monkeypatch.delenv("SE_API_TOKEN", raising=False)
+    monkeypatch.setenv("SE_DB_URL", db)
+    c = TestClient(create_app())
+
+    trades = c.get("/api/paper/trades").json()
+    assert trades["count"] == 2
+    assert all("net_pnl_abs" in t and "qty" in t for t in trades["trades"])
+
+    a = c.get("/api/paper/analytics").json()
+    assert a["summary"]["n_trades"] == 2
+    assert a["summary"]["wins"] == 1 and a["summary"]["losses"] == 1
+
+
 def test_leaderboard_uses_real_archive_when_present(tmp_path, monkeypatch):
     """With a real data source + a populated archive, the leaderboard serves REAL symbols
     (not the synthetic SYN#### universe)."""

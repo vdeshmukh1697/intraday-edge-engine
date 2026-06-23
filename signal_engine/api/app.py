@@ -239,6 +239,37 @@ def create_app() -> FastAPI:
         df = generate_session(symbol, d, seed=seed, regime="trend_up")
         return chart_to_json(symbol, df, dict(cfg.settings.strategy.params))
 
+    # --- Paper-trading tracker & analytics ---------------------------------
+    def _paper_enriched(start, end, symbol, strategy):
+        """Load filtered paper trades from the DB and enrich with absolute P&L + charges."""
+        from signal_engine.analytics import paper as pa
+        from signal_engine.risk.costs import CostModel
+        from signal_engine.storage.repository import SignalRepository
+
+        repo = SignalRepository(cfg.env.db_url)
+        try:
+            rows = repo.fetch_trades(start=start, end=end, symbol=symbol, strategy=strategy)
+        finally:
+            repo.close()
+        notional = float(cfg.risk.costs.reference_trade_value)
+        return pa.enrich_all(rows, notional, CostModel(cfg.risk.costs)), notional
+
+    @app.get("/api/paper/trades", dependencies=[Depends(_require_token)])
+    def paper_trades(start: str = Query(default=None), end: str = Query(default=None),
+                     symbol: str = Query(default=None), strategy: str = Query(default=None)):
+        enriched, notional = _paper_enriched(start, end, symbol, strategy)
+        return {"notional_per_trade": notional, "count": len(enriched), "trades": enriched}
+
+    @app.get("/api/paper/analytics", dependencies=[Depends(_require_token)])
+    def paper_analytics(start: str = Query(default=None), end: str = Query(default=None),
+                        symbol: str = Query(default=None), strategy: str = Query(default=None)):
+        from signal_engine.analytics import paper as pa
+
+        enriched, notional = _paper_enriched(start, end, symbol, strategy)
+        report = pa.full_report(enriched)
+        report["notional_per_trade"] = notional
+        return report
+
     @app.websocket("/ws/chart/{symbol}")
     async def ws_chart(ws: WebSocket, symbol: str, date_str: str = None, seed: int = 42,
                        speed: float = 0.0):

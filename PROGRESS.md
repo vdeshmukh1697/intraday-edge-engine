@@ -212,6 +212,23 @@ Gated (by design): live order execution, Redis, Polars, LightGBM/FinBERT. Run: `
 5. WhatsApp vs Telegram-first — Telegram fallback wired first.
 6. Paper-trading duration before real money — ≥ 1 month / 20 sessions.
 
+## Paper-Trading Tracker & Analytics (dashboard)
+- [x] `done` **Persistence** — every closed paper trade saved to SQLite (`paper_trades`, survives
+  restarts); records entry/exit ts, symbol, direction, strategy, entry confidence, entry/exit
+  fills, stop-loss, target, exit reason, modeled slippage (in fills) + brokerage (analytics),
+  realized P&L (₹ and %). Filterable by date range / symbol / strategy (`fetch_trades`).
+- [x] `done` **Analytics module** (`analytics/paper.py`, pure + unit-tested): summary (net P&L,
+  win rate, profit factor, avg win/loss, max drawdown, expectancy, best/worst), equity curve,
+  drawdown series, P&L histogram, by-strategy, by-symbol, by-time-of-day, factual auto-summary.
+  Absolute P&L uses a fixed `reference_trade_value` notional (capital-agnostic tool).
+- [x] `done` **API** — `GET /api/paper/trades` + `GET /api/paper/analytics` (filterable).
+- [x] `done` **Dashboard page** (`/paper`) — summary cards, equity curve + drawdown, P&L
+  histogram, by-strategy/by-symbol tables, time-of-day bars, sortable/filterable trade table,
+  auto-summary panel.
+- [x] `done` **Live persistence wired** — scheduler `live_job` + `replay --persist` save trades.
+- [x] `done` **Tests** — P&L / win-rate / profit-factor / drawdown vs hand-computed values;
+  persistence round-trip across a restart; API empty + seeded. (389 total green.)
+
 ## Notes / decisions log
 - (init) Feature-key contract for indicators frozen so strategy + indicator engine agree:
   close, prev_close, vwap, ema_fast(/_prev), ema_slow(/_prev), rsi, adx, atr, atr_pct, rvol,

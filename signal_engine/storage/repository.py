@@ -52,10 +52,16 @@ class SignalRepository:
                 symbol TEXT, strategy TEXT, direction TEXT,
                 entry_fill REAL, entry_ts TEXT, exit_fill REAL, exit_ts TEXT,
                 exit_reason TEXT, pnl_pct_net REAL, r_multiple REAL,
-                hold_minutes REAL, won INTEGER, confidence REAL
+                hold_minutes REAL, won INTEGER, confidence REAL,
+                stop_loss REAL, target REAL
             )
             """
         )
+        # Forward-compatible migration: add columns that predate this schema.
+        existing = {r["name"] for r in cur.execute("PRAGMA table_info(paper_trades)")}
+        for col in ("stop_loss", "target"):
+            if col not in existing:
+                cur.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} REAL")
         self.conn.commit()
 
     def save_plan(self, plan: TradePlan) -> int:
@@ -80,18 +86,20 @@ class SignalRepository:
 
     def save_position(self, pos: PaperPosition) -> None:
         cur = self.conn.cursor()
+        target = pos.plan.t1 if pos.plan.targets else None
         cur.execute(
             """INSERT OR REPLACE INTO paper_trades
                (id, symbol, strategy, direction, entry_fill, entry_ts, exit_fill,
-                exit_ts, exit_reason, pnl_pct_net, r_multiple, hold_minutes, won, confidence)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                exit_ts, exit_reason, pnl_pct_net, r_multiple, hold_minutes, won, confidence,
+                stop_loss, target)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 pos.id, pos.symbol, pos.plan.strategy, pos.direction.value,
                 pos.entry_fill, pos.entry_ts.isoformat() if pos.entry_ts else None,
                 pos.exit_fill, pos.exit_ts.isoformat() if pos.exit_ts else None,
                 pos.exit_reason.value, pos.pnl_pct_net, pos.r_multiple,
                 pos.hold_minutes, int(pos.won) if pos.won is not None else None,
-                pos.plan.confidence,
+                pos.plan.confidence, pos.plan.stop_loss, target,
             ),
         )
         self.conn.commit()
@@ -99,8 +107,28 @@ class SignalRepository:
     def fetch_plans(self) -> List[dict]:
         return [dict(r) for r in self.conn.execute("SELECT * FROM trade_plans ORDER BY ts")]
 
-    def fetch_trades(self) -> List[dict]:
-        return [dict(r) for r in self.conn.execute("SELECT * FROM paper_trades ORDER BY entry_ts")]
+    def fetch_trades(self, start: str = None, end: str = None,
+                     symbol: str = None, strategy: str = None) -> List[dict]:
+        """Closed paper trades, optionally filtered by date range / symbol / strategy.
+
+        ``start``/``end`` are inclusive ISO dates compared against the entry timestamp; only
+        filled trades (entry_ts not null) are returned, ordered by entry time.
+        """
+        clauses, args = ["entry_ts IS NOT NULL"], []
+        if start:
+            clauses.append("entry_ts >= ?")
+            args.append(start)
+        if end:
+            clauses.append("entry_ts <= ?")
+            args.append(end + "T23:59:59")
+        if symbol:
+            clauses.append("symbol = ?")
+            args.append(symbol.upper())
+        if strategy:
+            clauses.append("strategy = ?")
+            args.append(strategy)
+        sql = f"SELECT * FROM paper_trades WHERE {' AND '.join(clauses)} ORDER BY entry_ts"
+        return [dict(r) for r in self.conn.execute(sql, args)]
 
     def close(self) -> None:
         self.conn.close()

@@ -208,6 +208,39 @@ threshold** (the A10 "system conscience"). Walk-forward / time-split helpers
 
 ---
 
+## Paper-Trading Tracker & Analytics
+
+A dedicated **Paper Trading** tab in the dashboard records every simulated trade to SQLite
+(survives restarts) and analyses performance over time, so you can see what's actually working
+and track accuracy as the tool improves. Trades are recorded automatically by the live
+paper-trader (scheduler `live_job`) and by `signal-engine replay --persist`.
+
+**View it:** open the dashboard → **Paper Trading**, or hit the API directly:
+
+```bash
+curl "$API/api/paper/analytics?start=2026-06-01&end=2026-06-30&symbol=RELIANCE"
+curl "$API/api/paper/trades?strategy=vwap_ema_adx"     # filterable trade history
+```
+
+**What each metric means** (all net of modeled brokerage + slippage; "win" = net P&L > 0):
+
+| Metric | Meaning |
+|---|---|
+| **Net P&L** | Total realized profit/loss (₹ and %). ₹ assumes a fixed notional per trade (`reference_trade_value`, default ₹1,00,000) since the engine is capital-agnostic. |
+| **Win rate** | Share of trades with positive net P&L. |
+| **Profit factor** | Gross profit ÷ gross loss. **>1 = profitable**; <1 = losing even if win rate looks high. |
+| **Avg win / loss** | Mean ₹ on winning vs losing trades — reveals "many small wins, few big losers". |
+| **Expectancy** | Average net P&L per trade. |
+| **Max drawdown** | Largest peak-to-trough drop on the cumulative-P&L (equity) curve. |
+| **Equity curve** | Cumulative net P&L over time — the single most important view. |
+| **By strategy / symbol / time-of-day** | Where the edge is (or isn't); intraday tools often differ sharply at the open vs midday. |
+| **Auto-summary** | Plain-English flags derived **only** from the numbers (e.g. "profit factor <1 — losers outweigh winners"). |
+
+The P&L / win-rate / profit-factor / drawdown math is unit-tested against hand-computed values
+(`tests/test_paper_analytics.py`), and trade persistence is tested across a simulated restart.
+
+---
+
 ## Going live (real data, no synthetic)
 
 The engine defaults to synthetic data so it runs anywhere. Switch to real, free sources via env

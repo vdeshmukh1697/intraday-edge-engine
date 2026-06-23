@@ -90,23 +90,30 @@ def live_job(cfg: Optional[AppConfig] = None) -> None:
     cal = NSECalendar()
     if not cal.is_trading_day(_today()):
         return
+    repo = None
     try:
         from signal_engine.engine.runner import EngineRunner
         from signal_engine.factory import build_alerter, build_broker
         from signal_engine.market.session import MarketSession
+        from signal_engine.storage.repository import SignalRepository
         from signal_engine.strategies.base import create_strategy
 
         broker = build_broker(cfg, day=_today())
         strategy = create_strategy(cfg.settings.strategy.active, cfg.settings.strategy.params)
         session = MarketSession(cfg.settings.market, cal)
-        runner = EngineRunner(cfg, broker, strategy, session, build_alerter(cfg))
+        # Persist every live paper trade so the Paper-Trading tracker accumulates real history.
+        repo = SignalRepository(cfg.env.db_url)
+        runner = EngineRunner(cfg, broker, strategy, session, build_alerter(cfg), repo=repo)
         symbols = cfg.settings.watchlist
         _log.info("live_job: streaming Dhan feed for %d symbols until close", len(symbols))
         summary = runner.live(symbols)
-        _log.info("live_job done: %d bars, %d picks, %d paper trades",
+        _log.info("live_job done: %d bars, %d picks, %d paper trades (persisted)",
                   summary.bars_processed, len(summary.picks), len(summary.closed))
     except Exception as exc:  # noqa: BLE001
         _log.error("live_job failed: %s", exc)
+    finally:
+        if repo is not None:
+            repo.close()
 
 
 def premarket_job(cfg: AppConfig) -> None:
