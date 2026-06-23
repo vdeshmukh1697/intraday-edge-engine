@@ -113,6 +113,19 @@ Sentiment uses a zero-dependency finance **lexicon** model by default (determini
 **sources** are synthetic (`MockNewsProvider`); real RSS/NSE-filing ingestion is a gated
 external integration (stubbed), as is the live Dhan feed.
 
+### Pre-market briefing (Phase 5)
+Before the open, fuse global cues (GIFT Nifty / US / Asia / ADRs) + overnight news + the
+prior session's technical state into an **index outlook** (expected gap, risk tone) and a
+**ranked pre-open watchlist** with per-stock bias, setup, catalyst, and confidence:
+```bash
+./run.sh premarket --date 2025-06-23            # print the briefing
+./run.sh premarket --date 2025-06-23 --alert    # also send it via the configured alerter
+```
+Global cues use a synthetic `MockGlobalCuesProvider` (real `yfinance` is a gated stub).
+The gap/bias predictor is rules-based (PLAN §4.8: rules first, ML later). Open-validation
+helpers (`signal_engine.premarket.validation`) check whether a predicted gap actually
+materialised on confirming volume.
+
 ### Dashboard (optional)
 ```bash
 pip install streamlit

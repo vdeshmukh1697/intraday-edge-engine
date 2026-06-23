@@ -101,8 +101,26 @@ into the rules engine as gate/boost/cap/veto + event-guard, surfaced in the lead
 | Live RSS / NSE filings | **MockNewsProvider** (synthetic); RSS adapter stubbed | Offline, no live dependency; real feeds gated like Dhan | gated external integration |
 | Full NER symbol mapping | **Ticker/alias dictionary** matching | Simple, deterministic; covers the watchlist | when scaling to full universe news |
 
-## Phases 5–8 — not started (see PLAN.md §8)
-**Phase 5** = pre-market briefing (overnight news + global cues → gap/bias watchlist).
+## Phase 5 — Pre-market briefing & gap/bias predictor  ✅ DONE
+Before the bell, fuse global cues + overnight news + prior-day technical state into an
+index outlook + ranked pre-open watchlist; deliver via the alerter; validation helpers.
+- [x] `done` Global-cues provider: `MockGlobalCuesProvider` (correlated GIFT/US/Asia/ADRs) + yfinance stub (7 tests)
+- [x] `done` Gap/bias scoring: `index_outlook` + `stock_bias` (news×ADR×index×momentum) (11 tests, hand-verified)
+- [x] `done` Open-validation: `validate_open`/`validate_index`/`validate_pick` (did the gap happen + volume confirm) (11 tests)
+- [x] `done` Briefing orchestrator (cues + overnight news latest-catalyst + prior-day state → ranked picks) (5 tests)
+- [x] `done` CLI `premarket` command (+ `--alert` delivers via Telegram/WhatsApp/console); dashboard Pre-market view
+- **Phase-gate check:** `pytest` 217 passed · `ruff` clean · `premarket` runs + sends briefing. ✅
+
+### Phase-5 divergences (recorded)
+| Plan | MVP choice | Why | Revisit |
+|---|---|---|---|
+| `yfinance` live global cues | **MockGlobalCuesProvider** (synthetic, correlated) | Offline/free; real feed gated like Dhan/RSS | gated external integration |
+| ML gap predictor | **rules-based bias score** | Start explainable (PLAN §4.8 says rules first, ML later) | Phase 7+ |
+- Overnight news uses the LATEST item's sentiment (not the 20-min intraday decay) — a catalyst
+  from yesterday still matters at the open. Point-in-time preserved (news ts < today's open).
+
+## Phases 6–8 — not started (see PLAN.md §8)
+**Phase 6** = polished Next.js/Vercel dashboard + WhatsApp Cloud API.
 
 ---
 

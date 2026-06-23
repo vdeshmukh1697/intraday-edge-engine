@@ -33,11 +33,14 @@ st.caption(
 cfg = load_config()
 
 with st.sidebar:
-    mode = st.radio("Mode", ["Scan (leaderboard)", "Replay (paper book)", "Backtest + Health"])
+    mode = st.radio(
+        "Mode",
+        ["Scan (leaderboard)", "Replay (paper book)", "Backtest + Health", "Pre-market"],
+    )
     st.divider()
     day = st.date_input("Trading day", value=date(2025, 6, 23))
     seed = st.number_input("Seed", value=7, step=1)
-    run, run_scan_btn, run_bt_btn, demo, symbols = False, False, False, False, []
+    run, run_scan_btn, run_bt_btn, run_pm_btn, demo, symbols = False, False, False, False, False, []
     if mode.startswith("Scan"):
         st.header("Scan controls")
         universe_n = st.number_input("Universe size", value=2000, step=100)
@@ -48,11 +51,15 @@ with st.sidebar:
         demo = st.checkbox("Demo regimes (force setups)", value=True)
         symbols = st.multiselect("Symbols", cfg.settings.watchlist, default=cfg.settings.watchlist)
         run = st.button("Run replay", type="primary")
-    else:
+    elif mode.startswith("Backtest"):
         st.header("Backtest controls")
         bt_start = st.date_input("Start date", value=date(2025, 6, 2))
         bt_days = st.number_input("Trading days", value=10, step=1)
         run_bt_btn = st.button("Run backtest", type="primary")
+    else:
+        st.header("Pre-market controls")
+        symbols = st.multiselect("Symbols", cfg.settings.watchlist, default=cfg.settings.watchlist)
+        run_pm_btn = st.button("Build briefing", type="primary")
 
 
 @st.cache_data(show_spinner=True)
@@ -205,5 +212,35 @@ if run_bt_btn:
                f"{health['calibration_error']:.3f} (lower=better)")
     st.dataframe(pd.DataFrame([health["components"]]), use_container_width=True, hide_index=True)
 
-if not run and not run_scan_btn and not run_bt_btn:
+@st.cache_data(show_spinner=True)
+def _premarket(day_iso: str, seed: int, symbols: tuple):
+    from signal_engine.premarket.briefing import build_briefing
+
+    b = build_briefing(cfg, symbols=list(symbols), day=date.fromisoformat(day_iso), seed=int(seed))
+    o = b.index_outlook
+    outlook = {"gap_bias": o.gap_bias.value, "expected_gap_pct": o.expected_gap_pct,
+               "risk_tone": o.risk_tone.value, "drivers": ", ".join(o.drivers)}
+    picks = [
+        {"symbol": p.symbol, "bias": p.bias.value, "setup": p.setup,
+         "exp_gap_%": p.expected_gap_pct, "conf": p.confidence, "catalyst": p.catalyst}
+        for p in b.picks
+    ]
+    return outlook, picks
+
+
+if run_pm_btn and symbols:
+    outlook, picks = _premarket(day.isoformat(), int(seed), tuple(symbols))
+    tone_badge = {"RISK_ON": "🟢", "RISK_OFF": "🔴"}.get(outlook["risk_tone"], "⚪")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Index bias", outlook["gap_bias"])
+    c2.metric("Expected gap", f"{outlook['expected_gap_pct']:+.2f}%")
+    c3.metric("Risk tone", f"{tone_badge} {outlook['risk_tone']}")
+    st.caption("Drivers: " + outlook["drivers"])
+    st.subheader("🌅 Pre-open watchlist")
+    if picks:
+        st.dataframe(pd.DataFrame(picks), use_container_width=True, hide_index=True)
+    else:
+        st.info("No actionable pre-open bias for these settings.")
+
+if not (run or run_scan_btn or run_bt_btn or run_pm_btn):
     st.info("Pick a **Mode** in the sidebar, set controls, and click the run button.")

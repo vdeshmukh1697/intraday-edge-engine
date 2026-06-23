@@ -228,6 +228,48 @@ def cmd_news(args) -> int:
     return 0
 
 
+def cmd_premarket(args) -> int:
+    """Pre-market briefing: overnight cues + news -> ranked gap/bias watchlist (PLAN §4.8)."""
+    cfg = load_config()
+    day = _parse_date(args.date) if args.date else date(2025, 6, 23)
+    symbols = args.symbols.split(",") if args.symbols else cfg.settings.watchlist
+
+    cal = NSECalendar()
+    if not cal.is_trading_day(day):
+        print(f"{day} is not an NSE trading day. Pick another date.")
+        return 2
+
+    from signal_engine.premarket.briefing import build_briefing
+
+    b = build_briefing(cfg, symbols=symbols, day=day, seed=args.seed, top_n=args.top)
+    o = b.index_outlook
+    print(f"=== PRE-MARKET BRIEFING — {day} ===")
+    print(f"Index outlook   : {o.gap_bias.value}  expected gap {o.expected_gap_pct:+.2f}%  "
+          f"tone {o.risk_tone.value}")
+    print(f"  drivers       : {', '.join(o.drivers)}")
+    print(f"\nPre-open watchlist (top {args.top}):")
+    if not b.picks:
+        print("  (no actionable pre-open bias for these settings)")
+    for i, p in enumerate(b.picks, 1):
+        print(f"  {i:>2d}. {p.symbol:10s} {p.bias.value:5s} {p.setup:16s} "
+              f"gap~{p.expected_gap_pct:+.2f}% conf {p.confidence:.0f}  "
+              f"| {p.catalyst}  [{', '.join(p.drivers)}]")
+
+    # Deliver the ~09:00 briefing via the configured alerter (Telegram/WhatsApp/console).
+    if args.alert:
+        from signal_engine.factory import build_alerter
+
+        top = b.picks[0] if b.picks else None
+        msg = (f"Pre-market {day}: {o.gap_bias.value} ({o.expected_gap_pct:+.2f}%), "
+               f"{o.risk_tone.value}. Top pick: "
+               + (f"{top.symbol} {top.bias.value} ({top.setup}, conf {top.confidence:.0f})"
+                  if top else "none"))
+        build_alerter(cfg).send(msg, level="signal")
+        print("\n(briefing sent via alerter)")
+    print("\n" + _DISCLAIMER)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="signal-engine", description="Intraday signal engine (decision-support only).")
     sub = p.add_subparsers(dest="command", required=True)
@@ -254,6 +296,14 @@ def build_parser() -> argparse.ArgumentParser:
     pn.add_argument("--symbols", help="Comma-separated symbols (default config watchlist).")
     pn.add_argument("--seed", type=int, default=42, help="Synthetic news seed.")
     pn.set_defaults(func=cmd_news)
+
+    pm = sub.add_parser("premarket", help="Pre-market briefing -> ranked gap/bias watchlist.")
+    pm.add_argument("--date", help="Trading day YYYY-MM-DD (default 2025-06-23).")
+    pm.add_argument("--symbols", help="Comma-separated symbols (default config watchlist).")
+    pm.add_argument("--seed", type=int, default=42, help="Synthetic data seed.")
+    pm.add_argument("--top", type=int, default=20, help="Watchlist size.")
+    pm.add_argument("--alert", action="store_true", help="Send the briefing via the configured alerter.")
+    pm.set_defaults(func=cmd_premarket)
 
     pb = sub.add_parser("backtest", help="Multi-day event-driven backtest + metrics.")
     pb.add_argument("--start", help="Start date YYYY-MM-DD (default 2025-06-02).")
