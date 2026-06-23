@@ -14,6 +14,7 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 [ -f "$REPO/.env" ] && set -a && . "$REPO/.env" && set +a
 VERCEL_TOKEN="${VERCEL_TOKEN:?Set VERCEL_TOKEN in .env (see .env.example)}"
 VERCEL_SCOPE="${VERCEL_SCOPE:-vikrantdeshmukh}"
+PORT="${PORT:-8000}"   # override (e.g. PORT=8001) if 8000 is taken
 
 echo "=== Signal Engine — API + Cloudflare Tunnel ==="
 
@@ -25,23 +26,25 @@ export NVM_DIR="$HOME/.nvm"
 # shellcheck source=/dev/null
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 
-# 3. Start the FastAPI backend in the background on port 8000
-echo "[1/3] Starting FastAPI backend on http://127.0.0.1:8000 ..."
-python -m signal_engine.cli serve --host 127.0.0.1 --port 8000 &
+# 3. Start the FastAPI backend in the background
+echo "[1/3] Starting FastAPI backend on http://127.0.0.1:$PORT ..."
+python -m signal_engine.cli serve --host 127.0.0.1 --port "$PORT" &
 API_PID=$!
 sleep 3  # give uvicorn a moment to bind
 
 # 4. Start cloudflared quick tunnel (no account needed)
 echo "[2/3] Creating Cloudflare Quick Tunnel ..."
 TUNNEL_LOG=$(mktemp)
-cloudflared tunnel --url http://127.0.0.1:8000 --no-autoupdate 2>"$TUNNEL_LOG" &
+cloudflared tunnel --url "http://127.0.0.1:$PORT" --no-autoupdate 2>"$TUNNEL_LOG" &
 TUNNEL_PID=$!
 
-# Wait for the public URL to appear in the log
+# Wait for the public URL to appear in the log.
+# NOTE: use -oE (POSIX ERE) not -oP (PCRE) — macOS/BSD grep has no -P, so -P silently
+# matches nothing and the tunnel looks like it "failed" even though it connected.
 PUBLIC_URL=""
-for i in $(seq 1 20); do
+for i in $(seq 1 30); do
     sleep 1
-    PUBLIC_URL=$(grep -oP 'https://[a-z0-9\-]+\.trycloudflare\.com' "$TUNNEL_LOG" 2>/dev/null | head -1 || true)
+    PUBLIC_URL=$(grep -oE 'https://[a-z0-9.-]+\.trycloudflare\.com' "$TUNNEL_LOG" 2>/dev/null | head -1 || true)
     [ -n "$PUBLIC_URL" ] && break
 done
 
@@ -56,11 +59,12 @@ echo "  Public tunnel URL: $PUBLIC_URL"
 
 # 5. Update the Vercel env var so the dashboard uses this tunnel
 echo "[3/3] Updating Vercel NEXT_PUBLIC_API_BASE ..."
-# Remove existing and re-add
+# Remove existing and re-add. The linked project lives in web/, so all vercel commands
+# must run with --cwd "$REPO/web" (the repo root is not a linked Vercel project).
 echo "y" | vercel env rm NEXT_PUBLIC_API_BASE production \
-    --token "$VERCEL_TOKEN" --scope "$VERCEL_SCOPE" --yes 2>/dev/null || true
+    --token "$VERCEL_TOKEN" --scope "$VERCEL_SCOPE" --cwd "$REPO/web" --yes 2>/dev/null || true
 echo "$PUBLIC_URL" | vercel env add NEXT_PUBLIC_API_BASE production \
-    --token "$VERCEL_TOKEN" --scope "$VERCEL_SCOPE" 2>/dev/null
+    --token "$VERCEL_TOKEN" --scope "$VERCEL_SCOPE" --cwd "$REPO/web" 2>/dev/null
 
 # Trigger a new Vercel deploy so the env var takes effect
 vercel deploy --prod \
