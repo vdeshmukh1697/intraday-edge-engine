@@ -7,6 +7,10 @@ places **no live orders**; it paper-trades and alerts.
 - **Live metrics report:** `logs/MORNING_REPORT.md` (auto-generated when the overnight pipeline
   finishes — backfill coverage, ML metrics, backtest results, service status).
 - **Dashboard:** https://web-beta-beige-60.vercel.app (real NSE names + real charts).
+  - New **Paper Trading** tab: records every simulated trade + analytics (equity curve,
+    drawdown, win rate, profit factor, by-strategy/symbol/time-of-day, auto-summary). It's
+    **empty until the live session records trades** — it fills automatically from ~09:15 as the
+    live paper-trader runs (or run `signal-engine replay --demo --persist` to see it with data).
 
 ## What runs automatically today (IST, scheduler is live)
 - **06:00** token renew attempt (portal tokens can't auto-renew — see Token note).
