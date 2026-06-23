@@ -16,6 +16,7 @@ htmlcov/
 # Secrets — never commit
 .env
 *.env
+.env.*
 !.env.example
 
 # Data artifacts (do not commit large/generated data)

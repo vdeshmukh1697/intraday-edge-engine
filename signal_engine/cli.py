@@ -368,6 +368,70 @@ def cmd_live(args) -> int:
     return 0
 
 
+def cmd_renew_token(args) -> int:
+    """Rotate the Dhan 24h access token (RenewToken) and persist it to .env."""
+    cfg = load_config()
+    if not (cfg.env.dhan_client_id and cfg.env.dhan_access_token):
+        print("No Dhan client_id/token in .env to renew.")
+        return 2
+    from signal_engine.brokers.dhan import token_expiry
+    from signal_engine.brokers.dhan_auth import renew_token, update_env_token
+
+    try:
+        new = renew_token(cfg.env.dhan_client_id, cfg.env.dhan_access_token)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Renew failed: {exc}\n(If the token already expired, regenerate it once in "
+              f"the Dhan portal — RenewToken only works on an active token.)")
+        return 1
+    update_env_token(new)
+    print(f"Token renewed and written to .env (previous saved to .env.bak). "
+          f"New expiry (UTC): {token_expiry(new)}")
+    return 0
+
+
+def cmd_backfill(args) -> int:
+    """Bulk-download N years of 1-min bars for the NSE universe from Dhan -> Parquet."""
+    cfg = load_config()
+    if cfg.env.data_source != "dhan":
+        print(f"`backfill` needs Dhan. Set SE_DATA_SOURCE=dhan (currently {cfg.env.data_source!r}).")
+        return 2
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from datetime import datetime
+
+    import pytz
+
+    from signal_engine.data.backfill import backfill_symbol
+    from signal_engine.storage.bars import ParquetBarStore
+    from signal_engine.universe.nse import load_nse_equity_symbols
+
+    broker = build_broker(cfg, day=datetime.now(pytz.timezone("Asia/Kolkata")).date())
+    # Backfill the official NSE-EQ list, restricted to names Dhan can address (has a security_id).
+    eq = load_nse_equity_symbols()
+    symbols = [s for s in eq if broker.instruments.ref(s) is not None]
+    if args.limit:
+        symbols = symbols[: args.limit]
+    store = ParquetBarStore(cfg.env.parquet_dir)
+    print(f"Backfilling {args.years}y of 1m bars for {len(symbols)} symbols "
+          f"({args.workers} workers) -> {cfg.env.parquet_dir}")
+
+    done = total_bars = 0
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        futs = {ex.submit(backfill_symbol, broker, store, s, years=args.years): s
+                for s in symbols}
+        for fut in as_completed(futs):
+            sym = futs[fut]
+            try:
+                total_bars += fut.result()
+            except Exception as exc:  # noqa: BLE001
+                print(f"  {sym}: failed ({exc})")
+            done += 1
+            if done % 25 == 0 or done == len(symbols):
+                print(f"  {done}/{len(symbols)} symbols, {total_bars:,} bars saved")
+    print(f"Backfill complete: {total_bars:,} bars across {len(symbols)} symbols.")
+    return 0
+
+
 def cmd_serve(args) -> int:
     """Run the FastAPI engine API (the backend the Next.js/Vercel dashboard consumes)."""
     try:
@@ -448,6 +512,15 @@ def build_parser() -> argparse.ArgumentParser:
     pl.add_argument("--symbols", help="Comma-separated symbols (default from config watchlist).")
     pl.add_argument("--persist", action="store_true", help="Persist plans/positions to the DB.")
     pl.set_defaults(func=cmd_live)
+
+    prt = sub.add_parser("renew-token", help="Rotate the Dhan 24h access token and save to .env.")
+    prt.set_defaults(func=cmd_renew_token)
+
+    pbf = sub.add_parser("backfill", help="Bulk-download N years of 1m bars (Dhan) to Parquet.")
+    pbf.add_argument("--years", type=int, default=5, help="Years of history (default 5).")
+    pbf.add_argument("--limit", type=int, default=None, help="Cap number of symbols (testing).")
+    pbf.add_argument("--workers", type=int, default=4, help="Concurrent fetchers (<=5 req/s cap).")
+    pbf.set_defaults(func=cmd_backfill)
 
     pv = sub.add_parser("serve", help="Run the FastAPI engine API for the dashboard.")
     pv.add_argument("--host", default="127.0.0.1", help="Bind host (default 127.0.0.1).")

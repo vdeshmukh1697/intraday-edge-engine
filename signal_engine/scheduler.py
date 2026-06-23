@@ -1,17 +1,18 @@
 """Daily orchestration (PLAN §7, §8) — APScheduler jobs for the always-on engine box.
 
 Jobs (IST), all skipped automatically on non-trading days:
+  ~06:00  Dhan token renewal       -> roll the 24h token before market (Dhan source only)
   ~08:30  pre-market briefing      -> alert
+  ~09:15  LIVE intraday feed       -> stream Dhan ticks through the pipeline to close
+                                       (Dhan source only; paper signals + alerts)
   ~15:45  full-NSE universe scan   -> alert top picks (real Yahoo bars, EOD)
-  ~16:10  nightly archive          -> persist the day's real bars (the corpus you
-                                       cannot backfill later)
+  ~16:10  nightly archive          -> persist the day's real bars
 
-Why once-daily and not a 5-minute intraday loop: the free data source (Yahoo Finance)
-is REST and ~15-min delayed — fine for an end-of-day full-universe scan + archive over
-all ~2,000 NSE names, but it cannot be polled live for the whole universe every few
-minutes (PLAN §3.3 — that needs the paid Dhan sharded websocket). For actionable
-*intraday* signals on a small liquid watchlist, use ``signal-engine replay`` live, or
-wire the Dhan feed when subscribed.
+With the paid Dhan feed subscribed, the engine runs a genuine live intraday loop
+(``live_job``) on the watchlist during market hours. The EOD Yahoo scan/archive remain as
+a free, token-independent safety net over the whole ~2,000-name universe. The token renewal
+job keeps the Dhan source alive unattended (Dhan tokens expire every 24h — see
+``brokers/dhan_auth``).
 
 Jobs are thin wrappers around existing functions, each guarded so one failure never kills
 the scheduler. Live order placement is never scheduled (decision-support only).
@@ -19,6 +20,7 @@ the scheduler. Live order placement is never scheduled (decision-support only).
 
 from __future__ import annotations
 
+import os
 from datetime import date
 from typing import Optional
 
@@ -52,6 +54,59 @@ def _nse_universe(cfg: AppConfig, limit: Optional[int] = None) -> NSEUniversePro
     uni = NSEUniverseProvider.build(limit=limit)
     _UNIVERSE_CACHE["entry"] = (key, uni)
     return uni
+
+
+def renew_token_job(cfg: Optional[AppConfig] = None) -> None:
+    """Roll the Dhan 24h access token before market open (Dhan source only).
+
+    Persists the fresh token to .env (with backup) AND to this process's environment so the
+    same-day live/scan jobs pick it up without a restart. No-op for non-Dhan sources.
+    """
+    cfg = load_config()
+    if cfg.env.data_source != "dhan":
+        return
+    try:
+        from signal_engine.brokers.dhan_auth import renew_token, update_env_token
+
+        new = renew_token(cfg.env.dhan_client_id, cfg.env.dhan_access_token)
+        update_env_token(new)
+        os.environ["DHAN_ACCESS_TOKEN"] = new  # so load_config() in later jobs sees it
+        _log.info("Dhan token renewed + persisted (.env + env)")
+    except Exception as exc:  # noqa: BLE001
+        _log.error("renew_token_job failed (regenerate token in the Dhan portal if expired): %s",
+                   exc)
+
+
+def live_job(cfg: Optional[AppConfig] = None) -> None:
+    """Stream the live Dhan feed through the pipeline until market close (Dhan source only).
+
+    Blocks for the trading session (one scheduler worker). Paper signals + alerts only;
+    never places orders. No-op for non-Dhan sources or non-trading days.
+    """
+    cfg = load_config()  # fresh: picks up a token renewed earlier today
+    if cfg.env.data_source != "dhan":
+        _log.info("live_job skipped: SE_DATA_SOURCE is %r, not 'dhan'", cfg.env.data_source)
+        return
+    cal = NSECalendar()
+    if not cal.is_trading_day(_today()):
+        return
+    try:
+        from signal_engine.engine.runner import EngineRunner
+        from signal_engine.factory import build_alerter, build_broker
+        from signal_engine.market.session import MarketSession
+        from signal_engine.strategies.base import create_strategy
+
+        broker = build_broker(cfg, day=_today())
+        strategy = create_strategy(cfg.settings.strategy.active, cfg.settings.strategy.params)
+        session = MarketSession(cfg.settings.market, cal)
+        runner = EngineRunner(cfg, broker, strategy, session, build_alerter(cfg))
+        symbols = cfg.settings.watchlist
+        _log.info("live_job: streaming Dhan feed for %d symbols until close", len(symbols))
+        summary = runner.live(symbols)
+        _log.info("live_job done: %d bars, %d picks, %d paper trades",
+                  summary.bars_processed, len(summary.picks), len(summary.closed))
+    except Exception as exc:  # noqa: BLE001
+        _log.error("live_job failed: %s", exc)
 
 
 def premarket_job(cfg: AppConfig) -> None:
@@ -136,16 +191,26 @@ def archive_job(cfg: AppConfig, limit: Optional[int] = None) -> None:
 def build_scheduler(cfg: AppConfig):
     """Build (but do not start) the scheduler with all jobs registered.
 
-    Schedule (IST): pre-market briefing 08:30, full-NSE scan 15:45 (after close, on
-    ~15-min-delayed Yahoo data), real-bar archive 16:10. Once-daily by design — see the
-    module docstring for why the free Yahoo feed can't drive a live intraday loop.
+    Schedule (IST): token renew 06:00, pre-market briefing 08:30, LIVE Dhan feed 09:15→close,
+    full-NSE Yahoo scan 15:45, real-bar archive 16:10. The live feed runs only when
+    SE_DATA_SOURCE=dhan; the renew/live jobs no-op otherwise, so the same scheduler works on
+    the free Yahoo tier too.
     """
     from apscheduler.schedulers.blocking import BlockingScheduler
     from apscheduler.triggers.cron import CronTrigger
 
     sched = BlockingScheduler(timezone=IST)
+    # Token renewal first thing (before any Dhan job needs it). Daily incl. weekends so the
+    # token never lapses over a long weekend.
+    sched.add_job(renew_token_job, CronTrigger(hour=6, minute=0, timezone=IST),
+                  id="renew_token", replace_existing=True)
     sched.add_job(premarket_job, CronTrigger(hour=8, minute=30, timezone=IST),
                   args=[cfg], id="premarket", replace_existing=True)
+    # Live intraday feed: blocks one worker for the whole session. Generous misfire grace +
+    # coalesce so a slightly late start (e.g. scheduler restart) still launches the session.
+    sched.add_job(live_job, CronTrigger(day_of_week="mon-fri", hour=9, minute=15, timezone=IST),
+                  id="live", replace_existing=True, coalesce=True,
+                  misfire_grace_time=3600, max_instances=1)
     sched.add_job(scan_job, CronTrigger(day_of_week="mon-fri", hour=15, minute=45, timezone=IST),
                   args=[cfg], id="scan", replace_existing=True)
     sched.add_job(archive_job, CronTrigger(day_of_week="mon-fri", hour=16, minute=10, timezone=IST),

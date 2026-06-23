@@ -30,6 +30,27 @@ class ParquetBarStore:
             return None
         return pd.read_parquet(path)
 
+    # --- consolidated history (for the 5y backfill corpus) -----------------
+    # One file per symbol/year instead of per symbol/day: ~10k files & a few GB for the
+    # whole NSE 5y minute corpus, vs ~2.5M tiny files (30x the bytes) for per-session.
+    def _hist_path(self, symbol: str, year: int) -> Path:
+        return self.root / f"symbol={symbol}" / f"year={year}" / "bars.parquet"
+
+    def save_symbol_year(self, symbol: str, year: int, df: pd.DataFrame) -> Path:
+        path = self._hist_path(symbol, year)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(path)
+        return path
+
+    def load_symbol_history(self, symbol: str) -> Optional[pd.DataFrame]:
+        """Concatenate all archived years for a symbol (sorted by time). None if absent."""
+        base = self.root / f"symbol={symbol}"
+        files = sorted(base.glob("year=*/bars.parquet"))
+        if not files:
+            return None
+        frames = [pd.read_parquet(f) for f in files]
+        return pd.concat(frames).sort_index()
+
     def save_bars(self, bars: List[Bar]) -> Optional[Path]:
         if not bars:
             return None

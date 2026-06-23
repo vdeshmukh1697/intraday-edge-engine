@@ -92,9 +92,10 @@ class EngineRunner:
         from signal_engine.obs.logging_setup import get_logger
 
         self.log = get_logger("engine")
-        # enforce_freshness is opt-in: historical replay uses past timestamps, so the
-        # live wall-clock staleness check only makes sense on a live feed.
-        self.enforce_freshness = bool(getattr(cfg.env, "data_source", "mock") == "dhan")
+        # enforce_freshness is opt-in and OFF by default: historical replay/backtest use past
+        # timestamps that would always look "stale" vs wall-clock. Only the live() loop turns
+        # it on, since the staleness fail-safe (PLAN §9.3) only makes sense on a live feed.
+        self.enforce_freshness = False
         self.freshness = FreshnessGuard(max_staleness_seconds=5.0)
         self._errors = 0
 
@@ -242,6 +243,7 @@ class EngineRunner:
         Decision-support only: positions are paper, never live orders.
         """
         ist = pytz.timezone("Asia/Kolkata")
+        self.enforce_freshness = True  # live feed: activate the stale-data fail-safe (§9.3)
         symbols = watchlist or self.cfg.settings.watchlist
         self.broker.connect()
         self.broker.subscribe(symbols)
