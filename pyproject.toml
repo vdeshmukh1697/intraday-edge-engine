@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "intraday-signal-engine"
+version = "0.1.0"
+description = "Capital-agnostic intraday trading signal engine for NSE equities (decision-support only)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "numpy",
+    "pandas",
+    "pydantic>=2",
+    "pyyaml",
+    "pyarrow",
+    "python-dateutil",
+    "pytz",
+]
+
+[project.optional-dependencies]
+dashboard = ["streamlit"]
+dev = ["pytest", "ruff", "mypy"]
+
+[project.scripts]
+signal-engine = "signal_engine.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["signal_engine*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+ignore = ["E501"]  # line length handled by formatter; long config strings allowed
+
+[tool.mypy]
+python_version = "3.9"
+ignore_missing_imports = true
+warn_unused_ignores = false

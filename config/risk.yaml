@@ -1,0 +1,50 @@
+# Risk + cost configuration (capital-agnostic, percentage-based — PLAN §5).
+# The backtester, paper-trader and live engine all read THIS file so the three agree.
+
+risk:
+  # Stop-loss construction (PLAN §5.2)
+  atr_stop_multiple: 1.5        # stop distance = atr_stop_multiple * ATR
+  min_stop_pct: 0.30            # floor on stop distance (% of entry), avoids absurdly tight stops
+  max_stop_pct: 3.0             # cap; wider than this and intraday R:R rarely works
+
+  # Targets / reward
+  target_rr: 1.5                # T1 placed at target_rr * stop distance
+  rr_floor: 1.5                 # reject any plan with R:R below this (PLAN §5.2)
+  second_target_rr: 2.5         # optional T2
+
+  # Edge-after-cost gate (PLAN §5.1): require expected move >= k * break-even cost %
+  edge_cost_multiple: 3.0       # k
+
+  # Time stop (PLAN §5.2)
+  max_hold_minutes: 90
+
+  # Daily guardrails — guidance + health-tracked (PLAN §5.3). Capital-agnostic:
+  # daily_loss_pct is a % of the user's chosen capital, applied to the paper book.
+  daily_loss_pct: 2.0
+  max_trades_per_day: 6
+  max_concurrent_positions: 3
+  per_symbol_cooldown_minutes: 15
+
+costs:
+  # Dhan intraday equity (PLAN §5.4). VERIFY against your contract notes (PROGRESS Q2).
+  brokerage_flat: 20.0          # rupees per executed order
+  brokerage_pct: 0.0003         # 0.03% per order
+  # round-trip brokerage = min(flat, pct*value) per leg, summed over 2 legs
+  stt_pct: 0.00025              # 0.025% on SELL side (intraday equity)
+  exchange_txn_pct: 0.0000297   # NSE transaction charge (~0.00297%)
+  gst_pct: 0.18                 # 18% GST on (brokerage + exchange txn)
+  sebi_pct: 0.000001            # SEBI turnover fee
+  stamp_pct: 0.00003            # stamp duty on BUY side (0.003%)
+
+  # Flat brokerage makes break-even % value-dependent; compute the %-gate at this
+  # notional reference trade value (PLAN §5.4 note). Capital-agnostic proxy.
+  reference_trade_value: 100000.0
+
+slippage:
+  pct_per_side: 0.03            # % slippage applied to entry and exit fills
+
+liquidity:
+  # Tradeable filter (PLAN §4.0). Phase-1 watchlist is pre-vetted; thresholds used by scan lane (Phase 2).
+  min_avg_daily_turnover_cr: 25.0   # crore rupees
+  max_spread_pct: 0.10
+  min_price: 20.0                   # penny-stock floor

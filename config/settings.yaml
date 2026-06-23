@@ -1,0 +1,35 @@
+# Engine settings (non-secret). Secrets live in .env. See signal_engine/config.py.
+
+market:
+  timezone: "Asia/Kolkata"
+  pre_open_start: "09:00"
+  session_open: "09:15"
+  no_new_entry_after: "15:00"   # stop generating new entry signals
+  square_off: "15:20"           # force-close all paper positions
+  session_close: "15:30"
+
+# Phase-1 fast-lane watchlist (small, liquid). Full-universe scan is Phase 2.
+watchlist:
+  - "RELIANCE"
+  - "HDFCBANK"
+  - "INFY"
+  - "TCS"
+  - "ICICIBANK"
+
+ingestion:
+  base_timeframe_minutes: 1
+  rollup_timeframes: [5, 15]
+
+strategy:
+  active: "vwap_ema_adx"
+  params:
+    ema_fast: 9
+    ema_slow: 21
+    rsi_period: 14
+    adx_period: 14
+    adx_min: 20            # gate: suppress trend trades below this
+    atr_period: 14
+    rvol_lookback: 20
+    rvol_min: 1.2          # volume confirmation
+    confidence_threshold: 60
+    opening_range_minutes: 15

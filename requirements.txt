@@ -1,0 +1,16 @@
+# Phase 0–1 runtime dependencies (pinned loosely; lock as the project matures).
+numpy
+pandas
+pydantic>=2
+pyyaml
+pyarrow
+python-dateutil
+pytz
+
+# Dashboard (optional; only needed to run the Streamlit cockpit)
+# streamlit
+
+# Dev / test
+pytest
+ruff
+# mypy
