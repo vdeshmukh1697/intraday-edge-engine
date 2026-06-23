@@ -5,9 +5,9 @@ from datetime import datetime, timedelta
 
 import pytz
 
-from signal_engine.domain.enums import Direction, ExitReason, PositionStatus
-from signal_engine.domain.models import TradePlan, PaperPosition
 from signal_engine.backtest.metrics import BacktestMetrics, compute_metrics
+from signal_engine.domain.enums import Direction, ExitReason, PositionStatus
+from signal_engine.domain.models import PaperPosition, TradePlan
 
 IST = pytz.timezone("Asia/Kolkata")
 

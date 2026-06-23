@@ -153,6 +153,62 @@ def cmd_scan(args) -> int:
     return 0
 
 
+def _run_backtest(args):
+    cfg = load_config()
+    start = _parse_date(args.start) if args.start else date(2025, 6, 2)
+    symbols = args.symbols.split(",") if args.symbols else cfg.settings.watchlist
+    from signal_engine.backtest.engine import run_backtest
+
+    print(f"Backtesting {symbols} over {args.days} trading days from {start} (seed={args.seed})...\n")
+    return cfg, run_backtest(cfg, symbols, start, args.days, seed=args.seed)
+
+
+def cmd_backtest(args) -> int:
+    """Multi-day event-driven backtest over the shared core (PLAN §6)."""
+    cfg, res = _run_backtest(args)
+    m = res.metrics
+    pf = "inf" if m.profit_factor == float("inf") else f"{m.profit_factor:.2f}"
+    print("=== BACKTEST METRICS (net of costs) ===")
+    print(f"days            : {len(res.days)}   picks: {res.picks}   trades: {m.trades}")
+    print(f"win rate        : {m.win_rate:.1f}%   (W {m.wins} / L {m.losses})")
+    print(f"profit factor   : {pf}")
+    print(f"expectancy/trade: {m.expectancy_pct:+.3f}%   total net: {m.total_net_pct:+.2f}%")
+    print(f"avg win / loss  : {m.avg_win_pct:+.3f}% / {m.avg_loss_pct:+.3f}%")
+    print(f"max drawdown    : {m.max_drawdown_pct:.2f}%  ({m.max_drawdown_days} day(s))")
+    print(f"Sharpe / Sortino: {m.sharpe:.2f} / {m.sortino:.2f}   avg hold: {m.avg_hold_minutes:.0f} min")
+    print(f"\nStrategy Health : {res.health.overall:.0f}/100 [{res.health.status.upper()}]")
+    print("\n" + _DISCLAIMER)
+    return 0
+
+
+def cmd_health(args) -> int:
+    """Backtest, then show the Strategy Health breakdown + fire a degradation alert if unhealthy."""
+    cfg, res = _run_backtest(args)
+    h = res.health
+    print("=== STRATEGY HEALTH (PLAN §6.6) ===")
+    print(f"overall         : {h.overall:.0f}/100  [{h.status.upper()}]   (window {h.window_trades} trades)")
+    print(f"hit rate        : {h.hit_rate:.1f}%")
+    pf = "inf" if h.profit_factor == float("inf") else f"{h.profit_factor:.2f}"
+    print(f"profit factor   : {pf}")
+    print(f"expectancy      : {h.expectancy_pct:+.3f}%")
+    print(f"calibration err : {h.calibration_error:.3f} (Brier; lower=better)")
+    print(f"max drawdown    : {h.max_drawdown_pct:.2f}%")
+    print("components (0-1): " + ", ".join(f"{k}={v:.2f}" for k, v in h.components.items()))
+
+    from signal_engine.health.scorer import detect_degradation
+
+    alert = detect_degradation(h, threshold=args.threshold)
+    if alert:
+        from signal_engine.factory import build_alerter
+
+        build_alerter(cfg).send(alert, level="alert")
+        print(f"\n⚠️  DEGRADATION ALERT FIRED: {alert}")
+    else:
+        print(f"\n✓ Health above threshold ({args.threshold}); no alert.")
+    print("\n" + _DISCLAIMER)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="signal-engine", description="Intraday signal engine (decision-support only).")
     sub = p.add_subparsers(dest="command", required=True)
@@ -172,6 +228,21 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--seed", type=int, default=42, help="Synthetic data seed.")
     ps.add_argument("--top", type=int, default=20, help="Leaderboard size (Top-N).")
     ps.set_defaults(func=cmd_scan)
+
+    pb = sub.add_parser("backtest", help="Multi-day event-driven backtest + metrics.")
+    pb.add_argument("--start", help="Start date YYYY-MM-DD (default 2025-06-02).")
+    pb.add_argument("--days", type=int, default=10, help="Number of trading days.")
+    pb.add_argument("--symbols", help="Comma-separated symbols (default config watchlist).")
+    pb.add_argument("--seed", type=int, default=42, help="Synthetic data seed.")
+    pb.set_defaults(func=cmd_backtest)
+
+    ph = sub.add_parser("health", help="Backtest then show Strategy Health + degradation alert.")
+    ph.add_argument("--start", help="Start date YYYY-MM-DD (default 2025-06-02).")
+    ph.add_argument("--days", type=int, default=10, help="Number of trading days.")
+    ph.add_argument("--symbols", help="Comma-separated symbols (default config watchlist).")
+    ph.add_argument("--seed", type=int, default=42, help="Synthetic data seed.")
+    ph.add_argument("--threshold", type=float, default=50.0, help="Health alert threshold.")
+    ph.set_defaults(func=cmd_health)
 
     pi = sub.add_parser("info", help="Print config + safety summary.")
     pi.set_defaults(func=cmd_info)

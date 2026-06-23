@@ -17,7 +17,6 @@ import pytz
 from signal_engine.domain.enums import Direction, ExitReason, PositionStatus
 from signal_engine.domain.models import PaperPosition, TradePlan
 from signal_engine.health.scorer import (
-    HealthScore,
     compute_health,
     detect_degradation,
 )

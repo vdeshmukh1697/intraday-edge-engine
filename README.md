@@ -121,14 +121,26 @@ not just regression-locked.
 
 ---
 
-## Backtesting
+## Backtesting & Strategy Health (Phase 3)
 
-A full multi-day, event-driven backtester with metrics (Sharpe, max drawdown, profit
-factor) and walk-forward validation is **Phase 3** (see PLAN.md §6, PROGRESS.md) and is
-not yet built. In the meantime, `replay` is effectively a **single-session backtest**: it
-drives historical/synthetic bars through the shared Indicator → Signal → Risk → Paper-trade
-core and reports net-of-cost results. The core is deliberately shared so backtest and live
-behaviour cannot diverge (PLAN.md §2).
+A multi-day, event-driven backtester that replays synthetic sessions through the **same**
+Indicator → Signal → Risk → Paper-trade core as the live engine (so backtest and live
+cannot silently diverge, and closed-bar/next-bar discipline is inherited — PLAN.md §2/§6):
+
+```bash
+./run.sh backtest --start 2025-06-02 --days 10        # metrics + health summary
+./run.sh health   --start 2025-06-02 --days 10        # health breakdown + degradation alert
+```
+
+`backtest` reports net-of-cost metrics: win rate, profit factor, expectancy, max drawdown,
+Sharpe/Sortino, equity curve (§6.2). `health` computes the **Strategy Health Score** (§6.6) —
+a rolling composite of hit-rate, profit factor, expectancy, **confidence calibration (Brier)**,
+and drawdown — and **fires an alert via the configured Alerter if the score falls below the
+threshold** (the A10 "system conscience"). Walk-forward / time-split helpers
+(`signal_engine.backtest.walkforward`) support train/val/test discipline (§6.4).
+
+> The metrics math is **hand-verified** (`tests/test_metrics.py`) and was independently
+> re-checked against a separate worked example during the build.
 
 ---
 

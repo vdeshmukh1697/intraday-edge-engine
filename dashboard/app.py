@@ -33,22 +33,26 @@ st.caption(
 cfg = load_config()
 
 with st.sidebar:
-    mode = st.radio("Mode", ["Scan (leaderboard)", "Replay (paper book)"])
+    mode = st.radio("Mode", ["Scan (leaderboard)", "Replay (paper book)", "Backtest + Health"])
     st.divider()
     day = st.date_input("Trading day", value=date(2025, 6, 23))
     seed = st.number_input("Seed", value=7, step=1)
+    run, run_scan_btn, run_bt_btn, demo, symbols = False, False, False, False, []
     if mode.startswith("Scan"):
         st.header("Scan controls")
         universe_n = st.number_input("Universe size", value=2000, step=100)
         top_n = st.number_input("Top N", value=20, step=5)
         run_scan_btn = st.button("Run scan", type="primary")
-        run, demo, symbols = False, False, []
-    else:
+    elif mode.startswith("Replay"):
         st.header("Replay controls")
         demo = st.checkbox("Demo regimes (force setups)", value=True)
         symbols = st.multiselect("Symbols", cfg.settings.watchlist, default=cfg.settings.watchlist)
         run = st.button("Run replay", type="primary")
-        run_scan_btn = False
+    else:
+        st.header("Backtest controls")
+        bt_start = st.date_input("Start date", value=date(2025, 6, 2))
+        bt_days = st.number_input("Trading days", value=10, step=1)
+        run_bt_btn = st.button("Run backtest", type="primary")
 
 
 @st.cache_data(show_spinner=True)
@@ -161,5 +165,45 @@ if run_scan_btn:
     else:
         st.info("No setups passed the filters/gates. Try another seed.")
 
-if not run and not run_scan_btn:
+@st.cache_data(show_spinner=True)
+def _backtest(start_iso: str, days: int, seed: int):
+    from signal_engine.backtest.engine import run_backtest
+
+    res = run_backtest(cfg, cfg.settings.watchlist, date.fromisoformat(start_iso),
+                       int(days), seed=int(seed))
+    m, h = res.metrics, res.health
+    metrics = {
+        "trades": m.trades, "win_rate": m.win_rate,
+        "profit_factor": (None if m.profit_factor == float("inf") else round(m.profit_factor, 2)),
+        "expectancy_pct": m.expectancy_pct, "total_net_pct": m.total_net_pct,
+        "max_dd_pct": m.max_drawdown_pct, "sharpe": round(m.sharpe, 2),
+    }
+    equity = list(m.equity_curve)
+    health = {"overall": h.overall, "status": h.status, "hit_rate": h.hit_rate,
+              "calibration_error": h.calibration_error, "components": h.components}
+    return metrics, equity, health
+
+
+if run_bt_btn:
+    metrics, equity, health = _backtest(bt_start.isoformat(), int(bt_days), int(seed))
+    badge = {"green": "🟢", "amber": "🟡", "red": "🔴"}.get(health["status"], "⚪")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Trades", metrics["trades"])
+    c2.metric("Win rate", f"{metrics['win_rate']:.0f}%")
+    c3.metric("Net P&L (Σ%)", f"{metrics['total_net_pct']:+.2f}%")
+    c4.metric("Strategy Health", f"{badge} {health['overall']:.0f}/100")
+
+    st.subheader("📈 Equity curve (cumulative daily %, net of costs)")
+    if equity:
+        st.line_chart(pd.DataFrame({"equity_%": equity}))
+
+    st.subheader("📊 Backtest metrics")
+    st.dataframe(pd.DataFrame([metrics]), use_container_width=True, hide_index=True)
+
+    st.subheader(f"🩺 Strategy Health — {badge} {health['status'].upper()}")
+    st.caption(f"hit rate {health['hit_rate']:.0f}% · calibration (Brier) "
+               f"{health['calibration_error']:.3f} (lower=better)")
+    st.dataframe(pd.DataFrame([health["components"]]), use_container_width=True, hide_index=True)
+
+if not run and not run_scan_btn and not run_bt_btn:
     st.info("Pick a **Mode** in the sidebar, set controls, and click the run button.")
