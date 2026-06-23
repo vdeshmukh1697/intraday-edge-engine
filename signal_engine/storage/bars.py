@@ -52,20 +52,33 @@ class ParquetBarStore:
         return pd.concat(frames).sort_index()
 
     def load_latest_session(self, symbol: str) -> Optional[pd.DataFrame]:
-        """The most recent single trading day of bars — reads only the newest year file.
+        """The most recent single trading day of bars for a symbol.
 
-        Cheap (one ~1 MB file, not the whole multi-year history), so it scales to scanning the
-        whole archived universe per request.
+        Considers BOTH archive layouts so the dashboard stays current: the consolidated
+        ``year=YYYY/`` files from the 5-year backfill, and the per-session ``date=YYYY-MM-DD/``
+        files written by the nightly/morning archive job. Returns the newest day across both.
+        Cheap — reads at most the newest year file + the newest date file.
         """
         base = self.root / f"symbol={symbol}"
-        files = sorted(base.glob("year=*/bars.parquet"))
-        if not files:
+        candidates = []
+        year_files = sorted(base.glob("year=*/bars.parquet"))
+        if year_files:
+            candidates.append(year_files[-1])
+        date_files = sorted(base.glob("date=*/bars.parquet"))
+        if date_files:
+            candidates.append(date_files[-1])
+        if not candidates:
             return None
-        df = pd.read_parquet(files[-1])
-        if df.empty:
-            return None
-        last_day = df.index.max().normalize()
-        return df[df.index.normalize() == last_day]
+        best = None
+        for f in candidates:
+            df = pd.read_parquet(f)
+            if df.empty:
+                continue
+            day = df.index.max().normalize()
+            session = df[df.index.normalize() == day]
+            if best is None or day > best[0]:
+                best = (day, session)
+        return None if best is None else best[1]
 
     def list_symbols(self) -> List[str]:
         """All symbols present in the archive (by directory)."""

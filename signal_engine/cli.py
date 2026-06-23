@@ -285,13 +285,38 @@ def cmd_train(args) -> int:
     """Train the ML signal scorer on labeled synthetic trades; compare vs the rules baseline."""
     cfg = load_config()
     start = _parse_date(args.start) if args.start else date(2025, 6, 2)
-    symbols = args.symbols.split(",") if args.symbols else cfg.settings.watchlist
-    from signal_engine.ml.train import train_model
 
-    print(f"Building dataset + training over {args.days} days from {start} "
-          f"({len(symbols)} symbols, seed={args.seed})...\n")
-    model, rep = train_model(cfg, symbols, start, args.days, seed=args.seed,
-                             test_frac=args.test_frac, model_path=args.out)
+    if getattr(args, "source", "synthetic") == "archive":
+        # Train on the REAL backfilled 5-year corpus (the most-liquid archived names).
+        from signal_engine.ml.train import train_model_from_archive
+        from signal_engine.obs.logging_setup import get_logger
+        from signal_engine.storage.bars import ParquetBarStore
+
+        store = ParquetBarStore(cfg.env.parquet_dir)
+        if args.symbols:
+            syms = args.symbols.split(",")
+        else:
+            # Default to the most-liquid archived names (by latest-session turnover).
+            ranked = []
+            for s in store.list_symbols():
+                d = store.load_latest_session(s)
+                if d is not None and not d.empty:
+                    ranked.append((float((d["close"] * d["volume"]).sum()), s))
+            ranked.sort(reverse=True)
+            syms = [s for _, s in ranked[: args.max_symbols]]
+        print(f"Training on REAL archive: {len(syms)} symbols, stride={args.stride}, "
+              f"max_samples={args.max_samples}...\n")
+        model, rep = train_model_from_archive(
+            cfg, store, syms, stride=args.stride, max_samples=args.max_samples,
+            test_frac=args.test_frac, model_path=args.out, log=get_logger("train"))
+    else:
+        symbols = args.symbols.split(",") if args.symbols else cfg.settings.watchlist
+        from signal_engine.ml.train import train_model
+
+        print(f"Building dataset + training over {args.days} days from {start} "
+              f"({len(symbols)} symbols, seed={args.seed})...\n")
+        model, rep = train_model(cfg, symbols, start, args.days, seed=args.seed,
+                                 test_frac=args.test_frac, model_path=args.out)
     if model is None:
         print(f"Too few samples ({rep.n_samples}); widen --days/--symbols.")
         return 2
@@ -474,6 +499,13 @@ def build_parser() -> argparse.ArgumentParser:
     pt.add_argument("--seed", type=int, default=42, help="Synthetic data seed.")
     pt.add_argument("--test-frac", type=float, default=0.3, help="Out-of-sample fraction.")
     pt.add_argument("--out", default="data/models/signal_model.json", help="Model output path.")
+    pt.add_argument("--source", choices=["synthetic", "archive"], default="synthetic",
+                    help="'archive' trains on the real backfilled 5-year corpus.")
+    pt.add_argument("--stride", type=int, default=2, help="Bar stride for archive training.")
+    pt.add_argument("--max-symbols", type=int, default=400,
+                    help="Archive: train on the N most-liquid names (default 400).")
+    pt.add_argument("--max-samples", type=int, default=1500000,
+                    help="Cap labeled samples (bounds an archive run).")
     pt.set_defaults(func=cmd_train)
 
     pn = sub.add_parser("news", help="Preview the day's (synthetic) news headlines.")

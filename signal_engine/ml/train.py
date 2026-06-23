@@ -16,7 +16,7 @@ from signal_engine.backtest.engine import trading_days
 from signal_engine.config import AppConfig
 from signal_engine.market.calendar import NSECalendar
 from signal_engine.ml.base import FEATURE_COLUMNS, MLModel
-from signal_engine.ml.dataset import build_dataset
+from signal_engine.ml.dataset import Dataset, build_dataset, build_dataset_from_archive
 from signal_engine.ml.evaluate import compare
 from signal_engine.ml.model import default_model
 
@@ -49,6 +49,16 @@ def train_model(
 ) -> Tuple[Optional[MLModel], TrainReport]:
     days = trading_days(start, n_days, NSECalendar())
     ds = build_dataset(cfg, symbols, days, seed=seed)
+    return _train_on_dataset(ds, test_frac, model_path, min_samples)
+
+
+def _train_on_dataset(
+    ds: Dataset,
+    test_frac: float = 0.3,
+    model_path: Optional[str] = DEFAULT_MODEL_PATH,
+    min_samples: int = 50,
+) -> Tuple[Optional[MLModel], TrainReport]:
+    """Chronological out-of-sample split -> fit -> compare vs the rules baseline -> save."""
     n = len(ds)
     if n < min_samples:
         return None, TrainReport(n_samples=n, n_train=0, n_test=0, base_rate=0.0)
@@ -69,7 +79,7 @@ def train_model(
         Path(model_path).parent.mkdir(parents=True, exist_ok=True)
         model.save(model_path)
 
-    report = TrainReport(
+    return model, TrainReport(
         n_samples=n, n_train=n_train, n_test=len(yte),
         base_rate=round(float(ds.y.mean()), 4),
         ml=comp["ml"], rules=comp["baseline"],
@@ -77,4 +87,20 @@ def train_model(
         importances={k: round(v, 4) for k, v in importances.items()},
         model_path=model_path,
     )
-    return model, report
+
+
+def train_model_from_archive(
+    cfg: AppConfig,
+    store,
+    symbols: List[str],
+    stride: int = 2,
+    max_samples: Optional[int] = 200_000,
+    test_frac: float = 0.3,
+    model_path: Optional[str] = DEFAULT_MODEL_PATH,
+    min_samples: int = 200,
+    log=None,
+) -> Tuple[Optional[MLModel], TrainReport]:
+    """Train on REAL backfilled bars (the 5-year corpus) instead of synthetic sessions."""
+    ds = build_dataset_from_archive(cfg, store, symbols, stride=stride,
+                                    max_samples=max_samples, log=log)
+    return _train_on_dataset(ds, test_frac, model_path, min_samples)

@@ -204,6 +204,11 @@ def build_scheduler(cfg: AppConfig):
     # token never lapses over a long weekend.
     sched.add_job(renew_token_job, CronTrigger(hour=6, minute=0, timezone=IST),
                   id="renew_token", replace_existing=True)
+    # Morning data gather: pull the prior session's bars for the whole NSE universe so the
+    # leaderboard/ML use yesterday's complete data before the 08:30 briefing (and today's open).
+    sched.add_job(archive_job, CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone=IST),
+                  args=[cfg], id="archive_morning", replace_existing=True,
+                  misfire_grace_time=3600, coalesce=True)
     sched.add_job(premarket_job, CronTrigger(hour=8, minute=30, timezone=IST),
                   args=[cfg], id="premarket", replace_existing=True)
     # Live intraday feed: blocks one worker for the whole session. Generous misfire grace +

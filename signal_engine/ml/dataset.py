@@ -104,6 +104,37 @@ def _label(df, entry_idx: int, direction: Direction, stop: float, target: float,
     return 0  # never hit target within the window -> not a "good trade"
 
 
+def _session_samples(df, sym, strategy, risk, cost, params, max_hold, min_bars, stride,
+                     raws: List[dict], labels: List[int], confs: List[float]) -> None:
+    """Extract labeled signal samples from ONE session df, appending in place.
+
+    Shared by the synthetic and real-archive builders so both label trades with the exact
+    same point-in-time features + pessimistic first-touch rule the paper-trader uses.
+    """
+    if df is None or len(df) < min_bars + 2:
+        return
+    fr = _session_feature_frame(df, params)
+    ts_index = df.index
+    for t in range(min_bars, len(df) - 1, stride):
+        raw = _raw_at(fr, t)
+        if raw["atr"] != raw["atr"] or raw["adx"] != raw["adx"]:  # NaN guard
+            continue
+        ctx = StrategyContext(symbol=sym, ts=ts_index[t].to_pydatetime(),
+                              features=raw, bars=df.iloc[: t + 1], params=params)
+        signal = strategy.on_bar(ctx)
+        if signal is None:
+            continue
+        plan = risk.build_trade_plan(signal, raw, cost)
+        if plan is None:
+            continue
+        label = _label(df, t, plan.direction, plan.stop_loss, plan.t1, max_hold)
+        if label is None:
+            continue
+        raws.append(raw)
+        labels.append(label)
+        confs.append(signal.confidence / 100.0)
+
+
 def build_dataset(
     cfg: AppConfig,
     symbols: List[str],
@@ -127,27 +158,53 @@ def build_dataset(
             regime = _REGIMES[(di + si) % len(_REGIMES)]
             df = generate_session(sym, day, start_price=1000.0 + 50 * si,
                                   seed=seed + di * 100 + si, regime=regime)
-            fr = _session_feature_frame(df, params)
-            ts_index = df.index
-            # leave room for at least one forward bar for labelling
-            for t in range(min_bars, len(df) - 1, stride):
-                raw = _raw_at(fr, t)
-                if raw["atr"] != raw["atr"] or raw["adx"] != raw["adx"]:  # NaN guard
-                    continue
-                ctx = StrategyContext(symbol=sym, ts=ts_index[t].to_pydatetime(),
-                                      features=raw, bars=df.iloc[: t + 1], params=params)
-                signal = strategy.on_bar(ctx)
-                if signal is None:
-                    continue
-                plan = risk.build_trade_plan(signal, raw, cost)
-                if plan is None:
-                    continue
-                label = _label(df, t, plan.direction, plan.stop_loss, plan.t1, max_hold)
-                if label is None:
-                    continue
-                raws.append(raw)
-                labels.append(label)
-                confs.append(signal.confidence / 100.0)
+            _session_samples(df, sym, strategy, risk, cost, params, max_hold, min_bars,
+                             stride, raws, labels, confs)
+
+    X = build_matrix(raws)
+    return Dataset(X=X, y=np.array(labels, dtype=int),
+                   rules_conf=np.array(confs, dtype=float), raws=raws)
+
+
+def build_dataset_from_archive(
+    cfg: AppConfig,
+    store,
+    symbols: List[str],
+    stride: int = 2,
+    max_samples: Optional[int] = None,
+    progress_every: int = 100,
+    log=None,
+) -> Dataset:
+    """Build the labeled dataset from the REAL backfilled Parquet corpus (PLAN §4.7).
+
+    Splits each symbol's multi-year history into per-day sessions and runs the same
+    signal->plan->first-touch labeling as the synthetic builder. Sessions are processed
+    oldest-first so the chronological train/test split stays out-of-sample. Stops once
+    ``max_samples`` labeled signals are gathered, bounding an overnight run.
+    """
+    params = dict(cfg.settings.strategy.params)
+    strategy = create_strategy(cfg.settings.strategy.active, params)
+    risk = RiskManager(cfg.risk.risk)
+    cost = CostModel(cfg.risk.costs)
+    max_hold = int(cfg.risk.risk.max_hold_minutes)
+    min_bars = 35
+
+    raws: List[dict] = []
+    labels: List[int] = []
+    confs: List[float] = []
+
+    for i, sym in enumerate(symbols, 1):
+        hist = store.load_symbol_history(sym)
+        if hist is not None and not hist.empty:
+            for _day, df in hist.groupby(hist.index.normalize()):  # one session/day, oldest first
+                _session_samples(df, sym, strategy, risk, cost, params, max_hold, min_bars,
+                                 stride, raws, labels, confs)
+        if log and (i % progress_every == 0 or i == len(symbols)):
+            log.info("ml dataset: %d/%d symbols, %d labeled signals", i, len(symbols), len(labels))
+        if max_samples and len(labels) >= max_samples:
+            if log:
+                log.info("ml dataset: hit max_samples=%d at symbol %d/%d", max_samples, i, len(symbols))
+            break
 
     X = build_matrix(raws)
     return Dataset(X=X, y=np.array(labels, dtype=int),
