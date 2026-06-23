@@ -50,6 +50,13 @@ def backfill_symbol(
     """Fetch ``years`` of 1-min bars for one symbol and store them per year. Returns bars saved."""
     end = end or datetime.now(IST).date()
     start_floor = end - timedelta(days=int(years * 365.25))
+
+    # Symbol-level skip: if the two most recent years are already on disk, treat the symbol as
+    # backfilled and don't re-fetch any windows. Without this, a resume re-fetches every
+    # already-complete symbol (only the *save* was skipped before), wasting the rate budget.
+    if skip_existing and all(store._hist_path(symbol, y).exists() for y in (end.year, end.year - 1)):
+        return 0
+
     by_year: dict = {}
 
     from signal_engine.brokers.dhan import DhanRateLimitError
