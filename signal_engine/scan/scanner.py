@@ -39,6 +39,7 @@ class ScanResult:
     vetoed: int = 0            # risk layer rejected (R:R / edge-after-cost)
     news_vetoed: int = 0       # news overlay vetoed / event-guarded a signal
     candidates: int = 0        # surfaced trade plans (pre-Top-N)
+    ml_confidence: Dict[str, float] = field(default_factory=dict)  # shadow ML conf per symbol
 
 
 class Scanner:
@@ -51,6 +52,7 @@ class Scanner:
         liquidity_filter: LiquidityCostFilter,
         state_store: Optional[StateStore] = None,
         news_overlay=None,
+        ml_scorer=None,
     ):
         self.params = params
         self.strategy = strategy
@@ -59,6 +61,7 @@ class Scanner:
         self.filter = liquidity_filter
         self.state = state_store
         self.news_overlay = news_overlay
+        self.ml_scorer = ml_scorer  # SHADOW only — never changes ranking decisions
 
     def scan(
         self,
@@ -112,6 +115,12 @@ class Scanner:
             if plan is None:
                 result.vetoed += 1
                 continue
+
+            # SHADOW ML: record an ML confidence alongside rules — does NOT change ranking.
+            if self.ml_scorer is not None:
+                from signal_engine.ml.features import vectorize
+
+                result.ml_confidence[meta.symbol] = self.ml_scorer.score_one(vectorize(features))
 
             candidates.append((plan, meta))
 

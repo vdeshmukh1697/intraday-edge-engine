@@ -40,6 +40,8 @@ def run_scan(
     seed: int = 42,
     top_n: int = 20,
     with_news: bool = True,
+    with_ml: bool = False,
+    model_path: Optional[str] = None,
 ) -> ScanResult:
     cost_model = CostModel(cfg.risk.costs)
     liquidity_filter = LiquidityCostFilter(cfg.risk.liquidity, cost_model)
@@ -78,6 +80,20 @@ def run_scan(
         }
         news_overlay = NewsOverlay()
 
+    # 3b) Optional SHADOW ML scorer (loads a trained model if present; never changes ranking).
+    ml_scorer = None
+    if with_ml:
+        from pathlib import Path
+
+        from signal_engine.ml.scorer import MLScorer
+        from signal_engine.ml.train import DEFAULT_MODEL_PATH
+
+        path = model_path or DEFAULT_MODEL_PATH
+        if Path(path).exists():
+            from signal_engine.ml.model import LogisticModel
+
+            ml_scorer = MLScorer(LogisticModel.load(path))
+
     # 4) Scan + rank.
     strategy = create_strategy(cfg.settings.strategy.active, cfg.settings.strategy.params)
     scanner = Scanner(
@@ -88,6 +104,7 @@ def run_scan(
         liquidity_filter=liquidity_filter,
         state_store=InMemoryStateStore(),
         news_overlay=news_overlay,
+        ml_scorer=ml_scorer,
     )
     result = scanner.scan(survivors, histories, top_n=top_n, news_features=news_features)
     result.universe_size = len(metas)  # report against the FULL universe, not just survivors

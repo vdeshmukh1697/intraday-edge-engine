@@ -123,11 +123,12 @@ def cmd_scan(args) -> int:
     from signal_engine.universe.mock import MockUniverseProvider
 
     universe = MockUniverseProvider(n=args.universe, seed=args.seed)
-    kwargs = dict(seed=args.seed, top_n=args.top, with_news=not args.no_news)
+    kwargs = dict(seed=args.seed, top_n=args.top, with_news=not args.no_news, with_ml=args.ml)
     if as_of is not None:
         kwargs["as_of"] = as_of
     print(f"Scanning {args.universe}-symbol synthetic NSE universe for {day} "
-          f"(as-of {args.as_of or '11:00'}, news={'off' if args.no_news else 'on'})...\n")
+          f"(as-of {args.as_of or '11:00'}, news={'off' if args.no_news else 'on'}, "
+          f"ml={'shadow' if args.ml else 'off'})...\n")
     result = run_scan(cfg, universe, day, **kwargs)
 
     print("=== SCAN STATS ===")
@@ -144,12 +145,16 @@ def cmd_scan(args) -> int:
         print("  (no setups passed the filters/gates for these settings — try --seed)")
     for e in result.leaderboard:
         p = e.plan
+        ml = result.ml_confidence.get(p.symbol)
+        ml_str = f" ML {ml:.0f}" if ml is not None else ""
         print(
             f"  #{e.rank:<2d} {p.symbol:9s} {p.direction.value:5s} score {e.score:5.1f} "
             f"| entry {p.entry:8.2f} SL -{p.stop_pct:.2f}% T1 +{p.target_pcts[0]:.2f}% "
-            f"R:R {p.risk_reward:.2f} conf {p.confidence:.0f} | {e.sector} "
+            f"R:R {p.risk_reward:.2f} conf {p.confidence:.0f}{ml_str} | {e.sector} "
             f"₹{e.turnover_cr:.0f}cr | {', '.join(p.reasons)}"
         )
+    if args.ml and not result.ml_confidence:
+        print("  (no trained model found — run `train` first to enable shadow ML)")
     print("\n" + _DISCLAIMER)
     return 0
 
@@ -270,6 +275,36 @@ def cmd_premarket(args) -> int:
     return 0
 
 
+def cmd_train(args) -> int:
+    """Train the ML signal scorer on labeled synthetic trades; compare vs the rules baseline."""
+    cfg = load_config()
+    start = _parse_date(args.start) if args.start else date(2025, 6, 2)
+    symbols = args.symbols.split(",") if args.symbols else cfg.settings.watchlist
+    from signal_engine.ml.train import train_model
+
+    print(f"Building dataset + training over {args.days} days from {start} "
+          f"({len(symbols)} symbols, seed={args.seed})...\n")
+    model, rep = train_model(cfg, symbols, start, args.days, seed=args.seed,
+                             test_frac=args.test_frac, model_path=args.out)
+    if model is None:
+        print(f"Too few samples ({rep.n_samples}); widen --days/--symbols.")
+        return 2
+    print("=== TRAINING REPORT (LightGBM optional; numpy logistic default) ===")
+    print(f"samples        : {rep.n_samples}  (train {rep.n_train} / test {rep.n_test})")
+    print(f"base rate (won): {rep.base_rate:.3f}")
+    print(f"ML    out-of-sample: acc {rep.ml['accuracy']:.3f}  AUC {rep.ml['auc']:.3f}  brier {rep.ml['brier']:.3f}")
+    print(f"rules out-of-sample: acc {rep.rules['accuracy']:.3f}  AUC {rep.rules['auc']:.3f}  brier {rep.rules['brier']:.3f}")
+    verdict = "ML BEATS rules" if (rep.auc_gain > 0 and rep.brier_gain > 0) else "ML does NOT clearly beat rules"
+    print(f"AUC gain {rep.auc_gain:+.3f}  Brier gain {rep.brier_gain:+.3f}  ->  {verdict}")
+    print("top features   : " + ", ".join(
+        f"{k} {v:.2f}" for k, v in sorted(rep.importances.items(), key=lambda kv: -kv[1])[:5]))
+    print(f"\nModel saved to {rep.model_path}.  Use `scan --ml` to score in SHADOW mode.")
+    print("Note: ML stays shadow-only until it beats rules out-of-sample AND in forward "
+          "paper-trading (PLAN §4.7/§8). It does not change live decisions.")
+    print("\n" + _DISCLAIMER)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="signal-engine", description="Intraday signal engine (decision-support only).")
     sub = p.add_subparsers(dest="command", required=True)
@@ -289,7 +324,17 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--seed", type=int, default=42, help="Synthetic data seed.")
     ps.add_argument("--top", type=int, default=20, help="Leaderboard size (Top-N).")
     ps.add_argument("--no-news", action="store_true", help="Disable the news overlay.")
+    ps.add_argument("--ml", action="store_true", help="Show shadow ML confidence (needs a trained model).")
     ps.set_defaults(func=cmd_scan)
+
+    pt = sub.add_parser("train", help="Train the ML signal scorer; compare vs the rules baseline.")
+    pt.add_argument("--start", help="Start date YYYY-MM-DD (default 2025-06-02).")
+    pt.add_argument("--days", type=int, default=20, help="Trading days of data to build.")
+    pt.add_argument("--symbols", help="Comma-separated symbols (default config watchlist).")
+    pt.add_argument("--seed", type=int, default=42, help="Synthetic data seed.")
+    pt.add_argument("--test-frac", type=float, default=0.3, help="Out-of-sample fraction.")
+    pt.add_argument("--out", default="data/models/signal_model.json", help="Model output path.")
+    pt.set_defaults(func=cmd_train)
 
     pn = sub.add_parser("news", help="Preview the day's (synthetic) news headlines.")
     pn.add_argument("--date", help="Trading day YYYY-MM-DD (default 2025-06-23).")

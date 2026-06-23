@@ -25,6 +25,7 @@ data/*.duckdb
 *.sqlite3
 *.db
 data/cache/
+data/models/        # trained ML models (regenerate with `train`)
 
 # OS / editor
 .DS_Store

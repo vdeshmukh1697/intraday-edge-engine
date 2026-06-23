@@ -126,6 +126,21 @@ The gap/bias predictor is rules-based (PLAN §4.8: rules first, ML later). Open-
 helpers (`signal_engine.premarket.validation`) check whether a predicted gap actually
 materialised on confirming volume.
 
+### ML signal scorer — shadow mode (Phase 7)
+Train an ML model on labeled trades and compare it to the rules-confidence baseline
+out-of-sample, then run it in **shadow mode** (scored alongside the rules, never changing
+decisions until it's proven):
+```bash
+./run.sh train --days 20                 # build dataset, train, report ML-vs-rules (saves model)
+./run.sh scan --top 20 --ml              # leaderboard with a shadow ML_conf column
+```
+The default model is a **zero-dependency numpy logistic regression** (deterministic, offline);
+**LightGBM** is an optional backend behind the same `MLModel` interface (`pip install lightgbm`).
+Features are stationary (ratios/indicators/news, no raw price levels); the training label is
+the forward "did it hit T1 before stop" outcome (point-in-time features, future-only label).
+ML stays shadow-only until it beats the rules out-of-sample **and** in forward paper-trading
+(PLAN §4.7/§8) — promotion is a deliberate manual step.
+
 ### Dashboard (optional)
 ```bash
 pip install streamlit

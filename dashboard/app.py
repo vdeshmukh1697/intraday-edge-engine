@@ -45,6 +45,7 @@ with st.sidebar:
         st.header("Scan controls")
         universe_n = st.number_input("Universe size", value=2000, step=100)
         top_n = st.number_input("Top N", value=20, step=5)
+        ml_shadow = st.checkbox("Shadow ML (needs trained model)", value=False)
         run_scan_btn = st.button("Run scan", type="primary")
     elif mode.startswith("Replay"):
         st.header("Replay controls")
@@ -135,7 +136,7 @@ if run and symbols:
 
 
 @st.cache_data(show_spinner=True)
-def _scan(day_iso: str, seed: int, universe_n: int, top_n: int):
+def _scan(day_iso: str, seed: int, universe_n: int, top_n: int, with_ml: bool):
     from datetime import time as _time
 
     from signal_engine.scan.harness import run_scan
@@ -143,30 +144,38 @@ def _scan(day_iso: str, seed: int, universe_n: int, top_n: int):
 
     uni = MockUniverseProvider(n=int(universe_n), seed=int(seed))
     res = run_scan(cfg, uni, date.fromisoformat(day_iso), as_of=_time(11, 0),
-                   seed=int(seed), top_n=int(top_n))
-    rows = [
-        {
+                   seed=int(seed), top_n=int(top_n), with_ml=with_ml)
+    rows = []
+    for e in res.leaderboard:
+        row = {
             "rank": e.rank, "symbol": e.symbol, "dir": e.plan.direction.value,
             "score": e.score, "entry": e.plan.entry, "stop%": -e.plan.stop_pct,
             "T1%": e.plan.target_pcts[0], "R:R": e.plan.risk_reward,
-            "conf": e.plan.confidence, "sector": e.sector, "turnover_cr": e.turnover_cr,
-            "why": ", ".join(e.plan.reasons),
+            "conf": e.plan.confidence,
         }
-        for e in res.leaderboard
-    ]
+        if with_ml:
+            row["ML_conf"] = res.ml_confidence.get(e.symbol)
+        row.update({"sector": e.sector, "turnover_cr": e.turnover_cr,
+                    "why": ", ".join(e.plan.reasons)})
+        rows.append(row)
     stats = {"universe": res.universe_size, "deep_scanned": res.deep_scanned,
-             "candidates": res.candidates, "vetoed": res.vetoed}
+             "candidates": res.candidates, "vetoed": res.vetoed,
+             "ml_loaded": bool(res.ml_confidence)}
     return rows, stats
 
 
 if run_scan_btn:
-    rows, stats = _scan(day.isoformat(), int(seed), int(universe_n), int(top_n))
+    rows, stats = _scan(day.isoformat(), int(seed), int(universe_n), int(top_n), bool(ml_shadow))
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Universe", stats["universe"])
     c2.metric("Deep-scanned", stats["deep_scanned"])
     c3.metric("Candidates", stats["candidates"])
     c4.metric("Risk-vetoed", stats["vetoed"])
     st.subheader("🏆 Best intraday stocks — leaderboard")
+    if ml_shadow and not stats["ml_loaded"]:
+        st.warning("Shadow ML requested but no trained model found — run `signal-engine train` first.")
+    if ml_shadow and stats["ml_loaded"]:
+        st.caption("`conf` = rules confidence · `ML_conf` = shadow model (does NOT change ranking).")
     if rows:
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     else:

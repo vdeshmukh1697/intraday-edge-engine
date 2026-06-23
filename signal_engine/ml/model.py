@@ -14,7 +14,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from .base import FEATURE_COLUMNS, MLModel
+from .base import MLModel
 
 
 def _sigmoid(z: np.ndarray) -> np.ndarray:
@@ -126,7 +126,7 @@ class LightGBMModel(MLModel):
             raise RuntimeError(
                 "LightGBM backend requires `pip install lightgbm`; "
                 "LogisticModel is the zero-dep default."
-            )
+            ) from None
         self._lightgbm = lightgbm
         self.params = dict(params)
         self.model = None

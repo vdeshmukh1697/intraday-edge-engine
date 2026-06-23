@@ -119,8 +119,31 @@ index outlook + ranked pre-open watchlist; deliver via the alerter; validation h
 - Overnight news uses the LATEST item's sentiment (not the 20-min intraday decay) — a catalyst
   from yesterday still matters at the open. Point-in-time preserved (news ts < today's open).
 
-## Phases 6–8 — not started (see PLAN.md §8)
-**Phase 6** = polished Next.js/Vercel dashboard + WhatsApp Cloud API.
+## Phase 7 — ML signal scorer (shadow mode)  ✅ DONE
+LightGBM-style scorer trained on labeled trades, evaluated vs the rules baseline
+out-of-sample, run in SHADOW mode (logged alongside rules, never changes decisions).
+- [x] `done` MLModel backends: `LogisticModel` (numpy, zero-dep default) + `LightGBMModel` (optional) + default_model (9 tests)
+- [x] `done` Feature vectorization (stationary `FEATURE_COLUMNS` derivation, NaN/zero-safe) (11 tests)
+- [x] `done` `MLScorer` + `evaluate`/`compare` (acc/AUC/brier vs baseline) (11 tests)
+- [x] `done` Dataset builder (point-in-time features + forward first-touch label matching paper-trader) + train harness (time-split)
+- [x] `done` CLI `train` (reports ML-vs-rules) + `scan --ml` SHADOW; dashboard scan ML_conf column
+- [x] `done` Tests: dataset/train/save-load + shadow-doesn't-change-ranking (4 tests)
+- **Phase-gate check:** `pytest` 251 passed · `ruff` clean · `train` + `scan --ml` run end-to-end. ✅
+- **Result:** on synthetic data ML AUC ~0.72–0.74 vs rules ~0.51–0.53 (ML beats rules OOS).
+  Shadow ML disagrees with overconfident rules picks (e.g. rules 100 / ML 45) — the divergence
+  shadow mode exists to surface (consistent with the health scorer's calibration finding).
+
+### Phase-7 divergences (recorded)
+| Plan | MVP choice | Why | Revisit |
+|---|---|---|---|
+| LightGBM + SHAP | **numpy LogisticRegression** default; LightGBM optional (lazy) | No native deps/network; deterministic; identical pipeline | `pip install lightgbm shap` |
+| Months-deep real data | **synthetic multi-day** labeled data | Offline; real corpus accrues live (PLAN §3.5/§3.7) | when live data accrues |
+- ML is SHADOW-only: it never changes ranking/decisions until it beats rules OOS *and* in
+  forward paper-trading (PLAN §4.7/§8). Promotion is a deliberate future manual step.
+
+## Phases 6, 8 — not started (see PLAN.md §8)
+**Phase 6** (next, per user) = polished Next.js/Vercel dashboard + WhatsApp Cloud API.
+**Phase 8** = hardening + gated automation.
 
 ---
 

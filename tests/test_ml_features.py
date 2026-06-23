@@ -1,6 +1,5 @@
 """Hand-verified tests for ML feature vectorization (PLAN §4.7)."""
 
-import math
 
 import numpy as np
 
