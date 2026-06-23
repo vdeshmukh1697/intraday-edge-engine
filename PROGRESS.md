@@ -48,9 +48,23 @@ Recorded per the "explain, don't silently diverge" rule. Production targets pres
 
 **Phase-gate check (end of Phase 1):** `pytest` 54 passed · `ruff check` clean · `signal-engine replay --demo` runs end-to-end and surfaces picks + paper trades. ✅
 
-## Phases 2–8 — not started (see PLAN.md §8)
-Next up = **Phase 2** (full-universe scan + leaderboard, sharding, Redis/Polars) then
-**Phase 3** (event-driven multi-day backtester + Strategy Health Scorer).
+## Phase 2 — Full-universe scan + "best stocks" leaderboard  🟡 IN PROGRESS
+Scope agreed with user: synthetic ~2,000-symbol universe (no live feed); shard-manager
+interface + mock driver (real Dhan wiring deferred/gated); Redis optional (in-memory
+StateStore interface for now). Polars vectorization deferred as a perf optimization —
+correctness-first with pandas, structured so a Polars backend can replace the inner loop.
+- [ ] `in-progress` Universe: `InstrumentMeta` + `UniverseProvider` + mock ~2,000-symbol generator
+- [ ] `in-progress` Liquidity + %cost filter (ban/penny/turnover/spread + cost-viability) (§4.0)
+- [ ] `in-progress` WebSocket shard manager interface + mock driver (partition, health, reconnect) (§3.3)
+- [ ] `todo` Ranking score (confidence × R:R × liquidity × catalyst, cost-penalized) (§4.9)
+- [ ] `todo` Scanner: universe → features → filter → strategy → risk → ranked Top-N leaderboard
+- [ ] `todo` StateStore interface + in-memory impl (Redis deferred)
+- [ ] `todo` CLI `scan` command + dashboard leaderboard view
+- [ ] `todo` Tests: universe, filter, shards, ranking, scanner end-to-end
+- Polars vectorization + real Redis + real Dhan sharding: **deferred** (perf/live infra)
+
+## Phases 3–8 — not started (see PLAN.md §8)
+**Phase 3** = event-driven multi-day backtester + Strategy Health Scorer.
 
 ---
 
