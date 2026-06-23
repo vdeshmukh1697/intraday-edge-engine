@@ -215,12 +215,19 @@ def create_app() -> FastAPI:
 
     @app.get("/api/chart/{symbol}", dependencies=[Depends(_require_token)])
     def chart(symbol: str, date_str: str = Query(default=None, alias="date"), seed: int = 42):
-        # Real bars from the backfilled archive when available; else synthetic (mock mode
-        # or a symbol we haven't archived yet).
+        # Real data path: prefer the backfilled archive (full Dhan session, local/fast); if a
+        # symbol isn't archived yet, fetch a real recent session from Yahoo rather than ever
+        # showing synthetic bars dressed as real. Synthetic only in mock mode.
         if cfg.env.data_source != "mock":
             from signal_engine.storage.bars import ParquetBarStore
 
             df = ParquetBarStore(cfg.env.parquet_dir).load_latest_session(symbol.upper())
+            if df is None or df.empty:
+                try:
+                    from signal_engine.data.yahoo_batch import fetch_intraday
+                    df = fetch_intraday([symbol.upper()], interval="1m", period="1d").get(symbol.upper())
+                except Exception:  # noqa: BLE001 - fall through to synthetic on any fetch error
+                    df = None
             if df is not None and not df.empty:
                 return chart_to_json(symbol, df, dict(cfg.settings.strategy.params))
         d = _parse_date(date_str)
