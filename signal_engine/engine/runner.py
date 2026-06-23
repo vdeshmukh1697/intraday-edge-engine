@@ -86,6 +86,17 @@ class EngineRunner:
         self._daily_trades = 0
         self.summary = RunSummary()
 
+        # Hardening (PLAN §9.3): structured logging + opt-in stale-data fail-safe.
+        from signal_engine.obs.freshness import FreshnessGuard
+        from signal_engine.obs.logging_setup import get_logger
+
+        self.log = get_logger("engine")
+        # enforce_freshness is opt-in: historical replay uses past timestamps, so the
+        # live wall-clock staleness check only makes sense on a live feed.
+        self.enforce_freshness = bool(getattr(cfg.env, "data_source", "mock") == "dhan")
+        self.freshness = FreshnessGuard(max_staleness_seconds=5.0)
+        self._errors = 0
+
     # -- feed callback ------------------------------------------------------
     def on_tick(self, tick) -> None:
         agg = self._aggs.get(tick.symbol)
@@ -93,7 +104,13 @@ class EngineRunner:
             agg = self._aggs[tick.symbol] = BarAggregator(tick.symbol, 1)
         bar = agg.add_tick(tick)
         if bar is not None:
-            self.on_closed_bar(bar)
+            # Error resilience: one symbol's failure must not kill the whole run.
+            try:
+                self.on_closed_bar(bar)
+            except Exception as exc:  # noqa: BLE001 - deliberate catch-all at the boundary
+                self._errors += 1
+                self.log.error("on_closed_bar failed for %s @ %s: %s", bar.symbol, bar.ts, exc)
+                self.alerter.send(f"engine error on {bar.symbol}: {exc}", level="warning")
 
     # -- core per-bar logic -------------------------------------------------
     def on_closed_bar(self, bar: Bar) -> None:
@@ -111,6 +128,12 @@ class EngineRunner:
         if self.session.is_square_off_time(bar.ts):
             for pos in self.paper.force_square_off(bar):
                 self._on_position_closed(pos, bar)
+            return
+
+        # Fail-safe: never trade on a stale/dead feed (PLAN §9.3). Opt-in (live only).
+        self.freshness.mark(bar.ts)
+        if self.enforce_freshness and self.freshness.is_stale():
+            self.log.warning("feed stale for %s — suppressing entries", bar.symbol)
             return
 
         # 3) Entry generation only inside the allowed window.

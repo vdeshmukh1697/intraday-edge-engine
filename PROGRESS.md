@@ -158,9 +158,26 @@ FastAPI engine API (read-only) + Next.js/Lightweight-Charts dashboard scaffold +
   Tunnel for the engine's public HTTPS). No real external calls are made anywhere in code/tests.
 - API computes per-request (run_scan ~0.4s); add caching if the dashboard polls hard (future).
 
-## Phase 8 — not started (see PLAN.md §8)
-**Phase 8** = hardening (reconnect/observability) + optional gated automation. Live Dhan feed
-and live order execution remain gated behind explicit user go-ahead (orders not implemented).
+## Phase 8 — Hardening (automation NOT implemented, by ground rule)  ✅ DONE
+- [x] `done` Structured logging (`obs/logging_setup.py`)
+- [x] `done` Data-freshness fail-safe (`obs/freshness.py`) — suppress signals on a stale/dead feed (PLAN §9.3); opt-in (live only, replay uses past ts)
+- [x] `done` Reconnect backoff policy (`obs/backoff.py`) for the live websocket layer
+- [x] `done` Engine error-resilience: per-bar try/except → log + warn alert, one symbol can't crash the run
+- [x] `done` **Safety tests** (`test_safety.py`): no order method on `BrokerAdapter`, no broker supports live orders, Dhan refuses to connect, no order-placement code anywhere, `allow_live_orders` defaults False
+- [x] `done` Tests: obs utilities (6) + safety (5) → **276 total green**
+- ❌ **NOT implemented (intentional, ground rule):** automated live-money order execution. The tool
+  is decision-support only; the human places every order. Live Dhan feed + any execution path remain
+  gated behind explicit user go-ahead and are not built.
+- **Phase-gate check:** `pytest` 276 passed · `ruff` clean · engine + API run. ✅
+
+---
+
+## BUILD COMPLETE — Phases 0–8
+All planned phases implemented (Phase 8 hardening done; auto-execution intentionally excluded).
+**276 tests green · ruff clean.** CLI: `info / scan / replay / backtest / health / news / premarket /
+train / serve`. Web: FastAPI API + Next.js dashboard scaffold (`web/`, needs Node to run).
+Gated/deferred (by design, behind interfaces): live Dhan feed, real RSS/yfinance/WhatsApp/Vercel,
+Redis, Polars vectorization, LightGBM/FinBERT backends, live order execution.
 
 ---
 
