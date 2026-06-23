@@ -141,12 +141,34 @@ the forward "did it hit T1 before stop" outcome (point-in-time features, future-
 ML stays shadow-only until it beats the rules out-of-sample **and** in forward paper-trading
 (PLAN §4.7/§8) — promotion is a deliberate manual step.
 
-### Dashboard (optional)
+### Dashboard — two options
+
+**A) Quick local (Streamlit)** — Python, fastest to see something:
 ```bash
 pip install streamlit
 streamlit run dashboard/app.py
 ```
-Leaderboard, paper trades, and a per-stock chart with VWAP/EMA overlays.
+Modes: Scan leaderboard, Replay paper book, Backtest+Health, Pre-market.
+
+**B) Polished web dashboard (Next.js + FastAPI, Phase 6)** — the deployable cockpit:
+```bash
+# 1. Engine API (Python):
+pip install -e ".[api]"          # fastapi + uvicorn + httpx
+./run.sh serve                   # http://127.0.0.1:8000  (OpenAPI docs at /docs)
+
+# 2. Frontend (needs Node 18+; in a second terminal):
+cd web && cp .env.local.example .env.local && npm install && npm run dev
+# open http://localhost:3000
+```
+Next.js 14 + TradingView Lightweight Charts: best-stocks leaderboard (rules + shadow-ML
+confidence, Strategy Health badge), pre-market briefing, backtest + health, and a per-stock
+candlestick chart with VWAP/EMA overlays and a **live WebSocket** bar feed. See `web/README.md`
+for Vercel deploy (set `NEXT_PUBLIC_API_BASE` to the engine's public HTTPS URL — e.g. a free
+Cloudflare Tunnel — and `NEXT_PUBLIC_API_KEY` to match `SE_API_TOKEN`).
+
+> The API is **read-only** (no order endpoint). The `web/` app is reviewed, contract-aligned
+> code; it requires Node to build/run (not built in the dev container). The Python API is
+> fully tested.
 
 ---
 

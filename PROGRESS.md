@@ -141,9 +141,26 @@ out-of-sample, run in SHADOW mode (logged alongside rules, never changes decisio
 - ML is SHADOW-only: it never changes ranking/decisions until it beats rules OOS *and* in
   forward paper-trading (PLAN §4.7/§8). Promotion is a deliberate future manual step.
 
-## Phases 6, 8 — not started (see PLAN.md §8)
-**Phase 6** (next, per user) = polished Next.js/Vercel dashboard + WhatsApp Cloud API.
-**Phase 8** = hardening + gated automation.
+## Phase 6 — Vercel dashboard + WhatsApp  ✅ DONE (frontend unbuilt here — no Node)
+FastAPI engine API (read-only) + Next.js/Lightweight-Charts dashboard scaffold + WhatsApp alerter.
+- [x] `done` FastAPI API: /api/leaderboard, /api/premarket, /api/backtest, /api/chart/{sym}, /ws/chart (bar replay), token auth + CORS (9 tests, TestClient)
+- [x] `done` WhatsApp Cloud API alerter (env-gated, stdlib, fail-safe) + factory wiring (4 tests, mocked)
+- [x] `done` CLI `serve` (uvicorn); `.env.example` WHATSAPP_*/SE_API_TOKEN/SE_CORS_ORIGINS; pyproject [api] extra
+- [x] `done` Next.js 14 dashboard scaffold under `web/`: Leaderboard (hero, rules+ML conf, health badge),
+      Pre-market, Backtest+Health, per-stock candlestick + VWAP/EMA overlays + live WS push
+- **Phase-gate check:** `pytest` 265 passed · `ruff` clean · API boots + serves (verified via ASGI). ✅
+
+### Phase-6 caveats / what's NOT verified here
+- **No Node/npm in this environment** → the `web/` Next.js app is reviewed, contract-aligned code but
+  was NOT `npm install`/built/run here. Run it on a machine with Node: `cd web && npm install && npm run dev`
+  (the Python API must be running: `./run.sh serve`). The FastAPI backend IS fully tested.
+- **WhatsApp + Vercel are credential-gated to the user** (Meta Business account, Vercel deploy, Cloudflare
+  Tunnel for the engine's public HTTPS). No real external calls are made anywhere in code/tests.
+- API computes per-request (run_scan ~0.4s); add caching if the dashboard polls hard (future).
+
+## Phase 8 — not started (see PLAN.md §8)
+**Phase 8** = hardening (reconnect/observability) + optional gated automation. Live Dhan feed
+and live order execution remain gated behind explicit user go-ahead (orders not implemented).
 
 ---
 

@@ -21,7 +21,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dashboard = ["streamlit"]
-dev = ["pytest", "ruff", "mypy"]
+api = ["fastapi", "uvicorn[standard]", "httpx"]
+ml = ["lightgbm"]
+dev = ["pytest", "ruff", "mypy", "fastapi", "uvicorn[standard]", "httpx"]
 
 [project.scripts]
 signal-engine = "signal_engine.cli:main"

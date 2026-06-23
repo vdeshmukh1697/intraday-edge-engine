@@ -28,6 +28,12 @@ data/cache/
 # trained ML models (regenerate with `train`)
 data/models/
 
+# Node / Next.js (web/ dashboard)
+node_modules/
+.next/
+*.tsbuildinfo
+web/next-env.d.ts
+
 # OS / editor
 .DS_Store
 .idea/
