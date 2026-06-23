@@ -37,6 +37,7 @@ class ScanResult:
     filtered_out: int = 0      # failed liquidity/cost filter
     no_signal: int = 0         # strategy produced nothing
     vetoed: int = 0            # risk layer rejected (R:R / edge-after-cost)
+    news_vetoed: int = 0       # news overlay vetoed / event-guarded a signal
     candidates: int = 0        # surfaced trade plans (pre-Top-N)
 
 
@@ -49,6 +50,7 @@ class Scanner:
         risk_manager: RiskManager,
         liquidity_filter: LiquidityCostFilter,
         state_store: Optional[StateStore] = None,
+        news_overlay=None,
     ):
         self.params = params
         self.strategy = strategy
@@ -56,12 +58,14 @@ class Scanner:
         self.risk_manager = risk_manager
         self.filter = liquidity_filter
         self.state = state_store
+        self.news_overlay = news_overlay
 
     def scan(
         self,
         metas: List[InstrumentMeta],
         histories: Dict[str, pd.DataFrame],
         top_n: int = 20,
+        news_features: Optional[Dict[str, Dict[str, float]]] = None,
     ) -> ScanResult:
         result = ScanResult(universe_size=len(metas))
         candidates = []  # list[(plan, meta)]
@@ -73,6 +77,11 @@ class Scanner:
             result.deep_scanned += 1
 
             features = compute_features(df, self.params)
+            # Merge in this symbol's news features (point-in-time) so they're visible to
+            # the strategy/overlay and stored alongside technical features.
+            nf = (news_features or {}).get(meta.symbol, {})
+            if nf:
+                features = {**features, **nf}
             if self.state is not None:
                 self.state.set_features(meta.symbol, features)
 
@@ -91,6 +100,13 @@ class Scanner:
             if signal is None:
                 result.no_signal += 1
                 continue
+
+            # News overlay: gate / boost / veto using the symbol's news features.
+            if self.news_overlay is not None and nf:
+                signal = self.news_overlay.apply(signal, nf)
+                if signal is None:
+                    result.news_vetoed += 1
+                    continue
 
             plan = self.risk_manager.build_trade_plan(signal, features, self.cost_model)
             if plan is None:

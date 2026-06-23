@@ -123,11 +123,11 @@ def cmd_scan(args) -> int:
     from signal_engine.universe.mock import MockUniverseProvider
 
     universe = MockUniverseProvider(n=args.universe, seed=args.seed)
-    kwargs = dict(seed=args.seed, top_n=args.top)
+    kwargs = dict(seed=args.seed, top_n=args.top, with_news=not args.no_news)
     if as_of is not None:
         kwargs["as_of"] = as_of
     print(f"Scanning {args.universe}-symbol synthetic NSE universe for {day} "
-          f"(as-of {args.as_of or '11:00'})...\n")
+          f"(as-of {args.as_of or '11:00'}, news={'off' if args.no_news else 'on'})...\n")
     result = run_scan(cfg, universe, day, **kwargs)
 
     print("=== SCAN STATS ===")
@@ -136,6 +136,7 @@ def cmd_scan(args) -> int:
     print(f"filtered (cost)  : {result.filtered_out}")
     print(f"no signal        : {result.no_signal}")
     print(f"risk-vetoed      : {result.vetoed}")
+    print(f"news-vetoed/guard: {result.news_vetoed}")
     print(f"candidates       : {result.candidates}")
 
     print(f"\n=== 🏆 BEST INTRADAY SETUPS (top {args.top}) ===")
@@ -209,6 +210,24 @@ def cmd_health(args) -> int:
     return 0
 
 
+def cmd_news(args) -> int:
+    """Preview the synthetic news headlines for a day (mapped + scored)."""
+    cfg = load_config()
+    day = _parse_date(args.date) if args.date else date(2025, 6, 23)
+    symbols = args.symbols.split(",") if args.symbols else cfg.settings.watchlist
+    from signal_engine.news.provider import MockNewsProvider
+
+    items = MockNewsProvider(symbols, day, seed=args.seed).fetch()
+    print(f"Synthetic news for {day} ({len(items)} items):\n")
+    for it in items:
+        print(f"  {it.ts.strftime('%H:%M')}  {','.join(it.symbols):10s} "
+              f"sent {it.sentiment:+.2f}  {it.event_type.value:11s}  {it.headline}")
+    if not items:
+        print("  (no items generated for these symbols/seed)")
+    print("\n" + _DISCLAIMER)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="signal-engine", description="Intraday signal engine (decision-support only).")
     sub = p.add_subparsers(dest="command", required=True)
@@ -227,7 +246,14 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--universe", type=int, default=2000, help="Synthetic universe size.")
     ps.add_argument("--seed", type=int, default=42, help="Synthetic data seed.")
     ps.add_argument("--top", type=int, default=20, help="Leaderboard size (Top-N).")
+    ps.add_argument("--no-news", action="store_true", help="Disable the news overlay.")
     ps.set_defaults(func=cmd_scan)
+
+    pn = sub.add_parser("news", help="Preview the day's (synthetic) news headlines.")
+    pn.add_argument("--date", help="Trading day YYYY-MM-DD (default 2025-06-23).")
+    pn.add_argument("--symbols", help="Comma-separated symbols (default config watchlist).")
+    pn.add_argument("--seed", type=int, default=42, help="Synthetic news seed.")
+    pn.set_defaults(func=cmd_news)
 
     pb = sub.add_parser("backtest", help="Multi-day event-driven backtest + metrics.")
     pb.add_argument("--start", help="Start date YYYY-MM-DD (default 2025-06-02).")

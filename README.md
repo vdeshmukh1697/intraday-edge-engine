@@ -94,10 +94,24 @@ Useful flags: `--symbols RELIANCE,INFY`, `--seed 7`, `--demo` (bias regimes so s
 Scans a synthetic ~2,000-symbol NSE universe, applies the liquidity + %-cost filter, runs
 the strategy + risk gate on survivors, and ranks the best setups:
 ```bash
-signal-engine scan --date 2025-06-23 --as-of 11:00 --universe 2000 --top 20
+./run.sh scan --date 2025-06-23 --as-of 11:00 --universe 2000 --top 20
 ```
 "Scan wide, rank narrow": the full universe is screened down to the liquid, cost-viable,
 ranked Top-N — each row a capital-agnostic trade plan. Runs in well under a second.
+
+### News & sentiment (Phase 4)
+A news pipeline (ingest → symbol-map → sentiment + event-type → **point-in-time** features)
+feeds the rules engine as a gate/booster/veto, with the headline reflected in each pick's
+"why". On by default in `scan`; toggle with `--no-news`. Preview the day's (synthetic) news:
+```bash
+./run.sh news                       # preview headlines (mapped + scored)
+./run.sh scan --top 20              # leaderboard with news influence
+./run.sh scan --top 20 --no-news    # technical-only, for comparison
+```
+Sentiment uses a zero-dependency finance **lexicon** model by default (deterministic, offline);
+**FinBERT** is the optional production model behind the same `SentimentModel` interface. News
+**sources** are synthetic (`MockNewsProvider`); real RSS/NSE-filing ingestion is a gated
+external integration (stubbed), as is the live Dhan feed.
 
 ### Dashboard (optional)
 ```bash

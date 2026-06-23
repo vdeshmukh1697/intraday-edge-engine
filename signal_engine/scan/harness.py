@@ -39,6 +39,7 @@ def run_scan(
     as_of: time = time(11, 0),
     seed: int = 42,
     top_n: int = 20,
+    with_news: bool = True,
 ) -> ScanResult:
     cost_model = CostModel(cfg.risk.costs)
     liquidity_filter = LiquidityCostFilter(cfg.risk.liquidity, cost_model)
@@ -61,7 +62,23 @@ def run_scan(
         )
         histories[meta.symbol] = df[df.index <= cutoff]
 
-    # 3) Scan + rank.
+    # 3) News (Phase 4): synthetic headlines -> point-in-time per-symbol features + overlay.
+    news_features = None
+    news_overlay = None
+    if with_news:
+        from signal_engine.news.features import compute_news_features
+        from signal_engine.news.overlay import NewsOverlay
+        from signal_engine.news.provider import MockNewsProvider
+
+        survivor_syms = [m.symbol for m in survivors]
+        provider = MockNewsProvider(survivor_syms, day, seed=seed)
+        items = provider.fetch(as_of=cutoff)  # point-in-time
+        news_features = {
+            sym: compute_news_features(items, sym, cutoff) for sym in survivor_syms
+        }
+        news_overlay = NewsOverlay()
+
+    # 4) Scan + rank.
     strategy = create_strategy(cfg.settings.strategy.active, cfg.settings.strategy.params)
     scanner = Scanner(
         params=dict(cfg.settings.strategy.params),
@@ -70,8 +87,9 @@ def run_scan(
         risk_manager=RiskManager(cfg.risk.risk),
         liquidity_filter=liquidity_filter,
         state_store=InMemoryStateStore(),
+        news_overlay=news_overlay,
     )
-    result = scanner.scan(survivors, histories, top_n=top_n)
+    result = scanner.scan(survivors, histories, top_n=top_n, news_features=news_features)
     result.universe_size = len(metas)  # report against the FULL universe, not just survivors
     return result
 

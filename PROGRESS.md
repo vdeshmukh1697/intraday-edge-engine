@@ -80,8 +80,29 @@ Strategy Health Scorer with degradation alerts (§6.6, A10). Synthetic multi-day
 - Note: health scorer already flags real issues — e.g. calibration component drops when the
   rules-confidence is overconfident vs the actual hit rate (working as designed, §6.6).
 
-## Phases 4–8 — not started (see PLAN.md §8)
-**Phase 4** = news & sentiment integration (FinBERT/VADER → features → rules gates).
+## Phase 4 — News & sentiment integration  ✅ DONE
+Full news pipeline (ingest → symbol-map → sentiment + event → point-in-time features) wired
+into the rules engine as gate/boost/cap/veto + event-guard, surfaced in the leaderboard "why".
+- [x] `done` News domain models: `NewsItem` + `EventType` + frozen feature-key contract
+- [x] `done` Sentiment + event classifier: `LexiconSentiment` (default) + `EventClassifier` + FinBERT stub (15 tests)
+- [x] `done` Symbol mapper (ticker/alias dictionary matching; NER deferred) (11 tests)
+- [x] `done` News feature engine (latest/decayed sentiment, count, volume spike, time-since, event flags) — **point-in-time** (13 tests)
+- [x] `done` News providers: `MockNewsProvider` (synthetic) + `RSSNewsProvider` stub (gated)
+- [x] `done` `NewsOverlay` rules (gate/boost/cap/veto + event-guard) (8 tests)
+- [x] `done` Wired into Scanner + harness (per-symbol point-in-time news features + overlay); `news_vetoed` stat
+- [x] `done` CLI: `scan --no-news` toggle + `news` preview command; dashboard leaderboard shows news in "why"
+- [x] `done` Tests: overlay (8) + scan-with-news end-to-end (3); **183 total green**
+- **Phase-gate check:** `pytest` 183 passed · `ruff` clean · news visibly boosts/vetoes picks. ✅
+
+### Phase-4 divergences (recorded)
+| Plan | MVP choice | Why | Revisit |
+|---|---|---|---|
+| FinBERT (transformers/torch) | **Lexicon sentiment** (zero-dep) behind `SentimentModel`; FinBERT optional stub | No torch/model-download/network; deterministic + testable | when running with GPU/transformers |
+| Live RSS / NSE filings | **MockNewsProvider** (synthetic); RSS adapter stubbed | Offline, no live dependency; real feeds gated like Dhan | gated external integration |
+| Full NER symbol mapping | **Ticker/alias dictionary** matching | Simple, deterministic; covers the watchlist | when scaling to full universe news |
+
+## Phases 5–8 — not started (see PLAN.md §8)
+**Phase 5** = pre-market briefing (overnight news + global cues → gap/bias watchlist).
 
 ---
 
