@@ -1,0 +1,134 @@
+"""Command-line entrypoint.
+
+Examples
+--------
+    signal-engine replay --date 2025-06-23
+    signal-engine replay --date 2025-06-23 --demo   # bias some symbols to trend (shows picks)
+    signal-engine info
+
+The ``replay`` command runs a full synthetic trading session through the exact same
+pipeline the live engine would use, prints the surfaced picks and the paper-trading
+result. No live market, no orders.
+"""
+
+from __future__ import annotations
+
+import argparse
+from datetime import date, datetime
+
+from signal_engine.config import load_config
+from signal_engine.factory import build_alerter, build_broker
+from signal_engine.market.calendar import NSECalendar
+from signal_engine.market.session import MarketSession
+from signal_engine.strategies.base import create_strategy
+
+_DISCLAIMER = (
+    "DISCLAIMER: decision-support only. Not investment advice. No live orders are placed. "
+    "Intraday trading carries substantial risk of loss. You alone decide and execute. "
+    "(PLAN §9)"
+)
+
+
+def _parse_date(s: str) -> date:
+    return datetime.strptime(s, "%Y-%m-%d").date()
+
+
+def cmd_info(args) -> int:
+    cfg = load_config()
+    print("Intraday Signal Engine — config summary")
+    print(f"  data_source     : {cfg.env.data_source}")
+    print(f"  allow_live_orders: {cfg.env.allow_live_orders} (live execution NOT implemented)")
+    print(f"  alerter         : {cfg.env.alerter}")
+    print(f"  watchlist       : {cfg.settings.watchlist}")
+    print(f"  strategy        : {cfg.settings.strategy.active}")
+    print(f"  R:R floor       : {cfg.risk.risk.rr_floor}   edge-cost k: {cfg.risk.risk.edge_cost_multiple}")
+    print(f"  square-off      : {cfg.settings.market.square_off} IST")
+    print(_DISCLAIMER)
+    return 0
+
+
+def cmd_replay(args) -> int:
+    cfg = load_config()
+    day = _parse_date(args.date) if args.date else date(2025, 6, 23)
+
+    cal = NSECalendar()
+    if not cal.is_trading_day(day):
+        print(f"{day} is not an NSE trading day (weekend/holiday). Pick another date.")
+        return 2
+
+    symbols = args.symbols.split(",") if args.symbols else cfg.settings.watchlist
+
+    # In --demo, bias the first few symbols up / one down so the strategy has setups.
+    regime_map = {}
+    if args.demo:
+        regimes = ["trend_up", "trend_up", "trend_down", "choppy", "choppy"]
+        for i, s in enumerate(symbols):
+            regime_map[s] = regimes[i % len(regimes)]
+
+    broker = build_broker(cfg, day=day, seed=args.seed, regime_map=regime_map)
+    if cfg.env.data_source == "dhan":
+        print("Live Dhan source selected but it is gated/disabled. Use SE_DATA_SOURCE=mock.")
+        return 2
+
+    strategy = create_strategy(cfg.settings.strategy.active, cfg.settings.strategy.params)
+    session = MarketSession(cfg.settings.market, cal)
+    alerter = build_alerter(cfg)
+
+    # Lazy import to keep CLI import light.
+    from signal_engine.engine.runner import EngineRunner
+
+    repo = None
+    if args.persist:
+        from signal_engine.storage.repository import SignalRepository
+
+        repo = SignalRepository(cfg.env.db_url)
+
+    runner = EngineRunner(cfg, broker, strategy, session, alerter, repo=repo)
+    print(f"Replaying {day} for {symbols} (source={cfg.env.data_source}, seed={args.seed})\n")
+    summary = runner.replay(symbols)
+
+    print("\n=== RESULT ===")
+    print(f"bars processed : {summary.bars_processed}")
+    print(f"picks surfaced : {len(summary.picks)}")
+    print(f"paper trades   : {len(summary.closed)}")
+    print(f"win rate       : {summary.win_rate}%")
+    print(f"net P&L (sum %): {summary.net_pnl_pct:+.2f}%  (capital-agnostic, net of costs)")
+    if summary.picks:
+        print("\nTop picks (by confidence):")
+        for p in sorted(summary.picks, key=lambda x: x.confidence, reverse=True)[:10]:
+            print(
+                f"  {p.symbol:10s} {p.direction.value:5s} entry {p.entry:.2f} "
+                f"SL -{p.stop_pct:.2f}% T1 +{p.target_pcts[0]:.2f}% R:R {p.risk_reward:.2f} "
+                f"conf {p.confidence:.0f}  [{', '.join(p.reasons)}]"
+            )
+    if repo:
+        repo.close()
+    print("\n" + _DISCLAIMER)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="signal-engine", description="Intraday signal engine (decision-support only).")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    pr = sub.add_parser("replay", help="Replay a synthetic/historical session through the pipeline.")
+    pr.add_argument("--date", help="Trading day YYYY-MM-DD (default 2025-06-23).")
+    pr.add_argument("--symbols", help="Comma-separated symbols (default from config watchlist).")
+    pr.add_argument("--seed", type=int, default=42, help="Synthetic data seed.")
+    pr.add_argument("--demo", action="store_true", help="Bias regimes so setups appear.")
+    pr.add_argument("--persist", action="store_true", help="Write plans/trades to SQLite.")
+    pr.set_defaults(func=cmd_replay)
+
+    pi = sub.add_parser("info", help="Print config + safety summary.")
+    pi.set_defaults(func=cmd_info)
+    return p
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

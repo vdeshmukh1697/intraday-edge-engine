@@ -21,32 +21,36 @@ Recorded per the "explain, don't silently diverge" rule. Production targets pres
 
 ---
 
-## Phase 0 — Foundations & data spine
+## Phase 0 — Foundations & data spine  ✅ DONE
 - [x] `done` Repo scaffold (git, .gitignore, pyproject, requirements, .env.example)
 - [x] `done` Config: YAML (settings.yaml, risk.yaml) + pydantic loader (`config.py`)
 - [x] `done` Domain contracts: enums + models (`domain/`)
 - [x] `done` Market calendar + clock + session state machine (`market/`)
 - [x] `done` `BrokerAdapter` interface (data-only, no live orders) (`brokers/base.py`)
-- [x] `done` `Alerter` interface + ConsoleAlerter (`alerts/`)
+- [x] `done` `Alerter` interface + ConsoleAlerter + Telegram fallback (`alerts/`)
 - [x] `done` `Strategy` interface + registry (`strategies/base.py`)
-- [ ] `in-progress` MockBroker (synthetic replay) + synthetic data generator
-- [ ] `in-progress` Bar aggregator (tick -> 1m closed bars, roll-ups)
-- [ ] `todo` Parquet bar store + SQLite repository
-- [ ] `todo` Tests: calendar/session, aggregator
+- [x] `done` MockBroker (synthetic replay) + synthetic data generator (`brokers/mock.py`, `data/`)
+- [x] `done` Bar aggregator (tick -> 1m closed bars, roll-ups) (`ingestion/`)
+- [x] `done` Parquet bar store + SQLite repository (`storage/`)
+- [x] `done` Tests: calendar/session (8), aggregator (3)
 - News/global-cues archive: **deferred to Phases 4–5** (not needed for MVP signal loop)
 
-## Phase 1 — MVP: live -> trade plans -> paper-trade -> alert
+## Phase 1 — MVP: live -> trade plans -> paper-trade -> alert  ✅ DONE
 - [x] `done` First strategy `vwap_ema_adx` (consumes feature-key contract)
-- [ ] `in-progress` Indicator engine (VWAP, EMA, RSI, ADX, ATR, RVOL, ORB, MACD, Supertrend) + `compute_features`
-- [ ] `in-progress` Risk layer: %-based CostModel, RiskManager (stop/target, R:R floor, edge-after-cost gate), size calculator
-- [ ] `in-progress` Live paper-trader (entry trigger, stop/target/time-stop/square-off; net-of-cost P&L)
-- [ ] `todo` Engine runner (wire feed -> aggregator -> features -> strategy -> risk -> plan -> paper-trader -> alerts)
-- [ ] `todo` CLI entrypoint (replay a day; emit picks)
-- [ ] `todo` Minimal Streamlit dashboard (watchlist + picks + paper P&L)
-- [ ] `todo` Tests: indicators, costs, risk (hand-verified), paper-trader, strategy, end-to-end replay
-- [ ] `todo` README (setup, run, test, backtest)
+- [x] `done` Indicator engine (VWAP, EMA, RSI, ADX, ATR, RVOL, ORB, MACD, Supertrend) + `compute_features`
+- [x] `done` Risk layer: %-based CostModel, RiskManager (stop/target, R:R floor, edge-after-cost gate), size calculator
+- [x] `done` Live paper-trader (entry trigger, stop/target/time-stop/square-off; net-of-cost P&L)
+- [x] `done` Engine runner (feed -> aggregator -> features -> strategy -> risk -> plan -> paper-trader -> alerts)
+- [x] `done` CLI entrypoint (`replay`, `info`)
+- [x] `done` Minimal Streamlit dashboard (leaderboard + picks + paper P&L + per-stock chart)
+- [x] `done` Tests: indicators (10), costs (7), risk (11, hand-verified), paper-trader (7), strategy (5), aggregator (3), calendar (5), end-to-end (6) — **54 total, green**
+- [x] `done` README (setup, run, test, backtest note)
+
+**Phase-gate check (end of Phase 1):** `pytest` 54 passed · `ruff check` clean · `signal-engine replay --demo` runs end-to-end and surfaces picks + paper trades. ✅
 
 ## Phases 2–8 — not started (see PLAN.md §8)
+Next up = **Phase 2** (full-universe scan + leaderboard, sharding, Redis/Polars) then
+**Phase 3** (event-driven multi-day backtester + Strategy Health Scorer).
 
 ---
 

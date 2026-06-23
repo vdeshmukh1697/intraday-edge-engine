@@ -1,0 +1,115 @@
+"""Minimal Streamlit cockpit for the MVP (PLAN §11, Phase-1 local shortcut).
+
+Run:  streamlit run dashboard/app.py
+This is the throwaway local dashboard; the polished Next.js/Vercel UI is Phase 6.
+It runs a synthetic replay and shows the leaderboard, paper trades, and a per-stock
+chart with VWAP/EMA overlays + signal markers.
+"""
+
+from __future__ import annotations
+
+import io
+from datetime import date
+
+import pandas as pd
+import streamlit as st
+
+from signal_engine.alerts.console import ConsoleAlerter
+from signal_engine.brokers.mock import MockBroker
+from signal_engine.config import load_config
+from signal_engine.engine.runner import EngineRunner
+from signal_engine.indicators import core as ind
+from signal_engine.market.calendar import NSECalendar
+from signal_engine.market.session import MarketSession
+from signal_engine.strategies.base import create_strategy
+
+st.set_page_config(page_title="Intraday Signal Engine", layout="wide")
+st.title("📈 Intraday Signal Engine — paper cockpit")
+st.caption(
+    "Decision-support only. Not investment advice. No live orders are placed. "
+    "Intraday trading carries substantial risk of loss. (PLAN §9)"
+)
+
+cfg = load_config()
+
+with st.sidebar:
+    st.header("Replay controls")
+    day = st.date_input("Trading day", value=date(2025, 6, 23))
+    seed = st.number_input("Seed", value=7, step=1)
+    demo = st.checkbox("Demo regimes (force setups)", value=True)
+    symbols = st.multiselect("Symbols", cfg.settings.watchlist, default=cfg.settings.watchlist)
+    run = st.button("Run replay", type="primary")
+
+
+@st.cache_data(show_spinner=True)
+def _run(day_iso: str, seed: int, demo: bool, symbols: tuple):
+    d = date.fromisoformat(day_iso)
+    regime_map = {}
+    if demo:
+        regimes = ["trend_up", "trend_up", "trend_down", "choppy", "choppy"]
+        regime_map = {s: regimes[i % len(regimes)] for i, s in enumerate(symbols)}
+    broker = MockBroker(day=d, seed=int(seed), regime_map=regime_map)
+    strategy = create_strategy(cfg.settings.strategy.active, cfg.settings.strategy.params)
+    session = MarketSession(cfg.settings.market, NSECalendar())
+    runner = EngineRunner(cfg, broker, strategy, session, ConsoleAlerter(io.StringIO()))
+    summary = runner.replay(list(symbols))
+    # capture per-symbol sessions for charting
+    sessions = {s: broker._sessions[s].copy() for s in symbols}
+    picks = [
+        {
+            "symbol": p.symbol, "dir": p.direction.value, "time": p.ts.strftime("%H:%M"),
+            "entry": p.entry, "stop%": -p.stop_pct, "T1%": p.target_pcts[0],
+            "R:R": p.risk_reward, "conf": p.confidence, "why": ", ".join(p.reasons),
+        }
+        for p in summary.picks
+    ]
+    trades = [
+        {
+            "symbol": t.symbol, "dir": t.direction.value, "exit": t.exit_reason.value,
+            "net%": t.pnl_pct_net, "R": t.r_multiple, "won": t.won,
+        }
+        for t in summary.closed if t.entry_fill is not None
+    ]
+    stats = {"bars": summary.bars_processed, "picks": len(summary.picks),
+             "trades": len(trades), "win_rate": summary.win_rate, "net_pct": summary.net_pnl_pct}
+    return picks, trades, stats, sessions
+
+
+if run and symbols:
+    picks, trades, stats, sessions = _run(day.isoformat(), int(seed), demo, tuple(symbols))
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Picks surfaced", stats["picks"])
+    c2.metric("Paper trades", stats["trades"])
+    c3.metric("Win rate", f"{stats['win_rate']}%")
+    c4.metric("Net P&L (Σ%)", f"{stats['net_pct']:+.2f}%")
+
+    st.subheader("🏆 Best intraday setups (leaderboard)")
+    if picks:
+        st.dataframe(
+            pd.DataFrame(picks).sort_values("conf", ascending=False),
+            use_container_width=True, hide_index=True,
+        )
+    else:
+        st.info("No picks surfaced for these settings.")
+
+    st.subheader("📒 Paper trades (net of costs)")
+    if trades:
+        st.dataframe(pd.DataFrame(trades), use_container_width=True, hide_index=True)
+
+    st.subheader("🔎 Per-stock chart")
+    sym = st.selectbox("Symbol", symbols)
+    df = sessions[sym]
+    p = cfg.settings.strategy.params
+    chart = pd.DataFrame(
+        {
+            "close": df["close"].values,
+            "vwap": ind.vwap(df).values,
+            "ema_fast": ind.ema(df["close"], int(p.get("ema_fast", 9))).values,
+            "ema_slow": ind.ema(df["close"], int(p.get("ema_slow", 21))).values,
+        },
+        index=df.index,
+    )
+    st.line_chart(chart)
+else:
+    st.info("Set controls in the sidebar and click **Run replay**.")
