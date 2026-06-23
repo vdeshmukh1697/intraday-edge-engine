@@ -186,11 +186,12 @@ Built after the phases, to take the system toward real use without needing any a
 - [x] `done` **Vercel dashboard** — deployed at https://web-beta-beige-60.vercel.app (Next.js, Hobby/free).
 - [x] `done` **Cloudflare tunnel script** (`run-with-tunnel.sh`) — one command: starts API + tunnel + updates Vercel env.
 - [x] `done` Config/factory wiring for all sources; `.env.example` updated with all options.
-- [x] `done` Tests: rss (9), yahoo cues (9), dhan+instruments (7), scheduler (2), yahoo_nse (11), angelone (13), callmebot (4) → **331 total green**.
+- [x] `done` **Full-NSE real-data pipeline** (`data/yahoo_batch.py`, `universe/nse.py`, `scan/real_harness.py`): once-daily scan + nightly archive over all ~2,000 listed EQ names on free Yahoo bars; scheduler rewired (08:30 briefing / 15:45 scan / 16:10 archive, IST). Verified end-to-end on real data (premarket→Telegram, archive→Parquet round-trip).
+- [x] `done` Tests: rss (9), yahoo cues (9), dhan+instruments (7), scheduler (2), yahoo_nse (11), angelone (13), callmebot (4), yahoo_batch (5) + nse_universe (4) + real_harness (3) → **343 total green**.
 
 ## BUILD COMPLETE — Phases 0–8 + all integrations
 All planned phases implemented (Phase 8 hardening done; auto-execution intentionally excluded).
-**331 tests green · ruff clean.** CLI: `info / scan / replay / backtest / health / news / premarket /
+**343 tests green · ruff clean.** CLI: `info / scan / replay / backtest / health / news / premarket /
 train / serve / schedule`. Web: FastAPI API + Next.js dashboard at https://web-beta-beige-60.vercel.app.
 Default data source: Yahoo Finance (free, no account). Optional: Angel One (free real-time) or Dhan (paid).
 Gated (by design): live order execution, Redis, Polars, LightGBM/FinBERT. Run: `./run-with-tunnel.sh`.
