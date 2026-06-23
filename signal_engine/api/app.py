@@ -17,6 +17,7 @@ from datetime import date, datetime, time
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 from signal_engine.api.serializers import (
     backtest_to_json,
@@ -32,6 +33,11 @@ _DISCLAIMER = (
     "Decision-support only. Not investment advice. No live orders are placed. "
     "Intraday trading carries substantial risk of loss. (PLAN §9)"
 )
+
+# Single in-flight Dhan login (server-side, TTL-guarded) so a stray /consume can't inject a
+# token without a recent /start. Personal single-user tool; see auth_consume for the rationale.
+_PENDING_AUTH: dict = {}
+_AUTH_TTL_S = 600
 
 
 def _require_token(x_api_key: str = Header(default=None)) -> None:
@@ -64,6 +70,63 @@ def create_app() -> FastAPI:
     @app.get("/healthz")
     def healthz():
         return {"ok": True}
+
+    # --- Dhan auth (in-dashboard OTP login) --------------------------------
+    @app.get("/api/auth/status")
+    def auth_status():
+        """Token health for the dashboard gate. Public (it gates everything else)."""
+        from signal_engine.brokers.dhan import token_expiry
+
+        source = os.getenv("SE_DATA_SOURCE", "mock")
+        if source != "dhan":
+            return {"source": source, "auth_required": False, "connected": True}
+        exp = token_expiry(os.getenv("DHAN_ACCESS_TOKEN") or "")
+        connected = bool(exp and exp > datetime.utcnow())
+        return {"source": "dhan", "auth_required": True, "connected": connected,
+                "expires_at": (exp.isoformat() + "Z") if exp else None,
+                "login_path": "/api/auth/dhan/start"}
+
+    @app.get("/api/auth/dhan/start")
+    def auth_start():
+        """Begin the consent flow and 302 the browser to Dhan's OTP page."""
+        import time as _t
+
+        from signal_engine.brokers import dhan_auth
+
+        cid, key, sec = (os.getenv("DHAN_CLIENT_ID"), os.getenv("DHAN_API_KEY"),
+                         os.getenv("DHAN_API_SECRET"))
+        if not (cid and key and sec):
+            raise HTTPException(400, "Dhan consent login not configured "
+                                     "(set DHAN_API_KEY / DHAN_API_SECRET / DHAN_CLIENT_ID).")
+        try:
+            consent = dhan_auth.generate_consent(cid, key, sec)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f"generate-consent failed: {exc}") from exc
+        _PENDING_AUTH["pending"] = {"consent": consent, "ts": _t.time()}
+        return RedirectResponse(dhan_auth.consent_login_url(consent), status_code=302)
+
+    @app.get("/api/auth/dhan/consume")
+    def auth_consume(tokenId: str = Query(...)):
+        """Exchange the post-OTP tokenId for a fresh token and persist it. Called by the
+        Vercel callback route (server-side). Requires a recent /start (TTL + single-use)."""
+        import time as _t
+
+        from signal_engine.brokers import dhan_auth
+        from signal_engine.brokers.dhan import token_expiry
+
+        pend = _PENDING_AUTH.get("pending")
+        if not pend or (_t.time() - pend["ts"]) > _AUTH_TTL_S:
+            raise HTTPException(400, "No active login request (start one from the dashboard).")
+        key, sec = os.getenv("DHAN_API_KEY"), os.getenv("DHAN_API_SECRET")
+        try:
+            tok = dhan_auth.consume_consent(tokenId, key, sec)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f"consume-consent failed: {exc}") from exc
+        dhan_auth.update_env_token(tok)
+        os.environ["DHAN_ACCESS_TOKEN"] = tok  # this process uses it immediately
+        _PENDING_AUTH.pop("pending", None)      # single-use
+        exp = token_expiry(tok)
+        return {"connected": True, "expires_at": (exp.isoformat() + "Z") if exp else None}
 
     @app.get("/api/leaderboard", dependencies=[Depends(_require_token)])
     def leaderboard(

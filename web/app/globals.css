@@ -481,3 +481,44 @@ tbody tr:hover {
   height: 100%;
   background: var(--accent);
 }
+
+/* ---------- Auth gate (Dhan OTP reconnect) ---------- */
+.auth-gate {
+  display: flex;
+  justify-content: center;
+  padding: 64px 16px;
+}
+.auth-card {
+  max-width: 420px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px;
+  text-align: center;
+  box-shadow: var(--shadow);
+}
+.auth-card h2 {
+  margin: 0 0 12px;
+}
+.auth-card p {
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.auth-btn {
+  display: inline-block;
+  margin: 16px 0 8px;
+  padding: 10px 20px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: var(--radius);
+  font-weight: 600;
+  text-decoration: none;
+}
+.auth-btn:hover {
+  filter: brightness(1.1);
+}
+.auth-note {
+  font-size: 12px;
+  color: var(--text-faint);
+}

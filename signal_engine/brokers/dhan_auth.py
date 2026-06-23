@@ -24,6 +24,45 @@ log = get_logger(__name__)
 
 RENEW_URL = "https://api.dhan.co/v2/RenewToken"
 
+# API-key/secret consent (OTP) flow — the path that powers the in-dashboard login.
+CONSENT_GENERATE_URL = "https://auth.dhan.co/app/generate-consent"
+CONSENT_LOGIN_URL = "https://auth.dhan.co/login/consentApp-login"
+CONSENT_CONSUME_URL = "https://auth.dhan.co/app/consumeApp-consent"
+
+
+def generate_consent(client_id: str, api_key: str, api_secret: str,
+                     http_post: Optional[Callable] = None) -> str:
+    """Step 1 of the consent flow: returns a ``consentAppId`` to start a browser login."""
+    if not (client_id and api_key and api_secret):
+        raise RuntimeError("generate_consent needs client_id + api_key + api_secret")
+    post = http_post or _empty_post
+    url = f"{CONSENT_GENERATE_URL}?client_id={client_id}"
+    status, resp = post(url, None, {"app_id": api_key, "app_secret": api_secret})
+    cid = resp.get("consentAppId") if isinstance(resp, dict) else None
+    if not cid:
+        raise RuntimeError(f"generate-consent failed (HTTP {status}): {resp}")
+    return cid
+
+
+def consent_login_url(consent_app_id: str) -> str:
+    """The Dhan-hosted page where the user logs in + enters OTP (Step 2)."""
+    return f"{CONSENT_LOGIN_URL}?consentAppId={consent_app_id}"
+
+
+def consume_consent(token_id: str, api_key: str, api_secret: str,
+                    http_post: Optional[Callable] = None) -> str:
+    """Step 3: exchange the post-OTP ``tokenId`` for a fresh 24h access token."""
+    if not (token_id and api_key and api_secret):
+        raise RuntimeError("consume_consent needs token_id + api_key + api_secret")
+    post = http_post or _empty_post
+    url = f"{CONSENT_CONSUME_URL}?tokenId={token_id}"
+    status, resp = post(url, None, {"app_id": api_key, "app_secret": api_secret})
+    tok = _extract_token(resp)
+    if not tok:
+        raise RuntimeError(f"consume-consent failed (HTTP {status}): {resp}")
+    log.info("Dhan token minted via consent flow (HTTP %s)", status)
+    return tok
+
 
 def _extract_token(resp: object) -> Optional[str]:
     """Pull the new access token out of Dhan's response (tolerant of wrapper shape)."""

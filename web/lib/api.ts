@@ -177,6 +177,23 @@ export interface LeaderboardParams {
   ml?: boolean;
 }
 
+export interface AuthStatus {
+  source: string;
+  auth_required: boolean;
+  connected: boolean;
+  expires_at?: string | null;
+  login_path?: string;
+}
+
+export function getAuthStatus(): Promise<AuthStatus> {
+  return getJSON<AuthStatus>("/api/auth/status");
+}
+
+// Full-page URL the dashboard navigates to in order to begin the Dhan OTP login.
+export function dhanLoginUrl(): string {
+  return `${API_BASE}/api/auth/dhan/start`;
+}
+
 export function getLeaderboard(
   params: LeaderboardParams = {}
 ): Promise<LeaderboardResponse> {

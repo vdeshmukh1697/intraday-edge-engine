@@ -132,6 +132,9 @@ class EnvConfig(BaseModel):
     alerter: str = "console"             # "console" | "telegram" | "whatsapp" | "callmebot"
     dhan_client_id: Optional[str] = None
     dhan_access_token: Optional[str] = None
+    dhan_api_key: Optional[str] = None        # 12-month app key for the consent (OTP) flow
+    dhan_api_secret: Optional[str] = None
+    dhan_redirect_url: Optional[str] = None   # registered Dhan redirect (the Vercel callback)
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
     whatsapp_phone_id: Optional[str] = None
@@ -161,6 +164,9 @@ class EnvConfig(BaseModel):
             alerter=os.getenv("SE_ALERTER", "console"),
             dhan_client_id=os.getenv("DHAN_CLIENT_ID") or None,
             dhan_access_token=os.getenv("DHAN_ACCESS_TOKEN") or None,
+            dhan_api_key=os.getenv("DHAN_API_KEY") or None,
+            dhan_api_secret=os.getenv("DHAN_API_SECRET") or None,
+            dhan_redirect_url=os.getenv("DHAN_REDIRECT_URL") or None,
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID") or None,
             whatsapp_phone_id=os.getenv("WHATSAPP_PHONE_ID") or None,

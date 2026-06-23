@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import Nav from "@/components/Nav";
+import AuthGate from "@/components/AuthGate";
 
 export const metadata: Metadata = {
   title: "Signal Engine Dashboard",
@@ -21,7 +22,9 @@ export default function RootLayout({
       <body>
         <div className="app-shell">
           <Nav />
-          <main>{children}</main>
+          <main>
+            <AuthGate>{children}</AuthGate>
+          </main>
           <footer className="footer">
             <span className="disclaimer">{DISCLAIMER}</span>
           </footer>

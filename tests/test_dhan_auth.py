@@ -6,6 +6,9 @@ import pytest
 
 from signal_engine.brokers.dhan_auth import (
     _extract_token,
+    consent_login_url,
+    consume_consent,
+    generate_consent,
     renew_token,
     update_env_token,
 )
@@ -60,3 +63,40 @@ def test_update_env_token_appends_when_missing(tmp_path):
     env.write_text("SE_DATA_SOURCE=dhan\n")
     update_env_token("FRESH", env_path=env)
     assert "DHAN_ACCESS_TOKEN=FRESH" in env.read_text()
+
+
+# --- consent (OTP) flow ----------------------------------------------------
+
+def test_generate_consent_returns_consent_id():
+    captured = {}
+
+    def fake_post(url, body, headers):
+        captured["url"] = url
+        captured["headers"] = headers
+        return 200, {"consentAppId": "CONSENT123"}
+
+    cid = generate_consent("100123", "APIKEY", "APISECRET", http_post=fake_post)
+    assert cid == "CONSENT123"
+    assert "client_id=100123" in captured["url"]
+    assert captured["headers"] == {"app_id": "APIKEY", "app_secret": "APISECRET"}
+
+
+def test_consent_login_url_embeds_consent_id():
+    assert consent_login_url("CONSENT123").endswith("consentApp-login?consentAppId=CONSENT123")
+
+
+def test_consume_consent_returns_access_token():
+    def fake_post(url, body, headers):
+        assert "tokenId=TOK99" in url
+        return 200, {"accessToken": "FRESH.JWT"}
+
+    tok = consume_consent("TOK99", "APIKEY", "APISECRET", http_post=fake_post)
+    assert tok == "FRESH.JWT"
+
+
+def test_consume_consent_raises_without_token():
+    def fake_post(url, body, headers):
+        return 401, {"errorCode": "DH-901"}
+
+    with pytest.raises(RuntimeError, match="consume-consent failed"):
+        consume_consent("TOK", "k", "s", http_post=fake_post)

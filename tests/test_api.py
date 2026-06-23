@@ -47,6 +47,35 @@ def test_leaderboard_rejects_non_trading_day(client):
     assert r.status_code == 400
 
 
+# --- Dhan auth gate endpoints (offline; no Dhan network hit) ----------------
+
+def test_auth_status_transparent_for_non_dhan(client, monkeypatch):
+    monkeypatch.setenv("SE_DATA_SOURCE", "mock")
+    d = client.get("/api/auth/status").json()
+    assert d["auth_required"] is False and d["connected"] is True
+
+
+def test_auth_status_reports_expired_for_dhan_without_token(client, monkeypatch):
+    monkeypatch.setenv("SE_DATA_SOURCE", "dhan")
+    monkeypatch.setenv("DHAN_ACCESS_TOKEN", "")  # no token -> not connected
+    d = client.get("/api/auth/status").json()
+    assert d["auth_required"] is True and d["connected"] is False
+    assert d["login_path"] == "/api/auth/dhan/start"
+
+
+def test_auth_start_requires_api_credentials(client, monkeypatch):
+    monkeypatch.delenv("DHAN_API_KEY", raising=False)
+    monkeypatch.delenv("DHAN_API_SECRET", raising=False)
+    monkeypatch.setenv("DHAN_CLIENT_ID", "x")
+    r = client.get("/api/auth/dhan/start", follow_redirects=False)
+    assert r.status_code == 400  # not configured -> no network attempted
+
+
+def test_auth_consume_rejects_without_active_login(client):
+    r = client.get("/api/auth/dhan/consume", params={"tokenId": "abc"})
+    assert r.status_code == 400  # no recent /start pending
+
+
 def test_premarket_endpoint(client):
     r = client.get("/api/premarket", params={"date": "2025-06-23"})
     assert r.status_code == 200

@@ -130,10 +130,15 @@ def test_run_replays_today_bars():
     """run() should invoke the callback for each of today's bars."""
     import datetime
 
-    today_utc = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    import pytz
+
+    # run() keeps bars whose IST date == today's IST date. Stamp rows off IST "today"
+    # (03:45 UTC == 09:15 IST, same calendar day) so the test is robust around the UTC/IST
+    # midnight boundary (IST is +5:30, so utcnow()'s date lags IST's between 00:00–05:30 IST).
+    today_ist = datetime.datetime.now(pytz.timezone("Asia/Kolkata")).strftime("%Y-%m-%d")
     rows = [
-        {"ts": f"{today_utc} 03:45:00", "o": 100.0, "h": 101.0, "l": 99.0, "c": 100.5, "v": 500},
-        {"ts": f"{today_utc} 03:46:00", "o": 100.5, "h": 102.0, "l": 100.0, "c": 101.0, "v": 600},
+        {"ts": f"{today_ist} 03:45:00", "o": 100.0, "h": 101.0, "l": 99.0, "c": 100.5, "v": 500},
+        {"ts": f"{today_ist} 03:46:00", "o": 100.5, "h": 102.0, "l": 100.0, "c": 101.0, "v": 600},
     ]
     received = []
     b = make_broker(rows)
