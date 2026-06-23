@@ -61,16 +61,30 @@ No API keys are required to run the MVP.
 
 ## Run
 
+> **macOS note:** there is no bare `python` on macOS and the `signal-engine` command
+> only exists *inside the activated venv*. Three equivalent ways to run, easiest first:
+>
+> 1. **`./run.sh <args>`** — wrapper that auto-activates the venv (no activation needed):
+>    ```bash
+>    ./run.sh replay --demo
+>    ./run.sh scan --top 20
+>    ```
+> 2. **Activate, then use the command** (must `source` once per new terminal):
+>    ```bash
+>    source .venv/bin/activate     # prompt shows (.venv)
+>    signal-engine replay --demo   # needs `pip install -e .` once
+>    ```
+> 3. **Full venv path** (no activation, no editable install):
+>    ```bash
+>    .venv/bin/python -m signal_engine.cli replay --demo
+>    ```
+
 The `replay` command runs a full synthetic trading session through the **exact pipeline**
 the live engine would use, then prints the leaderboard + paper-trading result.
 
 ```bash
-# via module (always works)
-python -m signal_engine.cli replay --date 2025-06-23 --demo
-# or, after `pip install -e .`
-signal-engine replay --date 2025-06-23 --demo
-
-signal-engine info        # config + safety summary
+./run.sh replay --date 2025-06-23 --demo
+./run.sh info        # config + safety summary
 ```
 
 Useful flags: `--symbols RELIANCE,INFY`, `--seed 7`, `--demo` (bias regimes so setups appear),
