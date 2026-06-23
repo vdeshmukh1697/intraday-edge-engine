@@ -20,6 +20,10 @@ def build_alerter(cfg: AppConfig) -> Alerter:
         from signal_engine.alerts.telegram import TelegramAlerter
 
         return TelegramAlerter(cfg.env.telegram_bot_token, cfg.env.telegram_chat_id)
+    if cfg.env.alerter == "whatsapp":
+        from signal_engine.alerts.whatsapp import WhatsAppAlerter
+
+        return WhatsAppAlerter(cfg.env.whatsapp_phone_id, cfg.env.whatsapp_token, cfg.env.whatsapp_to)
     return ConsoleAlerter()
 
 

@@ -99,11 +99,14 @@ class RiskConfig(BaseModel):
 class EnvConfig(BaseModel):
     data_source: str = "mock"            # "mock" | "dhan"
     allow_live_orders: bool = False      # safety switch; live orders are NOT implemented
-    alerter: str = "console"             # "console" | "telegram"
+    alerter: str = "console"             # "console" | "telegram" | "whatsapp"
     dhan_client_id: Optional[str] = None
     dhan_access_token: Optional[str] = None
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
+    whatsapp_phone_id: Optional[str] = None
+    whatsapp_token: Optional[str] = None
+    whatsapp_to: Optional[str] = None
     db_url: str = "sqlite:///data/signal_engine.sqlite3"
     parquet_dir: str = "data/parquet"
 
@@ -120,6 +123,9 @@ class EnvConfig(BaseModel):
             dhan_access_token=os.getenv("DHAN_ACCESS_TOKEN") or None,
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID") or None,
+            whatsapp_phone_id=os.getenv("WHATSAPP_PHONE_ID") or None,
+            whatsapp_token=os.getenv("WHATSAPP_TOKEN") or None,
+            whatsapp_to=os.getenv("WHATSAPP_TO") or None,
             db_url=os.getenv("SE_DB_URL", "sqlite:///data/signal_engine.sqlite3"),
             parquet_dir=os.getenv("SE_PARQUET_DIR", "data/parquet"),
         )

@@ -305,6 +305,19 @@ def cmd_train(args) -> int:
     return 0
 
 
+def cmd_serve(args) -> int:
+    """Run the FastAPI engine API (the backend the Next.js/Vercel dashboard consumes)."""
+    try:
+        import uvicorn
+    except ImportError:
+        print("API deps not installed. Run: pip install fastapi 'uvicorn[standard]' httpx")
+        return 2
+    print(f"Serving engine API on http://{args.host}:{args.port}  (docs at /docs)")
+    print(_DISCLAIMER)
+    uvicorn.run("signal_engine.api.app:app", host=args.host, port=args.port, reload=args.reload)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="signal-engine", description="Intraday signal engine (decision-support only).")
     sub = p.add_subparsers(dest="command", required=True)
@@ -364,6 +377,12 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("--seed", type=int, default=42, help="Synthetic data seed.")
     ph.add_argument("--threshold", type=float, default=50.0, help="Health alert threshold.")
     ph.set_defaults(func=cmd_health)
+
+    pv = sub.add_parser("serve", help="Run the FastAPI engine API for the dashboard.")
+    pv.add_argument("--host", default="127.0.0.1", help="Bind host (default 127.0.0.1).")
+    pv.add_argument("--port", type=int, default=8000, help="Bind port (default 8000).")
+    pv.add_argument("--reload", action="store_true", help="Auto-reload (dev).")
+    pv.set_defaults(func=cmd_serve)
 
     pi = sub.add_parser("info", help="Print config + safety summary.")
     pi.set_defaults(func=cmd_info)
