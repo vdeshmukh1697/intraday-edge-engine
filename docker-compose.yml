@@ -1,0 +1,31 @@
+# Engine deployment (PLAN §7.1). Two processes from one image: the read-only API and the
+# daily scheduler. Secrets come from your local .env (gitignored) — never committed.
+#
+# Usage:
+#   cp .env.example .env   # fill in any creds you have (all optional; defaults are mock)
+#   docker compose up --build
+#
+# The Next.js dashboard is NOT here — it deploys to Vercel and points at this API's public URL.
+
+services:
+  api:
+    build: .
+    command: python -m signal_engine.cli serve --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data        # persist Parquet archive + SQLite across restarts
+    restart: unless-stopped
+
+  scheduler:
+    build: .
+    command: python -m signal_engine.cli schedule
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    depends_on:
+      - api

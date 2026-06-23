@@ -208,6 +208,34 @@ threshold** (the A10 "system conscience"). Walk-forward / time-split helpers
 
 ---
 
+## Going live (real data, no synthetic)
+
+The engine defaults to synthetic data so it runs anywhere. Switch to real, free sources via env
+(no API keys needed for news/cues):
+
+```bash
+SE_NEWS_SOURCE=rss   ./run.sh news          # live Moneycontrol/ET headlines
+SE_CUES_SOURCE=yahoo ./run.sh premarket     # live GIFT-Nifty(proxy)/US/Asia/ADR cues (yfinance)
+```
+
+**Dhan live price feed** (needs your API token; market-data only, never orders): once your Dhan
+KYC is approved, generate a token (web.dhan.co → Profile → DhanHQ Trading APIs), put
+`DHAN_CLIENT_ID` / `DHAN_ACCESS_TOKEN` in `.env`, `pip install dhanhq`, set `SE_DATA_SOURCE=dhan`.
+The adapter's historical/quote handling is tested; the live websocket is wired but **verified only
+once a token exists** (see `NEXT_STEPS.md`).
+
+### Deploy (engine)
+```bash
+docker compose up --build         # API (:8000) + daily scheduler; persists ./data
+```
+Run on an always-on box (e.g. Oracle Cloud Always-Free, Mumbai). The scheduler runs the pre-market
+briefing (08:30), market-hours scans, and the nightly archive (IST, skips holidays):
+```bash
+./run.sh schedule
+```
+
+See **`NEXT_STEPS.md`** for the full path to real use (and what still needs you).
+
 ## Safety & scope (read this)
 - **No live order execution exists anywhere in the code.** The `BrokerAdapter` interface is
   market-data only; there is no order-placement method. `SE_ALLOW_LIVE_ORDERS` is an

@@ -172,6 +172,20 @@ FastAPI engine API (read-only) + Next.js/Lightweight-Charts dashboard scaffold +
 
 ---
 
+## Production integrations (post-phase, credential-free) ✅ DONE
+Built after the phases, to take the system toward real use without needing any accounts:
+- [x] `done` **Real RSS news** (`news/rss.py`) — Moneycontrol/ET; live-verified (69 items). `SE_NEWS_SOURCE=rss`.
+- [x] `done` **Real Yahoo cues** (`premarket/yahoo_cues.py`) — yfinance; live-verified. `SE_CUES_SOURCE=yahoo`.
+- [x] `done` **Dhan adapter** (`brokers/dhan.py`) — market-data only, SDK lazy-import, historical/quote
+      normalization unit-tested (DI); live websocket guarded until creds. **KYC pending on user's account.**
+- [x] `done` **Instrument master** (`universe/instruments.py`) — symbol→security_id from Dhan's free CSV.
+- [x] `done` **Docker** (`Dockerfile` + `docker-compose.yml`: API + scheduler, persists data/).
+- [x] `done` **Daily scheduler** (`scheduler.py` + CLI `schedule`): pre-market/scan/archive, IST, holiday-aware.
+- [x] `done` Config/factory wiring for source selection (`SE_NEWS_SOURCE`/`SE_CUES_SOURCE`); `.env.example` updated.
+- [x] `done` Tests: rss (9), yahoo cues (9), dhan+instruments (7), scheduler (2) → **306 total green**.
+- ⛔ **Blocked on user:** Dhan API token (KYC review), WhatsApp/Vercel accounts, running `web/` (needs Node).
+  See `NEXT_STEPS.md` for the handoff.
+
 ## BUILD COMPLETE — Phases 0–8
 All planned phases implemented (Phase 8 hardening done; auto-execution intentionally excluded).
 **276 tests green · ruff clean.** CLI: `info / scan / replay / backtest / health / news / premarket /

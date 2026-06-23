@@ -9,8 +9,6 @@ from __future__ import annotations
 import math
 from datetime import date
 
-import pytest
-
 from signal_engine.premarket.models import GlobalCues
 from signal_engine.premarket.yahoo_cues import (
     ADR_TICKER_MAP,

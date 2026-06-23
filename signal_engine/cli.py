@@ -244,9 +244,14 @@ def cmd_premarket(args) -> int:
         print(f"{day} is not an NSE trading day. Pick another date.")
         return 2
 
+    from signal_engine.factory import build_cues_provider
     from signal_engine.premarket.briefing import build_briefing
 
-    b = build_briefing(cfg, symbols=symbols, day=day, seed=args.seed, top_n=args.top)
+    cues = build_cues_provider(cfg)  # real Yahoo cues if SE_CUES_SOURCE=yahoo, else mock
+    if cues is not None:
+        print("(using live Yahoo Finance global cues)")
+    b = build_briefing(cfg, symbols=symbols, day=day, seed=args.seed, top_n=args.top,
+                       cues_provider=cues)
     o = b.index_outlook
     print(f"=== PRE-MARKET BRIEFING — {day} ===")
     print(f"Index outlook   : {o.gap_bias.value}  expected gap {o.expected_gap_pct:+.2f}%  "
@@ -302,6 +307,18 @@ def cmd_train(args) -> int:
     print("Note: ML stays shadow-only until it beats rules out-of-sample AND in forward "
           "paper-trading (PLAN §4.7/§8). It does not change live decisions.")
     print("\n" + _DISCLAIMER)
+    return 0
+
+
+def _run_scheduler() -> int:
+    try:
+        from signal_engine.scheduler import start
+    except ImportError:
+        print("Scheduler deps not installed. Run: pip install apscheduler")
+        return 2
+    print("Starting daily scheduler (pre-market 08:30 / scan 09-14 / archive 16:00 IST). Ctrl-C to stop.")
+    print(_DISCLAIMER)
+    start()
     return 0
 
 
@@ -377,6 +394,9 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("--seed", type=int, default=42, help="Synthetic data seed.")
     ph.add_argument("--threshold", type=float, default=50.0, help="Health alert threshold.")
     ph.set_defaults(func=cmd_health)
+
+    psch = sub.add_parser("schedule", help="Run the daily job scheduler (pre-market/scan/archive).")
+    psch.set_defaults(func=lambda args: (_run_scheduler()))
 
     pv = sub.add_parser("serve", help="Run the FastAPI engine API for the dashboard.")
     pv.add_argument("--host", default="127.0.0.1", help="Bind host (default 127.0.0.1).")

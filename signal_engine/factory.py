@@ -41,3 +41,25 @@ def build_broker(
     from signal_engine.brokers.mock import MockBroker
 
     return MockBroker(day=day, seed=seed, regime_map=regime_map)
+
+
+def build_cues_provider(cfg: AppConfig):
+    """Real Yahoo cues if SE_CUES_SOURCE=yahoo, else None (caller falls back to mock)."""
+    if cfg.env.cues_source == "yahoo":
+        from signal_engine.premarket.yahoo_cues import YahooCuesProvider
+
+        return YahooCuesProvider()
+    return None
+
+
+def build_news_provider(cfg: AppConfig):
+    """Real RSS provider if SE_NEWS_SOURCE=rss (live current headlines), else None (mock).
+
+    Note: RSS yields *current* headlines — meaningful for live/today runs, not for historical
+    backtest dates (use mock there).
+    """
+    if cfg.env.news_source == "rss":
+        from signal_engine.news.rss import RSSNewsProvider
+
+        return RSSNewsProvider()
+    return None

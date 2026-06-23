@@ -98,6 +98,8 @@ class RiskConfig(BaseModel):
 # --------------------------------------------------------------------------- #
 class EnvConfig(BaseModel):
     data_source: str = "mock"            # "mock" | "dhan"
+    news_source: str = "mock"            # "mock" | "rss" (rss = live current headlines)
+    cues_source: str = "mock"            # "mock" | "yahoo" (yahoo = live yfinance cues)
     allow_live_orders: bool = False      # safety switch; live orders are NOT implemented
     alerter: str = "console"             # "console" | "telegram" | "whatsapp"
     dhan_client_id: Optional[str] = None
@@ -117,6 +119,8 @@ class EnvConfig(BaseModel):
 
         return cls(
             data_source=os.getenv("SE_DATA_SOURCE", "mock"),
+            news_source=os.getenv("SE_NEWS_SOURCE", "mock"),
+            cues_source=os.getenv("SE_CUES_SOURCE", "mock"),
             allow_live_orders=_bool(os.getenv("SE_ALLOW_LIVE_ORDERS", "false")),
             alerter=os.getenv("SE_ALERTER", "console"),
             dhan_client_id=os.getenv("DHAN_CLIENT_ID") or None,
