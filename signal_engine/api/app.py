@@ -173,9 +173,14 @@ def create_app() -> FastAPI:
         seed: int = 42, news: bool = True, ml: bool = False,
     ):
         # Real data: scan the backfilled NSE corpus (recognizable names, real prices).
+        # The cache key includes the archive's symbol count, so the leaderboard auto-refreshes
+        # as the backfill/gap-fill (and nightly archive) grow the corpus — no restart needed.
         # Falls back to the synthetic universe only if the archive is empty or SE_DATA_SOURCE=mock.
         if cfg.env.data_source != "mock":
-            ckey = (top, news)
+            from signal_engine.storage.bars import ParquetBarStore
+
+            n_archived = len(ParquetBarStore(cfg.env.parquet_dir).list_symbols())
+            ckey = (top, news, n_archived)
             if ckey not in _LEADERBOARD_CACHE:
                 real = _archive_leaderboard(cfg, top, news)
                 if real is not None:
