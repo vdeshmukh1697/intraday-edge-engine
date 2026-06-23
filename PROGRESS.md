@@ -176,22 +176,24 @@ FastAPI engine API (read-only) + Next.js/Lightweight-Charts dashboard scaffold +
 Built after the phases, to take the system toward real use without needing any accounts:
 - [x] `done` **Real RSS news** (`news/rss.py`) — Moneycontrol/ET; live-verified (69 items). `SE_NEWS_SOURCE=rss`.
 - [x] `done` **Real Yahoo cues** (`premarket/yahoo_cues.py`) — yfinance; live-verified. `SE_CUES_SOURCE=yahoo`.
-- [x] `done` **Dhan adapter** (`brokers/dhan.py`) — market-data only, SDK lazy-import, historical/quote
-      normalization unit-tested (DI); live websocket guarded until creds. **KYC pending on user's account.**
-- [x] `done` **Instrument master** (`universe/instruments.py`) — symbol→security_id from Dhan's free CSV.
+- [x] `done` **Yahoo NSE broker** (`brokers/yahoo_nse.py`) — free, 15-min delayed, no account. `SE_DATA_SOURCE=yahoo_nse`. **Default.**
+- [x] `done` **Angel One broker** (`brokers/angelone.py`) — free real-time via SmartAPI (needs account). `SE_DATA_SOURCE=angelone`.
+- [x] `done` **Dhan adapter** (`brokers/dhan.py`) — market-data only, DI-tested (http_post injectable). Data API subscription (~₹500/mo) needed for live.
+- [x] `done` **Instrument masters** — Dhan CSV (`universe/instruments.py`) + Angel One JSON (`brokers/angelone.py`).
+- [x] `done` **CallMeBot alerter** (`alerts/callmebot.py`) — free personal WhatsApp, no Meta Business account. `SE_ALERTER=callmebot`.
 - [x] `done` **Docker** (`Dockerfile` + `docker-compose.yml`: API + scheduler, persists data/).
 - [x] `done` **Daily scheduler** (`scheduler.py` + CLI `schedule`): pre-market/scan/archive, IST, holiday-aware.
-- [x] `done` Config/factory wiring for source selection (`SE_NEWS_SOURCE`/`SE_CUES_SOURCE`); `.env.example` updated.
-- [x] `done` Tests: rss (9), yahoo cues (9), dhan+instruments (7), scheduler (2) → **306 total green**.
-- ⛔ **Blocked on user:** Dhan API token (KYC review), WhatsApp/Vercel accounts, running `web/` (needs Node).
-  See `NEXT_STEPS.md` for the handoff.
+- [x] `done` **Vercel dashboard** — deployed at https://web-beta-beige-60.vercel.app (Next.js, Hobby/free).
+- [x] `done` **Cloudflare tunnel script** (`run-with-tunnel.sh`) — one command: starts API + tunnel + updates Vercel env.
+- [x] `done` Config/factory wiring for all sources; `.env.example` updated with all options.
+- [x] `done` Tests: rss (9), yahoo cues (9), dhan+instruments (7), scheduler (2), yahoo_nse (11), angelone (13), callmebot (4) → **331 total green**.
 
-## BUILD COMPLETE — Phases 0–8
+## BUILD COMPLETE — Phases 0–8 + all integrations
 All planned phases implemented (Phase 8 hardening done; auto-execution intentionally excluded).
-**276 tests green · ruff clean.** CLI: `info / scan / replay / backtest / health / news / premarket /
-train / serve`. Web: FastAPI API + Next.js dashboard scaffold (`web/`, needs Node to run).
-Gated/deferred (by design, behind interfaces): live Dhan feed, real RSS/yfinance/WhatsApp/Vercel,
-Redis, Polars vectorization, LightGBM/FinBERT backends, live order execution.
+**331 tests green · ruff clean.** CLI: `info / scan / replay / backtest / health / news / premarket /
+train / serve / schedule`. Web: FastAPI API + Next.js dashboard at https://web-beta-beige-60.vercel.app.
+Default data source: Yahoo Finance (free, no account). Optional: Angel One (free real-time) or Dhan (paid).
+Gated (by design): live order execution, Redis, Polars, LightGBM/FinBERT. Run: `./run-with-tunnel.sh`.
 
 ---
 

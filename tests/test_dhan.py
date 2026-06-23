@@ -73,16 +73,25 @@ def test_normalize_handles_unwrapped_and_empty():
     assert DhanBroker._normalize_historical("X", None) == []
 
 
-def test_historical_with_injected_client():
-    """End-to-end historical() using a fake dhanhq client + instrument master (no network)."""
+def test_historical_with_injected_post():
+    """End-to-end historical() using an injected http_post stub + instrument master (no network)."""
+    import base64
+    import json as _json
+
     m = DhanInstrumentMaster.from_csv_text(_CSV)
 
-    class FakeClient:
-        def intraday_minute_data(self, security_id, exchange_segment, instrument_type):
-            assert security_id == "2885" and exchange_segment == "NSE_EQ"
-            return {"data": {"open": [100.0], "high": [101.0], "low": [99.0],
-                             "close": [100.5], "volume": [10], "timestamp": [1750650300]}}
+    def fake_post(url, body, headers, timeout=30.0):
+        assert body.get("securityId") == "2885"
+        assert body.get("exchangeSegment") == "NSE_EQ"
+        return 200, {"data": {"open": [100.0], "high": [101.0], "low": [99.0],
+                              "close": [100.5], "volume": [10], "timestamp": [1750650300]}}
 
-    b = DhanBroker(instruments=m, client=FakeClient())
+    # JWT with exp far in the future (2099-01-01)
+    payload = base64.urlsafe_b64encode(
+        _json.dumps({"exp": 4070908800, "iss": "dhan"}).encode()
+    ).decode().rstrip("=")
+    future_token = f"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.{payload}.sig"
+
+    b = DhanBroker(client_id="test123", access_token=future_token, instruments=m, http_post=fake_post)
     bars = b.historical("RELIANCE", "1m", None, None)
     assert len(bars) == 1 and bars[0].close == 100.5

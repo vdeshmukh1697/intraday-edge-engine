@@ -24,6 +24,10 @@ def build_alerter(cfg: AppConfig) -> Alerter:
         from signal_engine.alerts.whatsapp import WhatsAppAlerter
 
         return WhatsAppAlerter(cfg.env.whatsapp_phone_id, cfg.env.whatsapp_token, cfg.env.whatsapp_to)
+    if cfg.env.alerter == "callmebot":
+        from signal_engine.alerts.callmebot import CallMeBotAlerter
+
+        return CallMeBotAlerter(cfg.env.callmebot_phone, cfg.env.callmebot_apikey)
     return ConsoleAlerter()
 
 
@@ -33,8 +37,20 @@ def build_broker(
     seed: int = 42,
     regime_map: Optional[Dict[str, str]] = None,
 ) -> BrokerAdapter:
+    if cfg.env.data_source == "yahoo_nse":
+        from signal_engine.brokers.yahoo_nse import YahooNSEBroker
+
+        return YahooNSEBroker()
+    if cfg.env.data_source == "angelone":
+        from signal_engine.brokers.angelone import AngelOneBroker
+
+        return AngelOneBroker(
+            api_key=cfg.env.angelone_api_key,
+            client_id=cfg.env.angelone_client_id,
+            password=cfg.env.angelone_password,
+            totp_secret=cfg.env.angelone_totp_secret,
+        )
     if cfg.env.data_source == "dhan":
-        # Data-only, and gated: it will refuse to connect (see DhanBroker / ground rules).
         from signal_engine.brokers.dhan import DhanBroker
 
         return DhanBroker(cfg.env.dhan_client_id, cfg.env.dhan_access_token)

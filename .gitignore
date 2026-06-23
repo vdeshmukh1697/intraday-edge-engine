@@ -28,6 +28,9 @@ data/cache/
 # trained ML models (regenerate with `train`)
 data/models/
 
+# Runtime logs
+logs/
+
 # Node / Next.js (web/ dashboard)
 node_modules/
 .next/

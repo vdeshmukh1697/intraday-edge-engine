@@ -1,21 +1,26 @@
-"""Dhan market-data adapter (PLAN §3.2). MARKET-DATA ONLY — never places orders.
+"""Dhan market-data adapter (PLAN §3.2) — direct Dhan v2 REST. MARKET-DATA ONLY, no orders.
 
-Implements ``BrokerAdapter`` against the official ``dhanhq`` SDK. Lazy-imported so the
-package works without it; gated so it refuses to connect without credentials.
+Why REST (not the dhanhq SDK): the current SDK requires Python 3.10+ (uses ``match``) and
+this project targets 3.9; calling the documented v2 REST API directly is simpler, dependency-
+free, and gives exact control. Verified live: auth headers accepted, instrument master loads.
 
-SAFETY: there is no order-placement method here or anywhere. ``supports_live_orders`` is
-always False. This is a decision-support tool (PLAN §1, §9).
+SUBSCRIPTION NOTE: market-data endpoints require Dhan's paid **Data APIs** subscription. With
+a token that lacks it, Dhan returns DH-902 ("not subscribed"); this adapter surfaces that as
+a clear ``DhanDataNotSubscribedError`` so the cause is obvious. Order placement is never
+implemented (``supports_live_orders`` is always False).
 
-VERIFICATION STATUS: the historical/quote response normalization is unit-tested via an
-injected fake client. The live websocket feed (``run``) and exact dhanhq method
-signatures must be confirmed against the installed SDK version + a live account once
-credentials exist (KYC pending). NOTE markers flag those spots.
+The live websocket feed (``run``) also needs the Data API subscription and is left guarded.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Dict, List, Optional
+import base64
+import json
+import time as _time
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta
+from typing import Callable, Dict, List, Optional
 
 import pytz
 
@@ -24,6 +29,35 @@ from signal_engine.domain.models import Bar, Tick
 from signal_engine.universe.instruments import DhanInstrumentMaster
 
 IST = pytz.timezone("Asia/Kolkata")
+_BASE = "https://api.dhan.co/v2"
+_INTERVAL = {"1m": "1", "5m": "5", "15m": "15", "25m": "25", "60m": "60"}
+
+
+class DhanDataNotSubscribedError(RuntimeError):
+    """Raised when the token is valid but the account lacks the paid Data API subscription."""
+
+
+def token_expiry(access_token: str) -> Optional[datetime]:
+    """Decode the JWT ``exp`` (UTC) without verifying the signature. None if unparseable."""
+    try:
+        payload = access_token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        data = json.loads(base64.urlsafe_b64decode(payload))
+        return datetime.utcfromtimestamp(int(data["exp"]))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _default_post(url: str, body: dict, headers: dict, timeout: float = 30.0):
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode())
+        except Exception:  # noqa: BLE001
+            return e.code, {}
 
 
 class DhanBroker(BrokerAdapter):
@@ -34,76 +68,84 @@ class DhanBroker(BrokerAdapter):
         client_id: Optional[str] = None,
         access_token: Optional[str] = None,
         instruments: Optional[DhanInstrumentMaster] = None,
-        client: Optional[object] = None,  # injectable for tests (a dhanhq instance)
+        http_post: Optional[Callable] = None,  # injectable (url, body, headers) -> (status, json)
     ):
         self.client_id = client_id
         self.access_token = access_token
         self.instruments = instruments
-        self._client = client
+        self._post = http_post or _default_post
         self._cb: Optional[TickCallback] = None
         self._symbols: List[str] = []
         self._last: Dict[str, Tick] = {}
 
     # --- lifecycle ---------------------------------------------------------
+    def _headers(self) -> dict:
+        return {
+            "access-token": self.access_token,
+            "client-id": self.client_id,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
     def connect(self) -> None:
-        if self._client is not None:
-            return  # injected (tests)
         if not (self.client_id and self.access_token):
             raise RuntimeError(
-                "DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN not set. Live data is disabled; "
-                "use SE_DATA_SOURCE=mock until your Dhan API token is available."
+                "DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN not set. Use SE_DATA_SOURCE=mock."
             )
-        try:
-            from dhanhq import dhanhq
-        except ImportError as exc:
+        exp = token_expiry(self.access_token)
+        if exp is not None and exp < datetime.utcnow():
             raise RuntimeError(
-                "Dhan SDK not installed. Run `pip install dhanhq` to enable the live feed."
-            ) from exc
-        self._client = dhanhq(self.client_id, self.access_token)
+                f"Dhan token expired at {exp} UTC — regenerate it in the Dhan web portal."
+            )
 
     def disconnect(self) -> None:
-        self._client = None
+        return None
 
-    def _require(self):
-        if self._client is None:
-            self.connect()
-        return self._client
+    def token_seconds_remaining(self) -> Optional[float]:
+        exp = token_expiry(self.access_token or "")
+        return None if exp is None else (exp.timestamp() - _time.time())
 
-    def _sec_id(self, symbol: str) -> str:
+    def _ref(self, symbol: str):
         if self.instruments is None:
-            raise RuntimeError(
-                "No Dhan instrument master loaded — map symbols to security IDs first "
-                "(DhanInstrumentMaster.fetch())."
-            )
+            raise RuntimeError("No Dhan instrument master loaded (DhanInstrumentMaster.fetch()).")
         ref = self.instruments.ref(symbol)
         if ref is None:
             raise KeyError(f"No Dhan security_id for symbol {symbol!r}")
-        return ref.security_id
+        return ref
+
+    @staticmethod
+    def _check_subscription(status, resp) -> None:
+        text = json.dumps(resp) if isinstance(resp, dict) else str(resp)
+        if "DH-902" in text or "not subscribed" in text.lower() or "not Subscribed" in text:
+            raise DhanDataNotSubscribedError(
+                "Dhan token is valid but the account is NOT subscribed to Data APIs "
+                "(market data is a paid add-on, ~Rs.500/mo). Subscribe in the Dhan portal, "
+                "or use the free Yahoo Finance NSE data source (SE_DATA_SOURCE=yahoo_nse)."
+            )
 
     # --- data --------------------------------------------------------------
     def historical(self, symbol: str, timeframe: str, start: datetime, end: datetime) -> List[Bar]:
-        """Fetch 1-minute bars and normalize to List[Bar].
-
-        NOTE: dhanhq exposes intraday minute data as ``intraday_minute_data`` (v2). Confirm
-        the method name + response shape against your installed SDK version. The normalizer
-        below handles the documented dict-of-arrays response and is unit-tested.
-        """
-        client = self._require()
-        sec_id = self._sec_id(symbol)
-        seg = self.instruments.ref(symbol).exchange_segment
-        # NOTE: signature per dhanhq v2; adjust if your version differs.
-        resp = client.intraday_minute_data(
-            security_id=sec_id, exchange_segment=seg, instrument_type="EQUITY"
-        )
+        self.connect()
+        ref = self._ref(symbol)
+        start = start or (datetime.now(IST) - timedelta(days=5))
+        end = end or datetime.now(IST)
+        body = {
+            "securityId": ref.security_id,
+            "exchangeSegment": ref.exchange_segment,
+            "instrument": "EQUITY",
+            "interval": _INTERVAL.get(timeframe, "1"),
+            "fromDate": start.strftime("%Y-%m-%d"),
+            "toDate": end.strftime("%Y-%m-%d"),
+        }
+        status, resp = self._post(f"{_BASE}/charts/intraday", body, self._headers())
+        self._check_subscription(status, resp)
         return self._normalize_historical(symbol, resp)
 
     @staticmethod
     def _normalize_historical(symbol: str, resp: object) -> List[Bar]:
-        """Convert a dhanhq historical response to List[Bar]. Tested via injected fakes.
+        """Dhan intraday response (arrays of open/high/low/close/volume/timestamp) -> List[Bar].
 
-        Accepts the documented shape: {"data": {"open":[...], "high":[...], "low":[...],
-        "close":[...], "volume":[...], "timestamp":[...]}} (timestamps epoch seconds),
-        and tolerates a top-level dict without the "data" wrapper.
+        Timestamps are epoch seconds. Tolerates a top-level dict or a ``data`` wrapper.
         """
         data = resp.get("data", resp) if isinstance(resp, dict) else {}
         opens = data.get("open") or []
@@ -120,18 +162,36 @@ class DhanBroker(BrokerAdapter):
                 ts = None
             if ts is None:
                 continue
-            bars.append(Bar(
-                symbol=symbol, ts=ts, open=float(opens[i]), high=float(highs[i]),
-                low=float(lows[i]), close=float(closes[i]),
-                volume=int(vols[i]) if i < len(vols) else 0, timeframe="1m",
-            ))
+            bars.append(Bar(symbol=symbol, ts=ts, open=float(opens[i]), high=float(highs[i]),
+                            low=float(lows[i]), close=float(closes[i]),
+                            volume=int(vols[i]) if i < len(vols) else 0, timeframe="1m"))
         return bars
 
     def quote(self, symbols: List[str]) -> Dict[str, Tick]:
-        """Latest snapshot per symbol. NOTE: confirm dhanhq quote method/shape on your SDK."""
-        return {s: self._last[s] for s in symbols if s in self._last}
+        self.connect()
+        by_seg: Dict[str, List[int]] = {}
+        sid_to_sym: Dict[str, str] = {}
+        for s in symbols:
+            ref = self._ref(s)
+            by_seg.setdefault(ref.exchange_segment, []).append(int(ref.security_id))
+            sid_to_sym[str(ref.security_id)] = s
+        status, resp = self._post(f"{_BASE}/marketfeed/ltp", by_seg, self._headers())
+        self._check_subscription(status, resp)
+        out: Dict[str, Tick] = {}
+        now = datetime.now(IST)
+        data = resp.get("data", {}) if isinstance(resp, dict) else {}
+        for _seg, items in data.items():
+            if not isinstance(items, dict):
+                continue
+            for sid, payload in items.items():
+                sym = sid_to_sym.get(str(sid))
+                ltp = payload.get("last_price") if isinstance(payload, dict) else None
+                if sym and ltp is not None:
+                    out[sym] = Tick(symbol=sym, ts=now, ltp=float(ltp), volume=0)
+        self._last.update(out)
+        return out
 
-    # --- live feed (subscribe/run) -----------------------------------------
+    # --- live feed ---------------------------------------------------------
     def subscribe(self, symbols: List[str]) -> None:
         self._symbols = list(symbols)
 
@@ -139,15 +199,7 @@ class DhanBroker(BrokerAdapter):
         self._cb = callback
 
     def run(self) -> None:
-        """Open the Dhan market-data websocket and forward ticks to the callback.
-
-        NOT VERIFIED against a live account (KYC pending). dhanhq exposes the feed via
-        ``from dhanhq import marketfeed`` -> ``marketfeed.DhanFeed(...)`` with instrument
-        tuples (exchange_segment, security_id, subscription_type). This wiring must be
-        validated once credentials exist; until then the engine uses the mock feed.
-        """
         raise NotImplementedError(
-            "Live Dhan websocket feed is not yet verified (KYC/credentials pending). "
-            "Historical/quote normalization is tested; wire + verify the feed when the "
-            "Dhan API token is available. Use SE_DATA_SOURCE=mock in the meantime."
+            "Live Dhan websocket feed requires the paid Data API subscription and is not "
+            "wired yet. Use SE_DATA_SOURCE=yahoo_nse (free, delayed) or mock until subscribed."
         )

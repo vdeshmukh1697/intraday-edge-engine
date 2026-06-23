@@ -9,6 +9,7 @@ import {
   todayStr,
   type ChartResponse,
   type WsMessage,
+  type LiveBar,
 } from "@/lib/api";
 import CandleChart, { type CandleChartHandle } from "@/components/CandleChart";
 
@@ -78,7 +79,7 @@ export default function StockPage() {
           return;
         }
         // It's a bar — append smoothly via series.update.
-        chartHandleRef.current?.updateBar(msg);
+        chartHandleRef.current?.updateBar(msg as LiveBar);
       };
       ws.onerror = () => setLiveMsg("Connection error");
       ws.onclose = () => {

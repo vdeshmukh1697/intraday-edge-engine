@@ -96,12 +96,40 @@ class RiskConfig(BaseModel):
 # --------------------------------------------------------------------------- #
 # Environment (secrets + runtime mode)
 # --------------------------------------------------------------------------- #
+_DOTENV_LOADED = False
+
+
+def _load_dotenv(path: Optional[Path] = None) -> None:
+    """Minimal, dependency-free ``.env`` loader for local (non-Docker) runs.
+
+    Reads ``KEY=VALUE`` lines from the repo-root ``.env`` into ``os.environ``.
+    Real environment variables already set take precedence (so Docker's
+    ``env_file`` and explicit exports are never overridden). Runs once.
+    """
+    global _DOTENV_LOADED
+    if _DOTENV_LOADED:
+        return
+    _DOTENV_LOADED = True
+    env_path = path or (REPO_ROOT / ".env")
+    if not env_path.exists():
+        return
+    for raw in env_path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = val
+
+
 class EnvConfig(BaseModel):
-    data_source: str = "mock"            # "mock" | "dhan"
+    data_source: str = "mock"            # "mock" | "yahoo_nse" | "angelone" | "dhan"
     news_source: str = "mock"            # "mock" | "rss" (rss = live current headlines)
     cues_source: str = "mock"            # "mock" | "yahoo" (yahoo = live yfinance cues)
     allow_live_orders: bool = False      # safety switch; live orders are NOT implemented
-    alerter: str = "console"             # "console" | "telegram" | "whatsapp"
+    alerter: str = "console"             # "console" | "telegram" | "whatsapp" | "callmebot"
     dhan_client_id: Optional[str] = None
     dhan_access_token: Optional[str] = None
     telegram_bot_token: Optional[str] = None
@@ -109,11 +137,19 @@ class EnvConfig(BaseModel):
     whatsapp_phone_id: Optional[str] = None
     whatsapp_token: Optional[str] = None
     whatsapp_to: Optional[str] = None
+    callmebot_phone: Optional[str] = None
+    callmebot_apikey: Optional[str] = None
+    angelone_api_key: Optional[str] = None
+    angelone_client_id: Optional[str] = None
+    angelone_password: Optional[str] = None
+    angelone_totp_secret: Optional[str] = None
     db_url: str = "sqlite:///data/signal_engine.sqlite3"
     parquet_dir: str = "data/parquet"
 
     @classmethod
     def from_env(cls) -> "EnvConfig":
+        _load_dotenv()  # populate os.environ from .env for local (non-Docker) runs
+
         def _bool(v: Optional[str]) -> bool:
             return str(v).strip().lower() in ("1", "true", "yes", "on")
 
@@ -130,6 +166,12 @@ class EnvConfig(BaseModel):
             whatsapp_phone_id=os.getenv("WHATSAPP_PHONE_ID") or None,
             whatsapp_token=os.getenv("WHATSAPP_TOKEN") or None,
             whatsapp_to=os.getenv("WHATSAPP_TO") or None,
+            callmebot_phone=os.getenv("CALLMEBOT_PHONE") or None,
+            callmebot_apikey=os.getenv("CALLMEBOT_APIKEY") or None,
+            angelone_api_key=os.getenv("ANGELONE_API_KEY") or None,
+            angelone_client_id=os.getenv("ANGELONE_CLIENT_ID") or None,
+            angelone_password=os.getenv("ANGELONE_PASSWORD") or None,
+            angelone_totp_secret=os.getenv("ANGELONE_TOTP_SECRET") or None,
             db_url=os.getenv("SE_DB_URL", "sqlite:///data/signal_engine.sqlite3"),
             parquet_dir=os.getenv("SE_PARQUET_DIR", "data/parquet"),
         )
