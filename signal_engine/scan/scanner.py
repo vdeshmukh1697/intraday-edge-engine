@@ -1,0 +1,106 @@
+"""Scanner — the scan lane (PLAN §4.0): full universe -> filter -> strategy -> risk -> rank.
+
+Snapshot model: given each symbol's bar history up to an as-of time, compute features,
+apply the liquidity+cost filter, run the strategy, gate through risk, and rank survivors
+into a Top-N leaderboard. The SAME indicator/strategy/risk core as the live engine and the
+backtester — only the driver differs.
+
+Structured so the per-symbol inner loop can later be swapped for a vectorized (Polars)
+batch without changing the contract (deferred perf work; see PROGRESS).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+
+import pandas as pd
+
+from signal_engine.domain.enums import MarketState
+from signal_engine.indicators import compute_features
+from signal_engine.risk.costs import CostModel
+from signal_engine.risk.manager import RiskManager
+from signal_engine.scan.filter import LiquidityCostFilter
+from signal_engine.scan.ranking import LeaderboardEntry, rank_plans
+from signal_engine.state.store import StateStore
+from signal_engine.strategies.base import Strategy, StrategyContext
+from signal_engine.universe.models import InstrumentMeta
+
+_MIN_BARS = 35  # need enough history for ADX(14)/EMA(21)/RVOL(20) to be non-NaN
+
+
+@dataclass
+class ScanResult:
+    leaderboard: List[LeaderboardEntry] = field(default_factory=list)
+    universe_size: int = 0
+    deep_scanned: int = 0      # symbols with enough history that we evaluated
+    filtered_out: int = 0      # failed liquidity/cost filter
+    no_signal: int = 0         # strategy produced nothing
+    vetoed: int = 0            # risk layer rejected (R:R / edge-after-cost)
+    candidates: int = 0        # surfaced trade plans (pre-Top-N)
+
+
+class Scanner:
+    def __init__(
+        self,
+        params: Dict[str, float],
+        strategy: Strategy,
+        cost_model: CostModel,
+        risk_manager: RiskManager,
+        liquidity_filter: LiquidityCostFilter,
+        state_store: Optional[StateStore] = None,
+    ):
+        self.params = params
+        self.strategy = strategy
+        self.cost_model = cost_model
+        self.risk_manager = risk_manager
+        self.filter = liquidity_filter
+        self.state = state_store
+
+    def scan(
+        self,
+        metas: List[InstrumentMeta],
+        histories: Dict[str, pd.DataFrame],
+        top_n: int = 20,
+    ) -> ScanResult:
+        result = ScanResult(universe_size=len(metas))
+        candidates = []  # list[(plan, meta)]
+
+        for meta in metas:
+            df = histories.get(meta.symbol)
+            if df is None or len(df) < _MIN_BARS:
+                continue
+            result.deep_scanned += 1
+
+            features = compute_features(df, self.params)
+            if self.state is not None:
+                self.state.set_features(meta.symbol, features)
+
+            fr = self.filter.evaluate(meta, features)
+            if not fr.tradeable:
+                result.filtered_out += 1
+                continue
+
+            ts = df.index[-1]
+            ts = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
+            ctx = StrategyContext(
+                symbol=meta.symbol, ts=ts, features=features, bars=df,
+                session_state=MarketState.OPEN, params=self.params,
+            )
+            signal = self.strategy.on_bar(ctx)
+            if signal is None:
+                result.no_signal += 1
+                continue
+
+            plan = self.risk_manager.build_trade_plan(signal, features, self.cost_model)
+            if plan is None:
+                result.vetoed += 1
+                continue
+
+            candidates.append((plan, meta))
+
+        result.candidates = len(candidates)
+        result.leaderboard = rank_plans(candidates, top_n)
+        if self.state is not None:
+            self.state.set_leaderboard(result.leaderboard)
+        return result

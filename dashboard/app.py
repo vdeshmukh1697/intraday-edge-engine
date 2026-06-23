@@ -33,12 +33,22 @@ st.caption(
 cfg = load_config()
 
 with st.sidebar:
-    st.header("Replay controls")
+    mode = st.radio("Mode", ["Scan (leaderboard)", "Replay (paper book)"])
+    st.divider()
     day = st.date_input("Trading day", value=date(2025, 6, 23))
     seed = st.number_input("Seed", value=7, step=1)
-    demo = st.checkbox("Demo regimes (force setups)", value=True)
-    symbols = st.multiselect("Symbols", cfg.settings.watchlist, default=cfg.settings.watchlist)
-    run = st.button("Run replay", type="primary")
+    if mode.startswith("Scan"):
+        st.header("Scan controls")
+        universe_n = st.number_input("Universe size", value=2000, step=100)
+        top_n = st.number_input("Top N", value=20, step=5)
+        run_scan_btn = st.button("Run scan", type="primary")
+        run, demo, symbols = False, False, []
+    else:
+        st.header("Replay controls")
+        demo = st.checkbox("Demo regimes (force setups)", value=True)
+        symbols = st.multiselect("Symbols", cfg.settings.watchlist, default=cfg.settings.watchlist)
+        run = st.button("Run replay", type="primary")
+        run_scan_btn = False
 
 
 @st.cache_data(show_spinner=True)
@@ -111,5 +121,45 @@ if run and symbols:
         index=df.index,
     )
     st.line_chart(chart)
-else:
-    st.info("Set controls in the sidebar and click **Run replay**.")
+
+
+@st.cache_data(show_spinner=True)
+def _scan(day_iso: str, seed: int, universe_n: int, top_n: int):
+    from datetime import time as _time
+
+    from signal_engine.scan.harness import run_scan
+    from signal_engine.universe.mock import MockUniverseProvider
+
+    uni = MockUniverseProvider(n=int(universe_n), seed=int(seed))
+    res = run_scan(cfg, uni, date.fromisoformat(day_iso), as_of=_time(11, 0),
+                   seed=int(seed), top_n=int(top_n))
+    rows = [
+        {
+            "rank": e.rank, "symbol": e.symbol, "dir": e.plan.direction.value,
+            "score": e.score, "entry": e.plan.entry, "stop%": -e.plan.stop_pct,
+            "T1%": e.plan.target_pcts[0], "R:R": e.plan.risk_reward,
+            "conf": e.plan.confidence, "sector": e.sector, "turnover_cr": e.turnover_cr,
+            "why": ", ".join(e.plan.reasons),
+        }
+        for e in res.leaderboard
+    ]
+    stats = {"universe": res.universe_size, "deep_scanned": res.deep_scanned,
+             "candidates": res.candidates, "vetoed": res.vetoed}
+    return rows, stats
+
+
+if run_scan_btn:
+    rows, stats = _scan(day.isoformat(), int(seed), int(universe_n), int(top_n))
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Universe", stats["universe"])
+    c2.metric("Deep-scanned", stats["deep_scanned"])
+    c3.metric("Candidates", stats["candidates"])
+    c4.metric("Risk-vetoed", stats["vetoed"])
+    st.subheader("🏆 Best intraday stocks — leaderboard")
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No setups passed the filters/gates. Try another seed.")
+
+if not run and not run_scan_btn:
+    st.info("Pick a **Mode** in the sidebar, set controls, and click the run button.")

@@ -1,0 +1,82 @@
+"""Scan harness — wires a universe + synthetic data into a Scanner run (no live feed).
+
+Pipeline:
+  universe -> cheap STATIC liquidity screen (no history needed)
+           -> generate intraday history only for survivors, truncated to as-of
+           -> Scanner.scan -> ranked leaderboard
+
+The static pre-screen means we generate sessions only for the liquid handful, not all
+~2,000 names — fast and faithful ("scan wide, rank narrow"). Deterministic given a seed.
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime, time
+from typing import Dict, List, Optional
+
+import numpy as np
+import pytz
+
+from signal_engine.config import AppConfig
+from signal_engine.data.synthetic import generate_session
+from signal_engine.risk.costs import CostModel
+from signal_engine.risk.manager import RiskManager
+from signal_engine.scan.filter import LiquidityCostFilter
+from signal_engine.scan.scanner import Scanner, ScanResult
+from signal_engine.state.store import InMemoryStateStore
+from signal_engine.strategies.base import create_strategy
+from signal_engine.universe.base import UniverseProvider
+from signal_engine.universe.models import InstrumentMeta
+
+IST = pytz.timezone("Asia/Kolkata")
+_REGIMES = ["trend_up", "trend_down", "choppy"]
+
+
+def run_scan(
+    cfg: AppConfig,
+    universe: UniverseProvider,
+    day: date,
+    as_of: time = time(11, 0),
+    seed: int = 42,
+    top_n: int = 20,
+) -> ScanResult:
+    cost_model = CostModel(cfg.risk.costs)
+    liquidity_filter = LiquidityCostFilter(cfg.risk.liquidity, cost_model)
+
+    metas = universe.instruments()
+
+    # 1) Cheap static screen (no history needed) -> survivors worth deep-scanning.
+    survivors: List[InstrumentMeta] = [
+        m for m in metas if liquidity_filter.evaluate(m, features=None).tradeable
+    ]
+
+    # 2) Generate intraday history for survivors, truncated to the as-of time.
+    rng = np.random.default_rng(seed)
+    cutoff = IST.localize(datetime.combine(day, as_of))
+    histories: Dict[str, "object"] = {}
+    for i, meta in enumerate(survivors):
+        regime = _REGIMES[int(rng.integers(0, len(_REGIMES)))]
+        df = generate_session(
+            meta.symbol, day, start_price=meta.last_price, seed=seed + i, regime=regime
+        )
+        histories[meta.symbol] = df[df.index <= cutoff]
+
+    # 3) Scan + rank.
+    strategy = create_strategy(cfg.settings.strategy.active, cfg.settings.strategy.params)
+    scanner = Scanner(
+        params=dict(cfg.settings.strategy.params),
+        strategy=strategy,
+        cost_model=cost_model,
+        risk_manager=RiskManager(cfg.risk.risk),
+        liquidity_filter=liquidity_filter,
+        state_store=InMemoryStateStore(),
+    )
+    result = scanner.scan(survivors, histories, top_n=top_n)
+    result.universe_size = len(metas)  # report against the FULL universe, not just survivors
+    return result
+
+
+def regime_for(symbol: str, seed: int = 42) -> Optional[str]:
+    """Deterministic helper (mainly for tests/inspection)."""
+    rng = np.random.default_rng(abs(hash((symbol, seed))) % (2**32))
+    return _REGIMES[int(rng.integers(0, len(_REGIMES)))]

@@ -76,6 +76,15 @@ signal-engine info        # config + safety summary
 Useful flags: `--symbols RELIANCE,INFY`, `--seed 7`, `--demo` (bias regimes so setups appear),
 `--persist` (write plans/trades to SQLite at `SE_DB_URL`).
 
+### Full-universe scan → "best intraday stocks" leaderboard (Phase 2)
+Scans a synthetic ~2,000-symbol NSE universe, applies the liquidity + %-cost filter, runs
+the strategy + risk gate on survivors, and ranks the best setups:
+```bash
+signal-engine scan --date 2025-06-23 --as-of 11:00 --universe 2000 --top 20
+```
+"Scan wide, rank narrow": the full universe is screened down to the liquid, cost-viable,
+ranked Top-N — each row a capital-agnostic trade plan. Runs in well under a second.
+
 ### Dashboard (optional)
 ```bash
 pip install streamlit

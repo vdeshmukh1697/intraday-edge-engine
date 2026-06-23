@@ -107,6 +107,52 @@ def cmd_replay(args) -> int:
     return 0
 
 
+def cmd_scan(args) -> int:
+    """Full-universe scan -> ranked 'best intraday stocks' leaderboard (Phase 2)."""
+    cfg = load_config()
+    day = _parse_date(args.date) if args.date else date(2025, 6, 23)
+
+    cal = NSECalendar()
+    if not cal.is_trading_day(day):
+        print(f"{day} is not an NSE trading day. Pick another date.")
+        return 2
+
+    as_of = datetime.strptime(args.as_of, "%H:%M").time() if args.as_of else None
+
+    from signal_engine.scan.harness import run_scan
+    from signal_engine.universe.mock import MockUniverseProvider
+
+    universe = MockUniverseProvider(n=args.universe, seed=args.seed)
+    kwargs = dict(seed=args.seed, top_n=args.top)
+    if as_of is not None:
+        kwargs["as_of"] = as_of
+    print(f"Scanning {args.universe}-symbol synthetic NSE universe for {day} "
+          f"(as-of {args.as_of or '11:00'})...\n")
+    result = run_scan(cfg, universe, day, **kwargs)
+
+    print("=== SCAN STATS ===")
+    print(f"universe         : {result.universe_size}")
+    print(f"deep-scanned     : {result.deep_scanned}   (passed static liquidity screen)")
+    print(f"filtered (cost)  : {result.filtered_out}")
+    print(f"no signal        : {result.no_signal}")
+    print(f"risk-vetoed      : {result.vetoed}")
+    print(f"candidates       : {result.candidates}")
+
+    print(f"\n=== 🏆 BEST INTRADAY SETUPS (top {args.top}) ===")
+    if not result.leaderboard:
+        print("  (no setups passed the filters/gates for these settings — try --seed)")
+    for e in result.leaderboard:
+        p = e.plan
+        print(
+            f"  #{e.rank:<2d} {p.symbol:9s} {p.direction.value:5s} score {e.score:5.1f} "
+            f"| entry {p.entry:8.2f} SL -{p.stop_pct:.2f}% T1 +{p.target_pcts[0]:.2f}% "
+            f"R:R {p.risk_reward:.2f} conf {p.confidence:.0f} | {e.sector} "
+            f"₹{e.turnover_cr:.0f}cr | {', '.join(p.reasons)}"
+        )
+    print("\n" + _DISCLAIMER)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="signal-engine", description="Intraday signal engine (decision-support only).")
     sub = p.add_subparsers(dest="command", required=True)
@@ -118,6 +164,14 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--demo", action="store_true", help="Bias regimes so setups appear.")
     pr.add_argument("--persist", action="store_true", help="Write plans/trades to SQLite.")
     pr.set_defaults(func=cmd_replay)
+
+    ps = sub.add_parser("scan", help="Full-universe scan -> ranked best-intraday leaderboard.")
+    ps.add_argument("--date", help="Trading day YYYY-MM-DD (default 2025-06-23).")
+    ps.add_argument("--as-of", help="Snapshot time HH:MM IST (default 11:00).")
+    ps.add_argument("--universe", type=int, default=2000, help="Synthetic universe size.")
+    ps.add_argument("--seed", type=int, default=42, help="Synthetic data seed.")
+    ps.add_argument("--top", type=int, default=20, help="Leaderboard size (Top-N).")
+    ps.set_defaults(func=cmd_scan)
 
     pi = sub.add_parser("info", help="Print config + safety summary.")
     pi.set_defaults(func=cmd_info)
