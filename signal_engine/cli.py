@@ -65,10 +65,11 @@ def cmd_replay(args) -> int:
         for i, s in enumerate(symbols):
             regime_map[s] = regimes[i % len(regimes)]
 
-    broker = build_broker(cfg, day=day, seed=args.seed, regime_map=regime_map)
     if cfg.env.data_source == "dhan":
-        print("Live Dhan source selected but it is gated/disabled. Use SE_DATA_SOURCE=mock.")
+        print("`replay` plays a finite synthetic/historical session; Dhan is a live stream. "
+              "Use `signal-engine live` for the Dhan feed, or set SE_DATA_SOURCE=mock to replay.")
         return 2
+    broker = build_broker(cfg, day=day, seed=args.seed, regime_map=regime_map)
 
     strategy = create_strategy(cfg.settings.strategy.active, cfg.settings.strategy.params)
     session = MarketSession(cfg.settings.market, cal)
@@ -322,6 +323,51 @@ def _run_scheduler() -> int:
     return 0
 
 
+def cmd_live(args) -> int:
+    """Stream the live Dhan feed through the pipeline until market close (paper only)."""
+    cfg = load_config()
+    if cfg.env.data_source != "dhan":
+        print(f"`live` needs a streaming source. Set SE_DATA_SOURCE=dhan "
+              f"(currently {cfg.env.data_source!r}).")
+        return 2
+
+    cal = NSECalendar()
+    from datetime import datetime
+
+    import pytz
+    now = datetime.now(pytz.timezone("Asia/Kolkata"))
+    if not cal.is_trading_day(now.date()):
+        print(f"{now.date()} is not an NSE trading day (weekend/holiday). Nothing to stream.")
+        return 2
+
+    symbols = args.symbols.split(",") if args.symbols else cfg.settings.watchlist
+    broker = build_broker(cfg, day=now.date())  # loads Dhan instrument master + token
+    strategy = create_strategy(cfg.settings.strategy.active, cfg.settings.strategy.params)
+    session = MarketSession(cfg.settings.market, cal)
+    alerter = build_alerter(cfg)
+
+    from signal_engine.engine.runner import EngineRunner
+
+    repo = None
+    if args.persist:
+        from signal_engine.storage.repository import SignalRepository
+
+        repo = SignalRepository(cfg.env.db_url)
+
+    runner = EngineRunner(cfg, broker, strategy, session, alerter, repo=repo)
+    print(f"LIVE Dhan feed for {len(symbols)} symbols — streaming until market close.")
+    print(_DISCLAIMER)
+    summary = runner.live(symbols)
+
+    print("\n=== SESSION RESULT ===")
+    print(f"bars processed : {summary.bars_processed}")
+    print(f"picks surfaced : {len(summary.picks)}")
+    print(f"paper trades   : {len(summary.closed)}")
+    if repo:
+        repo.close()
+    return 0
+
+
 def cmd_serve(args) -> int:
     """Run the FastAPI engine API (the backend the Next.js/Vercel dashboard consumes)."""
     try:
@@ -397,6 +443,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     psch = sub.add_parser("schedule", help="Run the daily job scheduler (pre-market/scan/archive).")
     psch.set_defaults(func=lambda args: (_run_scheduler()))
+
+    pl = sub.add_parser("live", help="Stream the live Dhan feed through the pipeline (paper only).")
+    pl.add_argument("--symbols", help="Comma-separated symbols (default from config watchlist).")
+    pl.add_argument("--persist", action="store_true", help="Persist plans/positions to the DB.")
+    pl.set_defaults(func=cmd_live)
 
     pv = sub.add_parser("serve", help="Run the FastAPI engine API for the dashboard.")
     pv.add_argument("--host", default="127.0.0.1", help="Bind host (default 127.0.0.1).")

@@ -14,10 +14,11 @@ system mirrors disciplined manual trading.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 import pandas as pd
+import pytz
 
 from signal_engine.alerts.base import Alerter
 from signal_engine.brokers.base import BrokerAdapter
@@ -224,6 +225,38 @@ class EngineRunner:
             if last is not None:
                 self.on_closed_bar(last)
         # Safety net: flatten anything still open at end of feed.
+        for hist in self._history.values():
+            if not hist:
+                continue
+            for pos in self.paper.force_square_off(hist[-1]):
+                self._on_position_closed(pos, hist[-1])
+        self.broker.disconnect()
+        return self.summary
+
+    def live(self, watchlist: Optional[List[str]] = None) -> RunSummary:
+        """Stream a live broker feed through the same pipeline until market close.
+
+        Only meaningful with a streaming source (Dhan). Blocks during market hours; the
+        broker pushes ticks to ``on_tick`` and we stop once the session closes, then flush
+        forming bars and force-flat any open paper positions — the same tail as ``replay``.
+        Decision-support only: positions are paper, never live orders.
+        """
+        ist = pytz.timezone("Asia/Kolkata")
+        symbols = watchlist or self.cfg.settings.watchlist
+        self.broker.connect()
+        self.broker.subscribe(symbols)
+        self.broker.set_tick_callback(self.on_tick)
+
+        def _market_closed() -> bool:
+            return self.session.state_at(datetime.now(ist)) == MarketState.CLOSED
+
+        self.log.info("live feed starting for %d symbols", len(symbols))
+        self.broker.run(stop=_market_closed)
+
+        for agg in self._aggs.values():
+            last = agg.flush()
+            if last is not None:
+                self.on_closed_bar(last)
         for hist in self._history.values():
             if not hist:
                 continue
