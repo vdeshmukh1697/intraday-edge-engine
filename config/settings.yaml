@@ -8,13 +8,28 @@ market:
   square_off: "15:20"           # force-close all paper positions
   session_close: "15:30"
 
-# Phase-1 fast-lane watchlist (small, liquid). Full-universe scan is Phase 2.
+# Live paper-trading watchlist — liquid NSE large-caps (the live feed subscribes to these
+# and the engine paper-trades signals on them intraday). Comfortably within Dhan's WS caps.
 watchlist:
   - "RELIANCE"
   - "HDFCBANK"
+  - "ICICIBANK"
   - "INFY"
   - "TCS"
-  - "ICICIBANK"
+  - "SBIN"
+  - "AXISBANK"
+  - "KOTAKBANK"
+  - "ITC"
+  - "LT"
+  - "BHARTIARTL"
+  - "HINDUNILVR"
+  - "BAJFINANCE"
+  - "MARUTI"
+  - "TATASTEEL"
+  - "SUNPHARMA"
+  - "WIPRO"
+  - "M&M"
+  - "ADANIPORTS"
 
 ingestion:
   base_timeframe_minutes: 1
