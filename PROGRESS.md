@@ -65,8 +65,20 @@ correctness-first with pandas, structured so a Polars backend can replace the in
   yields a ranked leaderboard. ✅
 - Polars vectorization + real Redis + real Dhan sharding: **deferred** (perf/live infra) — interfaces in place.
 
-## Phases 3–8 — not started (see PLAN.md §8)
-**Phase 3** = event-driven multi-day backtester + Strategy Health Scorer.
+## Phase 3 — Backtesting + Strategy Health Scorer  🟡 IN PROGRESS
+Event-driven multi-day backtest reusing the SAME engine core (anti-lookahead by
+construction), full metrics suite (§6.2), walk-forward splits (§6.4), and the rolling
+Strategy Health Scorer with degradation alerts (§6.6, A10). Synthetic multi-day data.
+- [ ] `in-progress` Metrics suite (win rate, PF, expectancy, max DD, Sharpe, Sortino, equity) (§6.2)
+- [ ] `in-progress` Strategy Health Scorer (composite + Brier calibration + drift + degradation) (§6.6)
+- [ ] `in-progress` Walk-forward splitter (time split + rolling windows) (§6.4)
+- [ ] `todo` Backtest engine (multi-day replay via shared EngineRunner core -> ledger -> metrics)
+- [ ] `todo` Multi-day synthetic data generator
+- [ ] `todo` CLI `backtest` + `health` commands; dashboard backtest + health views
+- [ ] `todo` Wire health degradation -> Alerter
+- [ ] `todo` Tests: metrics (hand-verified), health, walk-forward, backtest end-to-end
+
+## Phases 4–8 — not started (see PLAN.md §8)
 
 ---
 
