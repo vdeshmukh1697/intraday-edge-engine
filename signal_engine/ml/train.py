@@ -57,14 +57,24 @@ def _train_on_dataset(
     test_frac: float = 0.3,
     model_path: Optional[str] = DEFAULT_MODEL_PATH,
     min_samples: int = 50,
+    embargo_frac: float = 0.01,
 ) -> Tuple[Optional[MLModel], TrainReport]:
-    """Chronological out-of-sample split -> fit -> compare vs the rules baseline -> save."""
+    """Chronological out-of-sample split -> fit -> compare vs the rules baseline -> save.
+
+    Applies an EMBARGO gap (López de Prado, *Advances in Financial ML*): trades have a forward
+    label window (T1/stop/time within max_hold), so samples straddling the train/test boundary
+    share outcome information. We drop ``embargo_frac`` of samples just before the test set so
+    the out-of-sample estimate isn't inflated by that leakage. A small, correct robustness fix —
+    full purged k-fold CV is the next step (needs per-sample label-window timestamps).
+    """
     n = len(ds)
     if n < min_samples:
         return None, TrainReport(n_samples=n, n_train=0, n_test=0, base_rate=0.0)
 
     n_train = max(1, int(n * (1.0 - test_frac)))
-    Xtr, ytr = ds.X[:n_train], ds.y[:n_train]
+    embargo = int(n * embargo_frac)
+    tr_end = max(1, n_train - embargo)  # purge the boundary band from training
+    Xtr, ytr = ds.X[:tr_end], ds.y[:tr_end]
     Xte, yte = ds.X[n_train:], ds.y[n_train:]
     rules_te = ds.rules_conf[n_train:]
 

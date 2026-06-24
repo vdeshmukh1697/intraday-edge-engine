@@ -77,6 +77,9 @@ class EngineRunner:
         # ml_gate=0 disables it (ML stays pure shadow). PLAN §4.7.
         self.ml_scorer = ml_scorer
         self.ml_gate = float(ml_gate)
+        # Live re-rating advisor (set on the live() path). None elsewhere -> no behaviour change
+        # for replay/backtest, so they stay deterministic.
+        self.advisor = None
 
         self.cost_model = CostModel(cfg.risk.costs)
         self.risk_manager = RiskManager(cfg.risk.risk)
@@ -112,6 +115,14 @@ class EngineRunner:
 
     # -- feed callback ------------------------------------------------------
     def on_tick(self, tick) -> None:
+        # Intra-bar (sub-second) re-rating: flag when price runs most of the way to the target.
+        if self.advisor is not None and tick.ltp:
+            try:
+                msg = self.advisor.on_price(tick.symbol, float(tick.ltp))
+                if msg:
+                    self._alert(msg, "signal")
+            except Exception:  # noqa: BLE001 - price probe must never break the feed
+                pass
         agg = self._aggs.get(tick.symbol)
         if agg is None:
             agg = self._aggs[tick.symbol] = BarAggregator(tick.symbol, 1)
@@ -149,14 +160,11 @@ class EngineRunner:
             self.log.warning("feed stale for %s — suppressing entries", bar.symbol)
             return
 
-        # 3) Entry generation only inside the allowed window.
+        # 3) Re-rate the outlook every bar inside the entry window — this drives both the
+        #    live "prediction changed" alerts (advisor) AND the actual entry decision. We
+        #    compute it even when we already hold the symbol or hit the daily limit, so the
+        #    advisor can flag a thesis change on a position we're already in.
         if not self.session.can_enter(bar.ts):
-            return
-        if not self._symbol_free(bar.symbol, bar.ts):
-            return
-        if self._daily_trades >= self.cfg.risk.risk.max_trades_per_day:
-            return
-        if len(self.paper.open_positions) >= self.cfg.risk.risk.max_concurrent_positions:
             return
 
         features = compute_features(self._history_df(bar.symbol), self.params)
@@ -169,16 +177,28 @@ class EngineRunner:
             params=self.params,
         )
         signal = self.strategy.on_bar(ctx)
-        if signal is None:
-            return
-        plan = self.risk_manager.build_trade_plan(signal, features, self.cost_model)
-        if plan is None:
-            return  # vetoed by R:R floor / edge-after-cost gate
-        if self.ml_scorer is not None and self.ml_gate > 0.0:
+        plan = self.risk_manager.build_trade_plan(signal, features, self.cost_model) if signal else None
+        if plan is not None and self.ml_scorer is not None and self.ml_gate > 0.0:
             from signal_engine.ml.features import build_matrix
             prob = float(self.ml_scorer.score_matrix(build_matrix([features]))[0]) / 100.0
             if prob < self.ml_gate:
-                return  # ML says this setup is below the win-probability threshold
+                plan = None  # ML says this setup is below the win-probability threshold
+
+        # Live re-rating: alert the moment the plan materially changes (target/dir/conviction).
+        if self.advisor is not None:
+            msg = self.advisor.update(bar.symbol, plan)
+            if msg:
+                self._alert(msg, "signal")
+
+        # 4) Open a NEW position only if the plan is valid and all execution gates pass.
+        if plan is None:
+            return
+        if not self._symbol_free(bar.symbol, bar.ts):
+            return
+        if self._daily_trades >= self.cfg.risk.risk.max_trades_per_day:
+            return
+        if len(self.paper.open_positions) >= self.cfg.risk.risk.max_concurrent_positions:
+            return
         self._surface(plan)
 
     # -- helpers ------------------------------------------------------------
@@ -258,8 +278,11 @@ class EngineRunner:
         forming bars and force-flat any open paper positions — the same tail as ``replay``.
         Decision-support only: positions are paper, never live orders.
         """
+        from signal_engine.engine.advisor import LiveAdvisor
+
         ist = pytz.timezone("Asia/Kolkata")
         symbols = watchlist or self.cfg.settings.watchlist
+        self.advisor = LiveAdvisor()  # live re-rating + prediction-change alerts
         self.broker.connect()
 
         # Warm-start: seed today's elapsed bars (09:15 -> now) so indicators are ready
