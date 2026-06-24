@@ -38,6 +38,9 @@ node_modules/
 *.tsbuildinfo
 web/next-env.d.ts
 
+# Session handoff doc — kept local (names private Telegram chat id / bot)
+HANDOFF.md
+
 # OS / editor
 .DS_Store
 .idea/

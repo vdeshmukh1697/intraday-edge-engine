@@ -229,6 +229,35 @@ Gated (by design): live order execution, Redis, Polars, LightGBM/FinBERT. Run: `
 - [x] `done` **Tests** — P&L / win-rate / profit-factor / drawdown vs hand-computed values;
   persistence round-trip across a restart; API empty + seeded. (389 total green.)
 
+## Live ops & roadmap (session 2026-06-24)
+- [x] `done` **Task 0 — freshness fix (commit `d3061f7`).** Root cause: `FreshnessGuard` marked
+  freshness with `bar.ts` (bar OPEN time); a 1-min bar is always ~60s old at close, so the live
+  staleness guard (`now - bar.ts > 5s`) suppressed EVERY live entry all day → the real cause of
+  "no Telegram alerts" + "no new dashboard data". Fix: mark freshness on **tick arrival**
+  (wall-clock) in `on_tick`; `on_closed_bar` only *checks* `is_stale()`; default
+  `max_staleness_seconds` 5s→30s. +regression test. Full suite + ruff green.
+  - **Verified live:** restarted `cli live --persist` 14:10 IST; warm-start re-seeded the full
+    09:15→now session (5624 bars/19 symbols) and re-resolved the 6 prior trades correctly
+    (e.g. HDFCBANK premature STOP → real TARGET) with **no duplicate ids** (`paper_trades.id`
+    is PK, `INSERT OR REPLACE`); **zero** "feed stale — suppressing entries" after go-live
+    (vs every symbol every minute before); dashboard `/api/paper/analytics` count 6→7; Dhan
+    WS feed connected; Telegram channel confirmed (alerts route to the configured private chat).
+    Note: no *new* live
+    setup has fired since 10:09 IST (strategy is highly selective: conf≥75, adx≥25) — a
+    trade-driven alert is now gated only on a qualifying setup, not on the bug.
+  - ⚠️ **Latent:** `scheduler.live_job` runs `runner.live()` in-process at 09:15 AND a manual
+    `cli live` can run concurrently → two live loops persisting to the same DB on a normal day.
+    Today is safe (scheduler started 11:07, missed its 09:15 cron). Pick ONE live owner before
+    relying on this daily (recommend: let the scheduler own live; drop the manual nohup).
+- [~] `in-progress` **Task 2 — public GitHub repo `intraday-edge-engine`.** Secret-scan gate
+  re-run & **clean**: no `.env` tracked (only templates), no real token values in working tree
+  or full history, the `test_dhan.py` JWT is a synthetic fixture; placeholdered the real
+  `DHAN_CLIENT_ID` left in `.env.example`. `gh` installed (brew). Pending: user `gh auth login`,
+  then `gh repo create … --public --source=. --push`; thereafter `git push` per change set.
+- [ ] `todo` **Task 1A** — wire the existing news stack into `EngineRunner` live re-rating.
+- [ ] `todo` **Task 1B** — richer ML features (microstructure / regime / frac-diff / rel-strength)
+  for real edge; validate on the archive backtest (bar: **PF > 1 OOS**).
+
 ## Notes / decisions log
 - (init) Feature-key contract for indicators frozen so strategy + indicator engine agree:
   close, prev_close, vwap, ema_fast(/_prev), ema_slow(/_prev), rsi, adx, atr, atr_pct, rvol,
