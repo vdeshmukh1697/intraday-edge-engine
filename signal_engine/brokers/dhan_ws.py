@@ -104,10 +104,17 @@ def disconnect_message() -> dict:
 
 
 def _ts_from_epoch(epoch: int, now_fn: NowFn) -> datetime:
-    """Dhan last-trade-time is epoch seconds (IST wall-clock). 0/garbage -> now."""
+    """Convert Dhan's last-trade-time to a tz-aware IST datetime. 0/garbage -> now.
+
+    IMPORTANT (verified live 2026-06-24): Dhan's WebSocket LTT is an **IST-wall-clock** epoch
+    (the +5:30 offset is already baked in), NOT a true UTC Unix timestamp. So we recover the
+    clock numbers with utcfromtimestamp() and tag them IST. Using fromtimestamp(epoch, tz=IST)
+    double-applies the offset (stamps ticks ~5.5h in the future), which made the live session
+    logic think the market was closed and suppressed every paper trade.
+    """
     if epoch and epoch > 0:
         try:
-            return datetime.fromtimestamp(int(epoch), tz=IST)
+            return IST.localize(datetime.utcfromtimestamp(int(epoch)))
         except (ValueError, OSError, OverflowError):
             pass
     return now_fn()
