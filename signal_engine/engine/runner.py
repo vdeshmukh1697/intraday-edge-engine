@@ -98,6 +98,11 @@ class EngineRunner:
         self.enforce_freshness = False
         self.freshness = FreshnessGuard(max_staleness_seconds=5.0)
         self._errors = 0
+        self._suppress_alerts = False  # True while replaying warm-start bars (no live alerts)
+
+    def _alert(self, msg: str, level: str) -> None:
+        if not self._suppress_alerts:
+            self.alerter.send(msg, level=level)
 
     # -- feed callback ------------------------------------------------------
     def on_tick(self, tick) -> None:
@@ -189,7 +194,7 @@ class EngineRunner:
             self.repo.save_plan(plan)
         self.paper.open_from_plan(plan)
         tgt = f"{plan.t1:.2f} (+{plan.target_pcts[0]:.2f}%)"
-        self.alerter.send(
+        self._alert(
             f"{plan.symbol} {plan.direction.value} @~{plan.entry:.2f} "
             f"SL {plan.stop_loss:.2f} (-{plan.stop_pct:.2f}%) T1 {tgt} "
             f"R:R {plan.risk_reward:.2f} conf {plan.confidence:.0f} "
@@ -206,7 +211,7 @@ class EngineRunner:
                 minutes=self.cfg.risk.risk.per_symbol_cooldown_minutes
             )
         if pos.entry_fill is not None:  # don't alert never-filled cancels noisily
-            self.alerter.send(
+            self._alert(
                 f"{pos.symbol} CLOSED {pos.exit_reason.value} "
                 f"net {pos.pnl_pct_net:+.2f}% R {pos.r_multiple:+.2f}",
                 level="info",
@@ -295,11 +300,15 @@ class EngineRunner:
             if i < len(symbols) - 1:
                 _time.sleep(0.25)  # stay under Dhan's 5 req/s Data-API cap
         seeded.sort(key=lambda b: b.ts)
-        for bar in seeded:
-            try:
-                self.on_closed_bar(bar)
-            except Exception as exc:  # noqa: BLE001
-                self._errors += 1
-                self.log.error("warm-start bar failed for %s: %s", bar.symbol, exc)
+        self._suppress_alerts = True  # replaying past bars must not fire live alerts
+        try:
+            for bar in seeded:
+                try:
+                    self.on_closed_bar(bar)
+                except Exception as exc:  # noqa: BLE001
+                    self._errors += 1
+                    self.log.error("warm-start bar failed for %s: %s", bar.symbol, exc)
+        finally:
+            self._suppress_alerts = False
         self.log.info("warm-start: seeded %d bars across %d symbols (%d picks so far)",
                       len(seeded), len(symbols), len(self.summary.picks))
