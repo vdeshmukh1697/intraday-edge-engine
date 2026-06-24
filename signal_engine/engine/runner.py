@@ -243,9 +243,15 @@ class EngineRunner:
         Decision-support only: positions are paper, never live orders.
         """
         ist = pytz.timezone("Asia/Kolkata")
-        self.enforce_freshness = True  # live feed: activate the stale-data fail-safe (§9.3)
         symbols = watchlist or self.cfg.settings.watchlist
         self.broker.connect()
+
+        # Warm-start: seed today's elapsed bars (09:15 -> now) so indicators are ready
+        # immediately and any setups already missed this session are processed — otherwise a
+        # cold start needs ~35 min of live bars before it can signal at all.
+        self._warm_start_today(symbols, ist)
+
+        self.enforce_freshness = True  # live feed: activate the stale-data fail-safe (§9.3)
         self.broker.subscribe(symbols)
         self.broker.set_tick_callback(self.on_tick)
 
@@ -266,3 +272,30 @@ class EngineRunner:
                 self._on_position_closed(pos, hist[-1])
         self.broker.disconnect()
         return self.summary
+
+    def _warm_start_today(self, symbols: List[str], ist) -> None:
+        """Replay today's elapsed 1-min bars through the pipeline before going live.
+
+        Best-effort: a fetch failure for one symbol never blocks the live session. Freshness
+        enforcement is kept OFF here (these are past bars, intentionally not 'fresh')."""
+        from datetime import time as _time
+
+        now = datetime.now(ist)
+        start = ist.localize(datetime.combine(now.date(), _time(9, 15)))
+        if now <= start:
+            return
+        seeded = []
+        for sym in symbols:
+            try:
+                seeded.extend(self.broker.historical(sym, "1m", start, now))
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning("warm-start fetch failed for %s: %s", sym, exc)
+        seeded.sort(key=lambda b: b.ts)
+        for bar in seeded:
+            try:
+                self.on_closed_bar(bar)
+            except Exception as exc:  # noqa: BLE001
+                self._errors += 1
+                self.log.error("warm-start bar failed for %s: %s", bar.symbol, exc)
+        self.log.info("warm-start: seeded %d bars across %d symbols (%d picks so far)",
+                      len(seeded), len(symbols), len(self.summary.picks))
