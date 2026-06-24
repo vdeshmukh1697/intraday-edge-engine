@@ -8,28 +8,52 @@ market:
   square_off: "15:20"           # force-close all paper positions
   session_close: "15:30"
 
-# Live paper-trading watchlist — liquid NSE large-caps (the live feed subscribes to these
-# and the engine paper-trades signals on them intraday). Comfortably within Dhan's WS caps.
+# Live paper-trading watchlist — a DIVERSIFIED intraday test basket (the live feed subscribes
+# to these and the engine paper-trades signals on them intraday). Selected from the real archive
+# by recent turnover (liquidity / MIS-leverage = "high margin") + intraday range (mover-ness),
+# mixed across SECTORS, CAP sizes (mega-caps + low-priced/penny high-volume names), and HIGH
+# MOVERS. 30 names — comfortably within Dhan's WS caps. NOTE: this is a mechanics test of the
+# de-clustered targets / ranked alerts / sizing / daily-loss breaker across a diverse universe;
+# the base strategy has NO proven edge (see docs/SIGNAL_RESEARCH_FINDINGS.md) so PF<1 is expected
+# — paper only.
 watchlist:
-  - "RELIANCE"
-  - "HDFCBANK"
-  - "ICICIBANK"
-  - "INFY"
-  - "TCS"
-  - "SBIN"
-  - "AXISBANK"
-  - "KOTAKBANK"
-  - "ITC"
-  - "LT"
-  - "BHARTIARTL"
-  - "HINDUNILVR"
-  - "BAJFINANCE"
-  - "MARUTI"
-  - "TATASTEEL"
-  - "SUNPHARMA"
-  - "WIPRO"
-  - "M&M"
-  - "ADANIPORTS"
+  # Mega-cap anchors (high turnover, high leverage) — sector-spread
+  - "RELIANCE"      # energy / conglomerate
+  - "HDFCBANK"      # private bank (highest turnover)
+  - "ICICIBANK"     # private bank
+  - "SBIN"          # PSU bank
+  - "AXISBANK"      # private bank
+  - "BHARTIARTL"    # telecom
+  - "INFY"          # IT
+  - "TCS"           # IT
+  - "LT"            # infra / capital goods
+  - "MARUTI"        # auto (4-wheeler)
+  - "M&M"           # auto / farm
+  - "NTPC"          # power utility
+  # Financials — large + high-mover NBFCs
+  - "BAJFINANCE"    # NBFC (big + mover)
+  - "SHRIRAMFIN"    # NBFC (high mover ~4.9%)
+  # Pharma
+  - "SUNPHARMA"     # pharma
+  - "DRREDDY"       # pharma
+  # Metals — large + LOW-PRICED movers
+  - "TATASTEEL"     # metal (low-priced ~190)
+  - "HINDALCO"      # metal
+  - "SAIL"          # PSU metal (low-priced ~171, big mover ~5.3%)
+  - "NMDC"          # mining (low-priced ~86)
+  # High movers / new-age / high-beta
+  - "TRENT"         # retail (top mover ~5.2% + very liquid)
+  - "DIXON"         # EMS (high mover)
+  - "ADANIENT"      # high-beta
+  - "ETERNAL"       # food-tech (ex-Zomato)
+  # Defence / PSU movers
+  - "HAL"           # defence (mover ~4.3%)
+  - "BEL"           # defence (low-priced ~413)
+  # Low-priced / penny high-volume retail favourites
+  - "IRFC"          # PSU rail financier (low-priced ~92, huge retail volume)
+  - "SUZLON"        # renewables (low-priced ~58, retail mover)
+  - "IDEA"          # telecom (penny ~14, high volume)
+  - "YESBANK"       # bank (penny ~25, high volume)
 
 ingestion:
   base_timeframe_minutes: 1
