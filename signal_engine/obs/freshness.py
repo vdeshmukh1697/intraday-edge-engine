@@ -14,7 +14,7 @@ from signal_engine.market.clock import Clock, RealClock
 
 
 class FreshnessGuard:
-    def __init__(self, max_staleness_seconds: float = 5.0, clock: Optional[Clock] = None):
+    def __init__(self, max_staleness_seconds: float = 30.0, clock: Optional[Clock] = None):
         self.max_staleness_seconds = max_staleness_seconds
         self.clock = clock or RealClock()
         self._last_data_ts: Optional[datetime] = None

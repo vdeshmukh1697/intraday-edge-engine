@@ -105,7 +105,8 @@ class EngineRunner:
         # timestamps that would always look "stale" vs wall-clock. Only the live() loop turns
         # it on, since the staleness fail-safe (PLAN §9.3) only makes sense on a live feed.
         self.enforce_freshness = False
-        self.freshness = FreshnessGuard(max_staleness_seconds=5.0)
+        # 30s tolerates sparse ticks on slower names while still flagging a dead feed.
+        self.freshness = FreshnessGuard(max_staleness_seconds=30.0)
         self._errors = 0
         self._suppress_alerts = False  # True while replaying warm-start bars (no live alerts)
 
@@ -115,6 +116,10 @@ class EngineRunner:
 
     # -- feed callback ------------------------------------------------------
     def on_tick(self, tick) -> None:
+        # Feed liveness is measured by TICK ARRIVAL (wall-clock), not bar-open age: a 1-min bar's
+        # open ts is always ~60s behind 'now' when it closes, so marking freshness off bar.ts made
+        # the staleness guard suppress every live entry. Mark on each received tick instead.
+        self.freshness.mark(self.freshness.clock.now())
         # Intra-bar (sub-second) re-rating: flag when price runs most of the way to the target.
         if self.advisor is not None and tick.ltp:
             try:
@@ -154,8 +159,8 @@ class EngineRunner:
                 self._on_position_closed(pos, bar)
             return
 
-        # Fail-safe: never trade on a stale/dead feed (PLAN §9.3). Opt-in (live only).
-        self.freshness.mark(bar.ts)
+        # Fail-safe: never trade on a stale/dead feed (PLAN §9.3). Freshness is marked on tick
+        # arrival (see on_tick); here we only CHECK it. Opt-in (live only).
         if self.enforce_freshness and self.freshness.is_stale():
             self.log.warning("feed stale for %s — suppressing entries", bar.symbol)
             return

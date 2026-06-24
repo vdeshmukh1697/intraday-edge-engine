@@ -44,6 +44,29 @@ def test_trending_day_surfaces_picks():
     assert len(summary.picks) >= 1
 
 
+def test_live_freshness_marks_on_tick_not_bar_open():
+    """Regression: a 1-min bar's OPEN ts is ~60s behind 'now' at close. Freshness must be
+    marked on tick arrival (wall-clock), so an arriving tick keeps the feed 'fresh' and live
+    entries are NOT suppressed. (Marking off bar.ts suppressed every live entry.)"""
+    import datetime as _dt
+
+    import pytz
+
+    from signal_engine.domain.models import Tick
+
+    cfg = load_config()
+    broker = MockBroker(day=date(2025, 6, 23), seed=1, regime_map=_REGIMES)
+    strategy = create_strategy(cfg.settings.strategy.active, cfg.settings.strategy.params)
+    session = MarketSession(cfg.settings.market, NSECalendar())
+    runner = EngineRunner(cfg, broker, strategy, session, ConsoleAlerter(stream=io.StringIO()))
+    runner.enforce_freshness = True  # live behaviour
+
+    now = _dt.datetime.now(pytz.timezone("Asia/Kolkata"))
+    runner.on_tick(Tick(symbol="RELIANCE", ts=now, ltp=2900.0, volume=100))
+    assert runner.freshness.is_stale() is False        # a tick just arrived -> fresh
+    assert runner.freshness.max_staleness_seconds >= 30.0  # tolerates sparse ticks
+
+
 def test_all_picks_respect_risk_gates():
     cfg, _, summary = _run()
     rr_floor = cfg.risk.risk.rr_floor
