@@ -281,6 +281,23 @@ Gated (by design): live order execution, Redis, Polars, LightGBM/FinBERT. Run: `
     (commit `fceabbe`) gave no OOS lift either (and were on the leaky split — re-measure later).
   - **Next per plan:** edge RESEARCH (signal discovery), not more execution polish. The base
     VWAP/EMA/ADX entry is the dead end; finding a real predictive signal is the only path to PF>1.
+- [x] `done` **Signal research (commit `4a4cbd4`; `docs/SIGNAL_RESEARCH_FINDINGS.md`).** Built a
+  fast, **leakage-audited** vectorized research harness (`signal_engine/research/`: dataset.py +
+  probe.py + check_causality.py — 450/450 point-in-time causality checks clean) over 50 liquid NSE
+  names, 2y, 1.75M rows, global date IS/OOS split. Scanned **9 alpha families × ~1,693
+  pre-registered variants** (momentum/mean-rev by regime, VWAP reversion, ORB, overnight gaps,
+  cross-sectional rel-strength + mean-rev, ToD×vol, vol-regime, multi-factor ML). **VERDICT: NO
+  cost-surviving intraday edge.** Zero variants clear `edge_verdict` OOS. Real but microscopic
+  gross signals exist (~1–4 bps/trade: continuation, XS reversion, faint ML factor OOS AUC 0.52,
+  shuffle-control passes) but are 3–17× below the 14.2 bps round-trip cost wall. Efficient-market-
+  at-this-scale on megacaps. **Stays paper-only.** Highest-value next directions: longer/lower-
+  turnover horizons (cost amortizes), microstructure once tick data accrues, mid-caps, event-driven
+  reversion, a real index series for beta-neutral rel-strength.
+- [x] `done` **GitHub published** — public repo https://github.com/vdeshmukh1697/intraday-edge-engine
+  (main default + feature branch; pushing per change set).
+- [x] `done` **Dashboard tunnel fix** — dead Cloudflare quick-tunnel (silent fail-open hid the OTP
+  prompt) restored; Vercel re-pointed + redeployed; AuthGate now shows a backend-unreachable banner
+  (commit `c31640f`). Durable fix = a named Cloudflare tunnel (stable URL) — pending.
 
 ## Notes / decisions log
 - (init) Feature-key contract for indicators frozen so strategy + indicator engine agree:
