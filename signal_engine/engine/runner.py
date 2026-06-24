@@ -284,12 +284,16 @@ class EngineRunner:
         start = ist.localize(datetime.combine(now.date(), _time(9, 15)))
         if now <= start:
             return
+        import time as _time
+
         seeded = []
-        for sym in symbols:
+        for i, sym in enumerate(symbols):
             try:
                 seeded.extend(self.broker.historical(sym, "1m", start, now))
             except Exception as exc:  # noqa: BLE001
                 self.log.warning("warm-start fetch failed for %s: %s", sym, exc)
+            if i < len(symbols) - 1:
+                _time.sleep(0.25)  # stay under Dhan's 5 req/s Data-API cap
         seeded.sort(key=lambda b: b.ts)
         for bar in seeded:
             try:
