@@ -184,17 +184,23 @@ def run_feed(
     ws_factory: Optional[Callable[[str], object]] = None,
     now_fn: Optional[NowFn] = None,
     stop: Optional[Callable[[], bool]] = None,
-    max_reconnects: int = 5,
+    max_reconnects: int = 200,
     backoff_s: float = 2.0,
+    backoff_cap_s: float = 15.0,
     sleep_fn: Callable[[float], None] = _time.sleep,
 ) -> None:
     """Connect, subscribe, and stream ticks to ``on_tick`` until ``stop()`` or the feed ends.
 
     Transport is injected via ``ws_factory(url) -> ws`` where ``ws`` exposes ``send(str)``,
-    ``recv() -> bytes|str``, and ``close()`` (the websocket-client default does). Reconnects
-    with linear backoff on transport errors, up to ``max_reconnects`` consecutive failures.
-    A falsy ``recv()`` (empty/None) ends the current connection cleanly — used by tests.
+    ``recv() -> bytes|str``, and ``close()`` (the websocket-client default does). Reconnects on
+    transport errors with capped linear backoff, up to ``max_reconnects`` consecutive failures —
+    the high default (200 × ≤15s ≈ ~45 min of retrying) lets the live session ride through a
+    multi-minute network outage and resume in place when connectivity returns. A falsy
+    ``recv()`` (empty/None) ends the current connection cleanly — used by tests.
     """
+    def _backoff(n: int) -> float:
+        return min(backoff_s * n, backoff_cap_s)
+
     factory = ws_factory or _default_ws_factory
     attempts = 0
     while True:
@@ -208,7 +214,7 @@ def run_feed(
                 log.error("dhan feed: giving up after %d connect failures: %s", attempts, exc)
                 return
             log.warning("dhan feed: connect failed (%d/%d): %s", attempts, max_reconnects, exc)
-            sleep_fn(backoff_s * attempts)
+            sleep_fn(_backoff(attempts))
             continue
 
         try:
@@ -228,7 +234,7 @@ def run_feed(
                 return
             log.warning("dhan feed: stream error (%d/%d), reconnecting: %s",
                         attempts, max_reconnects, exc)
-            sleep_fn(backoff_s * attempts)
+            sleep_fn(_backoff(attempts))
 
 
 def _consume(ws, resolve: ResolveFn, on_tick, now_fn, stop) -> None:
