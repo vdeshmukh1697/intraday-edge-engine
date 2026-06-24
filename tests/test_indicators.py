@@ -8,10 +8,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from signal_engine.indicators import compute_features
+from signal_engine.indicators import (
+    bar_shape,
+    compute_features,
+    realized_vol_pct,
+    regime_trend,
+    short_window_return_pct,
+)
 from signal_engine.indicators.core import (
+    _frac_diff_weights,
     atr,
     ema,
+    frac_diff,
     opening_range,
     rsi,
     rvol,
@@ -156,6 +164,15 @@ REQUIRED_KEYS = {
     "orb_high",
     "orb_low",
     "bar_count",
+    # Task 1B richer features (always present in the output dict, nan if short history).
+    "bar_range_pct",
+    "body_pct",
+    "upper_wick_ratio",
+    "lower_wick_ratio",
+    "ret_5_pct",
+    "rv_5_pct",
+    "regime_trend",
+    "frac_diff_close_pct",
 }
 
 
@@ -202,3 +219,222 @@ def test_compute_features_values_present_on_long_frame():
         assert not math.isnan(feats[key]), key
     # Strictly increasing closes -> RSI near 100.
     assert feats["rsi"] > 99.0
+
+
+# --------------------------------------------------------------------------------
+# Task 1B — fractional differentiation
+# --------------------------------------------------------------------------------
+
+def test_frac_diff_weights_recurrence_hand_computed():
+    # d = 0.5 binomial weights via w[k] = -w[k-1]*(d-k+1)/k:
+    #   w0 = 1
+    #   w1 = -1 * (0.5)/1            = -0.5
+    #   w2 = -(-0.5) * (0.5-1)/2     = 0.5 * (-0.5)/2 = -0.125
+    #   w3 = -(-0.125) * (0.5-2)/3   = 0.125 * (-1.5)/3 = -0.0625
+    w = _frac_diff_weights(0.5, 4)
+    assert w[0] == pytest.approx(1.0)
+    assert w[1] == pytest.approx(-0.5)
+    assert w[2] == pytest.approx(-0.125)
+    assert w[3] == pytest.approx(-0.0625)
+
+
+def test_frac_diff_d1_is_first_difference():
+    # d = 1 -> (1 - B)^1 -> ordinary first difference.
+    # weights: w0=1, w1=-1, w2..=0  =>  fd[t] = x[t]-x[t-1], fd[0]=x[0].
+    s = pd.Series([3.0, 5.0, 8.0, 8.0, 6.0], index=_index(5))
+    fd = frac_diff(s, d=1.0)
+    expected = [3.0, 2.0, 3.0, 0.0, -2.0]
+    assert np.allclose(fd.to_numpy(), expected)
+
+
+def test_frac_diff_d0_is_identity():
+    # d = 0 -> (1 - B)^0 = identity -> output equals input.
+    s = pd.Series([3.0, 5.0, 8.0, 2.0], index=_index(4))
+    fd = frac_diff(s, d=0.0)
+    assert np.allclose(fd.to_numpy(), s.to_numpy())
+
+
+def test_frac_diff_half_hand_computed():
+    # d=0.5 expanding window on x = [10, 12, 11, 14].
+    #   fd[0] = 1*10                                   = 10
+    #   fd[1] = 1*12 + (-0.5)*10                       = 12 - 5      = 7
+    #   fd[2] = 1*11 + (-0.5)*12 + (-0.125)*10         = 11-6-1.25   = 3.75
+    #   fd[3] = 1*14 + (-0.5)*11 + (-0.125)*12 + (-0.0625)*10
+    #         = 14 - 5.5 - 1.5 - 0.625                 = 6.375
+    s = pd.Series([10.0, 12.0, 11.0, 14.0], index=_index(4))
+    fd = frac_diff(s, d=0.5)
+    assert fd.iloc[0] == pytest.approx(10.0)
+    assert fd.iloc[1] == pytest.approx(7.0)
+    assert fd.iloc[2] == pytest.approx(3.75)
+    assert fd.iloc[3] == pytest.approx(6.375)
+
+
+def test_frac_diff_is_causal_point_in_time():
+    # fd[t] must depend ONLY on x[0..t]: extending the series must not change
+    # earlier values (no lookahead).
+    base = pd.Series([10.0, 12.0, 11.0], index=_index(3))
+    extended = pd.Series([10.0, 12.0, 11.0, 99.0, -7.0], index=_index(5))
+    fd_base = frac_diff(base, d=0.5)
+    fd_ext = frac_diff(extended, d=0.5)
+    assert np.allclose(fd_base.to_numpy(), fd_ext.to_numpy()[:3])
+
+
+def test_frac_diff_empty():
+    s = pd.Series([], dtype=float)
+    fd = frac_diff(s, d=0.5)
+    assert len(fd) == 0
+
+
+# --------------------------------------------------------------------------------
+# Task 1B — microstructure (single-bar shape)
+# --------------------------------------------------------------------------------
+
+def test_bar_shape_hand_computed():
+    # open=100, high=110, low=95, close=105.  range = 15.
+    #   bar_range_pct    = 15/105*100              = 14.2857...
+    #   body_pct         = (105-100)/105*100       = 4.7619...
+    #   upper_wick_ratio = (110-max(100,105))/15   = 5/15  = 0.3333...
+    #   lower_wick_ratio = (min(100,105)-95)/15    = 5/15  = 0.3333...
+    out = bar_shape(100.0, 110.0, 95.0, 105.0)
+    assert out["bar_range_pct"] == pytest.approx(15.0 / 105.0 * 100.0)
+    assert out["body_pct"] == pytest.approx(5.0 / 105.0 * 100.0)
+    assert out["upper_wick_ratio"] == pytest.approx(5.0 / 15.0)
+    assert out["lower_wick_ratio"] == pytest.approx(5.0 / 15.0)
+
+
+def test_bar_shape_doji_zero_range_safe():
+    # high == low (zero range) -> wick ratios 0, body 0, range 0, no div-by-zero.
+    out = bar_shape(50.0, 50.0, 50.0, 50.0)
+    assert out["bar_range_pct"] == pytest.approx(0.0)
+    assert out["body_pct"] == pytest.approx(0.0)
+    assert out["upper_wick_ratio"] == 0.0
+    assert out["lower_wick_ratio"] == 0.0
+
+
+def test_bar_shape_negative_body_for_down_bar():
+    # close < open -> body_pct negative.
+    out = bar_shape(100.0, 101.0, 90.0, 95.0)
+    assert out["body_pct"] < 0.0
+
+
+def test_bar_shape_zero_close_nan():
+    out = bar_shape(0.0, 0.0, 0.0, 0.0)
+    assert all(math.isnan(v) for v in out.values())
+
+
+# --------------------------------------------------------------------------------
+# Task 1B — short-window return + realized vol
+# --------------------------------------------------------------------------------
+
+def test_short_window_return_pct_hand_computed():
+    # 5-bar return uses close[-6] vs close[-1]: (110/100 - 1)*100 = 10%.
+    close = np.array([100.0, 1, 2, 3, 4, 110.0])
+    assert short_window_return_pct(close, window=5) == pytest.approx(10.0)
+
+
+def test_short_window_return_pct_insufficient_history():
+    close = np.array([100.0, 101.0, 102.0])  # need window+1 = 6 bars
+    assert math.isnan(short_window_return_pct(close, window=5))
+
+
+def test_realized_vol_constant_returns_zero():
+    # Geometric ramp: each one-bar simple return is identical -> realized vol 0.
+    close = np.array([100.0, 110.0, 121.0, 133.1, 146.41, 161.051])
+    assert realized_vol_pct(close, window=5) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_realized_vol_nonzero_for_varying_returns():
+    close = np.array([100.0, 101.0, 99.0, 103.0, 100.0, 105.0])
+    assert realized_vol_pct(close, window=5) > 0.0
+
+
+def test_realized_vol_insufficient_history():
+    close = np.array([100.0, 101.0])
+    assert math.isnan(realized_vol_pct(close, window=5))
+
+
+# --------------------------------------------------------------------------------
+# Task 1B — regime scalar
+# --------------------------------------------------------------------------------
+
+def test_regime_trend_uptrend_positive():
+    # Strong steady uptrend + high ADX -> positive, large magnitude.
+    close = np.linspace(100.0, 120.0, 20)
+    val = regime_trend(close, adx_val=40.0, window=20)
+    assert val > 0.0
+
+
+def test_regime_trend_downtrend_negative():
+    close = np.linspace(120.0, 100.0, 20)
+    val = regime_trend(close, adx_val=40.0, window=20)
+    assert val < 0.0
+
+
+def test_regime_trend_low_adx_dampens_magnitude():
+    # Same price slope, different ADX -> higher ADX yields larger |regime|.
+    close = np.linspace(100.0, 120.0, 20)
+    strong = regime_trend(close, adx_val=50.0, window=20)
+    weak = regime_trend(close, adx_val=10.0, window=20)
+    assert abs(weak) < abs(strong)
+
+
+def test_regime_trend_zero_adx_is_zero():
+    close = np.linspace(100.0, 120.0, 20)
+    assert regime_trend(close, adx_val=0.0, window=20) == pytest.approx(0.0)
+
+
+def test_regime_trend_bounded():
+    # Even a violent slope stays within [-1, 1] (tanh-squashed, ADX-scaled).
+    close = np.linspace(1.0, 1000.0, 20)
+    val = regime_trend(close, adx_val=80.0, window=20)
+    assert -1.0 <= val <= 1.0
+
+
+def test_regime_trend_nan_adx_returns_nan():
+    close = np.linspace(100.0, 120.0, 20)
+    assert math.isnan(regime_trend(close, adx_val=float("nan"), window=20))
+
+
+def test_regime_trend_insufficient_history():
+    close = np.linspace(100.0, 110.0, 5)  # fewer than window=20
+    assert math.isnan(regime_trend(close, adx_val=30.0, window=20))
+
+
+# --------------------------------------------------------------------------------
+# Task 1B — integration: new keys appear in compute_features
+# --------------------------------------------------------------------------------
+
+_NEW_KEYS = (
+    "bar_range_pct",
+    "body_pct",
+    "upper_wick_ratio",
+    "lower_wick_ratio",
+    "ret_5_pct",
+    "rv_5_pct",
+    "regime_trend",
+    "frac_diff_close_pct",
+)
+
+
+def test_compute_features_emits_new_keys_on_long_frame():
+    rng = np.random.default_rng(7)
+    closes = list(100.0 + np.cumsum(rng.normal(0.05, 0.4, 60)))
+    df = _ohlcv(closes, volumes=[1000] * 60)
+    feats = compute_features(df, params={})
+    for key in _NEW_KEYS:
+        assert key in feats, key
+        assert not math.isnan(feats[key]), key
+
+
+def test_compute_features_new_keys_nan_safe_on_short_frame():
+    # 2-bar frame: window-dependent features are nan, but never raise.
+    df = _ohlcv([100.0, 101.0], volumes=[1000, 1100])
+    feats = compute_features(df, params={})
+    for key in _NEW_KEYS:
+        assert key in feats, key
+    # Single-bar shape is computable even on a short frame.
+    assert not math.isnan(feats["bar_range_pct"])
+    # Window-dependent ones need history -> nan here.
+    assert math.isnan(feats["ret_5_pct"])
+    assert math.isnan(feats["rv_5_pct"])
+    assert math.isnan(feats["regime_trend"])

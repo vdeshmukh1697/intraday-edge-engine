@@ -90,9 +90,16 @@ def run_scan(
 
         path = model_path or DEFAULT_MODEL_PATH
         if Path(path).exists():
+            from signal_engine.ml.base import FEATURE_COLUMNS
             from signal_engine.ml.model import LogisticModel
 
-            ml_scorer = MLScorer(LogisticModel.load(path))
+            model = LogisticModel.load(path)
+            # Guard against a stale model trained on a different feature schema: if its
+            # width doesn't match the current FEATURE_COLUMNS, treat it as "no usable
+            # model" (shadow scores stay null) rather than crashing the scan with a
+            # broadcast error. Retrain to re-enable shadow ML on the new features.
+            if getattr(model, "n_features", len(FEATURE_COLUMNS)) == len(FEATURE_COLUMNS):
+                ml_scorer = MLScorer(model)
 
     # 4) Scan + rank.
     strategy = create_strategy(cfg.settings.strategy.active, cfg.settings.strategy.params)

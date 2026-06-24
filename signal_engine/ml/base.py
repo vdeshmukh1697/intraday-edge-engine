@@ -15,6 +15,27 @@ Feature derivation (from a merged technical+news feature dict ``f``), used by ml
     news_sentiment = f.news_sentiment_avg (fallback f.news_sentiment, else 0)
     news_spike     = f.news_volume_spike (else 0)
     news_event     = f.news_has_event (else 0)
+
+Task 1B — richer stationary features (all already price-normalized, so cross-symbol
+comparable; computed point-in-time in indicators/__init__.py + ml/dataset.py, just
+coerced to float here):
+  Microstructure (single-bar shape / short-window dynamics, no new data):
+    bar_range_pct     = (high - low) / close * 100            (current bar range)
+    body_pct          = (close - open) / close * 100          (signed candle body)
+    upper_wick_ratio  = (high - max(open, close)) / (high - low)   (0..1; 0 if range=0)
+    lower_wick_ratio  = (min(open, close) - low) / (high - low)    (0..1; 0 if range=0)
+    ret_5_pct         = (close / close[t-5] - 1) * 100        (5-bar momentum)
+    rv_5_pct          = stdev of the last 5 one-bar simple returns * 100  (realized vol)
+  Regime (no new data): ADX-scaled signed price slope, bounded & stationary —
+    regime_trend      = tanh(slope_norm) * min(adx, 50) / 50, where slope_norm is the
+                        OLS slope of close over the last N(=20) bars expressed per-bar
+                        as a fraction of close (slope/close). Sign = trend direction,
+                        magnitude in [0,1] grows with both slope steepness and ADX, so
+                        |regime_trend|~1 is a strong clean trend and ~0 is chop.
+  Fractional differentiation (López de Prado, indicators/core.frac_diff):
+    frac_diff_close_pct = frac_diff(close, d=0.5)[t] / close[t] * 100. Fractionally
+                        differenced close (memory-preserving, near-stationary), scaled
+                        by price so it is comparable across symbols.
 Missing / NaN -> 0.0.
 """
 
@@ -35,6 +56,15 @@ FEATURE_COLUMNS: List[str] = [
     "news_sentiment",
     "news_spike",
     "news_event",
+    # Task 1B — richer stationary features (see module docstring for derivations).
+    "bar_range_pct",
+    "body_pct",
+    "upper_wick_ratio",
+    "lower_wick_ratio",
+    "ret_5_pct",
+    "rv_5_pct",
+    "regime_trend",
+    "frac_diff_close_pct",
 ]
 
 

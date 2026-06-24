@@ -208,3 +208,53 @@ def opening_range(df: pd.DataFrame, minutes: int = 15) -> Tuple[float, float]:
         return (float("nan"), float("nan"))
     window = df.iloc[:minutes]
     return (float(window["high"].max()), float(window["low"].min()))
+
+
+def _frac_diff_weights(d: float, size: int) -> np.ndarray:
+    """Binomial expansion weights for fractional differencing of order ``d``.
+
+    From López de Prado, *Advances in Financial Machine Learning* (2018), §5.4.
+    The fractional-difference operator ``(1 - B)^d`` expands as an infinite
+    binomial series whose weights obey the recurrence
+
+        w[0] = 1,  w[k] = -w[k-1] * (d - k + 1) / k    for k >= 1
+
+    Returned newest-first: ``w[0]`` multiplies the most recent observation and
+    ``w[size-1]`` the oldest. Weights decay (for non-integer d they never reach
+    zero, hence the truncation to ``size`` terms — the expanding-window variant).
+    """
+    w = [1.0]
+    for k in range(1, size):
+        w.append(-w[-1] * (d - k + 1) / k)
+    return np.asarray(w, dtype=float)
+
+
+def frac_diff(series: pd.Series, d: float = 0.5) -> pd.Series:
+    """Fractionally differentiated series (López de Prado expanding window).
+
+    Applies the fractional-difference operator ``(1 - B)^d`` for real ``d`` via
+    its binomial-weight expansion (see ``_frac_diff_weights``). For each row ``t``
+    the output is the dot product of the binomial weights with *all* prior
+    observations up to and including ``t`` (the EXPANDING-window form of §5.4):
+
+        fd[t] = sum_{k=0..t} w[k] * x[t-k]
+
+    This keeps far more memory than an integer first difference (``d=1``) while
+    still removing the unit root, so the result is (near-)stationary yet retains
+    predictive level information. ``d=0`` returns the series unchanged; ``d=1``
+    reduces to the ordinary first difference.
+
+    The expansion is point-in-time and causal: ``fd[t]`` uses only ``x[0..t]``,
+    so it is safe to compute over a growing live history with no lookahead. NaNs
+    in the input propagate to any output term that depends on them.
+    """
+    x = series.to_numpy(dtype=float)
+    n = len(x)
+    if n == 0:
+        return pd.Series([], index=series.index, dtype=float)
+    weights = _frac_diff_weights(d, n)
+    out = np.full(n, np.nan, dtype=float)
+    for t in range(n):
+        # Newest-first weights dotted with the window x[0..t] reversed (newest first).
+        out[t] = float(np.dot(weights[: t + 1], x[t::-1]))
+    return pd.Series(out, index=series.index)

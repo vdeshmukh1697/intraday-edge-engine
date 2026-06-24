@@ -14,6 +14,11 @@ Derivation rules (see ml/base.py docstring):
     news_spike     = raw.news_volume_spike (else 0.0)
     news_event     = raw.news_has_event (else 0.0)
 
+Task 1B richer features arrive in ``raw`` already price-normalized and stationary
+(see ml/base.py docstring), so they are simply coerced to float here:
+    bar_range_pct, body_pct, upper_wick_ratio, lower_wick_ratio,
+    ret_5_pct, rv_5_pct, regime_trend, frac_diff_close_pct.
+
 Any missing key, None, or NaN coerces to 0.0.
 """
 
@@ -68,6 +73,15 @@ def feature_row(raw: dict) -> Dict[str, float]:
         "news_sentiment": _num(news_sentiment),
         "news_spike": _num(raw.get("news_volume_spike")),
         "news_event": _num(raw.get("news_has_event")),
+        # Task 1B — already-stationary values; just coerce (NaN/None/missing -> 0.0).
+        "bar_range_pct": _num(raw.get("bar_range_pct")),
+        "body_pct": _num(raw.get("body_pct")),
+        "upper_wick_ratio": _num(raw.get("upper_wick_ratio")),
+        "lower_wick_ratio": _num(raw.get("lower_wick_ratio")),
+        "ret_5_pct": _num(raw.get("ret_5_pct")),
+        "rv_5_pct": _num(raw.get("rv_5_pct")),
+        "regime_trend": _num(raw.get("regime_trend")),
+        "frac_diff_close_pct": _num(raw.get("frac_diff_close_pct")),
     }
     return {col: row[col] for col in FEATURE_COLUMNS}
 

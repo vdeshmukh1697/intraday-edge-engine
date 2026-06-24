@@ -24,6 +24,15 @@ import numpy as np
 from signal_engine.config import AppConfig
 from signal_engine.data.synthetic import generate_session
 from signal_engine.domain.enums import Direction
+from signal_engine.indicators import (
+    _FRAC_DIFF_D,
+    _REGIME_WINDOW,
+    _RET_WINDOW,
+    bar_shape,
+    realized_vol_pct,
+    regime_trend,
+    short_window_return_pct,
+)
 from signal_engine.indicators import core as ind
 from signal_engine.ml.features import build_matrix
 from signal_engine.risk.costs import CostModel
@@ -49,8 +58,17 @@ def _session_feature_frame(df, params) -> Dict[str, np.ndarray]:
     close = df["close"]
     ef = int(params.get("ema_fast", 9))
     es = int(params.get("ema_slow", 21))
+    # frac_diff (López de Prado expanding window) is causal — frac_diff[t] uses only
+    # close[0..t] — so it is safe to vectorize once per session; price-scale it to %.
+    close_np = close.to_numpy(dtype=float)
+    fd = ind.frac_diff(close, _FRAC_DIFF_D).to_numpy(dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        fd_pct = np.where(close_np != 0.0, fd / close_np * 100.0, np.nan)
     return {
-        "close": close.to_numpy(),
+        "open": df["open"].to_numpy(dtype=float),
+        "high": df["high"].to_numpy(dtype=float),
+        "low": df["low"].to_numpy(dtype=float),
+        "close": close_np,
         "vwap": ind.vwap(df).to_numpy(),
         "ema_fast": ind.ema(close, ef).to_numpy(),
         "ema_slow": ind.ema(close, es).to_numpy(),
@@ -58,13 +76,15 @@ def _session_feature_frame(df, params) -> Dict[str, np.ndarray]:
         "adx": ind.adx(df, int(params.get("adx_period", 14))).to_numpy(),
         "atr": ind.atr(df, int(params.get("atr_period", 14))).to_numpy(),
         "rvol": ind.rvol(df["volume"], int(params.get("rvol_lookback", 20))).to_numpy(),
+        "frac_diff_close_pct": fd_pct,
     }
 
 
 def _raw_at(fr: Dict[str, np.ndarray], t: int) -> dict:
     close = fr["close"][t]
     atr = fr["atr"][t]
-    return {
+    adx = fr["adx"][t]
+    raw = {
         "close": close,
         "vwap": fr["vwap"][t],
         "ema_fast": fr["ema_fast"][t],
@@ -72,12 +92,21 @@ def _raw_at(fr: Dict[str, np.ndarray], t: int) -> dict:
         "ema_fast_prev": fr["ema_fast"][t - 1] if t > 0 else float("nan"),
         "ema_slow_prev": fr["ema_slow"][t - 1] if t > 0 else float("nan"),
         "rsi": fr["rsi"][t],
-        "adx": fr["adx"][t],
+        "adx": adx,
         "atr": atr,
         "atr_pct": (atr / close * 100.0) if close else float("nan"),
         "rvol": fr["rvol"][t],
         "bar_count": t + 1,
     }
+    # Task 1B — point-in-time (only data up to row t): single-bar shape at t, and the
+    # trailing window close[: t + 1]. Identical math to the live compute_features path.
+    raw.update(bar_shape(fr["open"][t], fr["high"][t], fr["low"][t], close))
+    window_close = fr["close"][: t + 1]
+    raw["ret_5_pct"] = short_window_return_pct(window_close, _RET_WINDOW)
+    raw["rv_5_pct"] = realized_vol_pct(window_close, _RET_WINDOW)
+    raw["regime_trend"] = regime_trend(window_close, adx, _REGIME_WINDOW)
+    raw["frac_diff_close_pct"] = fr["frac_diff_close_pct"][t]
+    return raw
 
 
 def _label(df, entry_idx: int, direction: Direction, stop: float, target: float,

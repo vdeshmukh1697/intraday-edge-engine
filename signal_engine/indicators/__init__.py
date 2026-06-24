@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
+import numpy as np
 import pandas as pd
 
 from signal_engine.indicators.core import (
+    _frac_diff_weights,
     adx,
     atr,
     ema,
+    frac_diff,
     macd,
     opening_range,
     rsi,
@@ -28,8 +31,20 @@ __all__ = [
     "macd",
     "supertrend",
     "opening_range",
+    "frac_diff",
     "compute_features",
+    "bar_shape",
+    "short_window_return_pct",
+    "realized_vol_pct",
+    "regime_trend",
+    "frac_diff_close_pct",
 ]
+
+# Tunables for the Task 1B short-window / regime features (kept in one place so the
+# live path and the ML dataset builder use identical windows).
+_RET_WINDOW = 5      # bars for short-window return + realized vol
+_REGIME_WINDOW = 20  # bars for the OLS slope behind the regime scalar
+_FRAC_DIFF_D = 0.5   # fractional-difference order for the frac_diff feature
 
 _NAN = float("nan")
 
@@ -49,6 +64,15 @@ _FEATURE_KEYS = [
     "orb_high",
     "orb_low",
     "bar_count",
+    # Task 1B — richer stationary features (see ml/base.py for ML-column derivations).
+    "bar_range_pct",
+    "body_pct",
+    "upper_wick_ratio",
+    "lower_wick_ratio",
+    "ret_5_pct",
+    "rv_5_pct",
+    "regime_trend",
+    "frac_diff_close_pct",
 ]
 
 
@@ -66,6 +90,114 @@ def _prev(series: pd.Series) -> float:
         return _NAN
     val = series.iloc[-2]
     return float(val) if pd.notna(val) else _NAN
+
+
+# --- Task 1B shared feature math --------------------------------------------------
+# These pure helpers operate on plain floats / 1-D numpy arrays so the live aggregator
+# (compute_features) and the vectorized ML builder (ml/dataset._raw_at) compute the
+# IDENTICAL value for a given bar. All are point-in-time: they look only at the bar
+# itself or a trailing window ending at that bar.
+
+
+def bar_shape(o: float, h: float, lo: float, c: float) -> Dict[str, float]:
+    """Single-bar microstructure ratios (range/body as % of close, wick ratios 0..1).
+
+    Returns nan for every key if close is non-positive/NaN. Wick ratios are 0.0 when
+    the bar has zero range (a doji with high==low) — there is no wick to measure.
+    """
+    if not (c == c) or c == 0.0:
+        return {k: _NAN for k in
+                ("bar_range_pct", "body_pct", "upper_wick_ratio", "lower_wick_ratio")}
+    rng = h - lo
+    if rng <= 0.0:
+        upper = lower = 0.0
+    else:
+        upper = (h - max(o, c)) / rng
+        lower = (min(o, c) - lo) / rng
+    return {
+        "bar_range_pct": rng / c * 100.0,
+        "body_pct": (c - o) / c * 100.0,
+        "upper_wick_ratio": upper,
+        "lower_wick_ratio": lower,
+    }
+
+
+def short_window_return_pct(close: np.ndarray, window: int = _RET_WINDOW) -> float:
+    """``window``-bar simple return ending at the last element, in percent."""
+    if close is None or len(close) <= window:
+        return _NAN
+    past = close[-window - 1]
+    last = close[-1]
+    if not (past == past) or past == 0.0 or not (last == last):
+        return _NAN
+    return (last / past - 1.0) * 100.0
+
+
+def realized_vol_pct(close: np.ndarray, window: int = _RET_WINDOW) -> float:
+    """Realized volatility = stdev of the last ``window`` one-bar simple returns (%).
+
+    Uses a population stdev (ddof=0) so a single constant window is exactly 0.0.
+    """
+    if close is None or len(close) <= window:
+        return _NAN
+    seg = np.asarray(close[-window - 1:], dtype=float)
+    if not np.all(np.isfinite(seg)) or np.any(seg[:-1] == 0.0):
+        return _NAN
+    rets = seg[1:] / seg[:-1] - 1.0
+    return float(np.std(rets, ddof=0)) * 100.0
+
+
+def regime_trend(close: np.ndarray, adx_val: float,
+                 window: int = _REGIME_WINDOW) -> float:
+    """ADX-scaled signed trend strength in [-1, 1] (stationary; ~0 == chop).
+
+    Fits an OLS line to the last ``window`` closes, normalizes its slope to a per-bar
+    fraction of price (slope / mean-close), squashes that with ``tanh`` to bound the
+    sign+steepness, then scales by ``min(adx, 50)/50`` so strength only counts when ADX
+    confirms directionality. |value| -> 1 is a strong clean trend, value ~ 0 is chop.
+    """
+    if close is None or len(close) < window or not (adx_val == adx_val):
+        return _NAN
+    seg = np.asarray(close[-window:], dtype=float)
+    if not np.all(np.isfinite(seg)):
+        return _NAN
+    x = np.arange(window, dtype=float)
+    # OLS slope of close vs bar index.
+    x_mean = x.mean()
+    denom = float(((x - x_mean) ** 2).sum())
+    if denom == 0.0:
+        return _NAN
+    slope = float(((x - x_mean) * (seg - seg.mean())).sum() / denom)
+    mean_c = float(seg.mean())
+    if mean_c == 0.0:
+        return _NAN
+    slope_norm = slope / mean_c          # per-bar slope as a fraction of price
+    adx_scale = min(max(adx_val, 0.0), 50.0) / 50.0
+    return float(np.tanh(slope_norm * 100.0) * adx_scale)
+
+
+def frac_diff_close_pct(close_series: pd.Series, d: float = _FRAC_DIFF_D) -> float:
+    """Latest fractionally-differenced close, scaled by price (percent of close).
+
+    The López de Prado expanding-window frac_diff yields a near-stationary,
+    memory-preserving transform of close; dividing by the current close makes it
+    comparable across symbols at different price levels.
+
+    Only the LAST value is needed here (the live aggregator runs once per closed
+    bar), so this computes the single dot product ``sum_k w[k] * x[-1-k]`` directly
+    in O(n) rather than materializing the whole frac_diff series in O(n^2) — the
+    result is identical to ``frac_diff(close_series, d).iloc[-1]``.
+    """
+    if close_series is None or len(close_series) == 0:
+        return _NAN
+    x = close_series.to_numpy(dtype=float)
+    n = len(x)
+    weights = _frac_diff_weights(d, n)
+    fd_last = float(np.dot(weights, x[::-1]))  # newest-first weights . newest-first window
+    last_c = float(x[-1])
+    if not (fd_last == fd_last) or not (last_c == last_c) or last_c == 0.0:
+        return _NAN
+    return fd_last / last_c * 100.0
 
 
 def compute_features(
@@ -144,5 +276,24 @@ def compute_features(
     orb_high, orb_low = opening_range(bars, orb_min)
     out["orb_high"] = float(orb_high)
     out["orb_low"] = float(orb_low)
+
+    # --- Task 1B richer stationary features (NaN-safe on short history) ---
+    # Microstructure: current-bar shape (always available once n >= 1).
+    out.update(
+        bar_shape(
+            float(bars["open"].iloc[-1]),
+            float(bars["high"].iloc[-1]),
+            float(bars["low"].iloc[-1]),
+            out["close"],
+        )
+    )
+    close_np = close.to_numpy(dtype=float)
+    # Short-window momentum + realized vol (need window+1 bars).
+    out["ret_5_pct"] = short_window_return_pct(close_np, _RET_WINDOW)
+    out["rv_5_pct"] = realized_vol_pct(close_np, _RET_WINDOW)
+    # Regime scalar (needs the ADX warm-up already gated above + window bars).
+    out["regime_trend"] = regime_trend(close_np, out["adx"], _REGIME_WINDOW)
+    # Fractional-difference of close, price-scaled.
+    out["frac_diff_close_pct"] = frac_diff_close_pct(close, _FRAC_DIFF_D)
 
     return out
