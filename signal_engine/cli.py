@@ -504,8 +504,8 @@ def build_parser() -> argparse.ArgumentParser:
     pt.add_argument("--stride", type=int, default=2, help="Bar stride for archive training.")
     pt.add_argument("--max-symbols", type=int, default=400,
                     help="Archive: train on the N most-liquid names (default 400).")
-    pt.add_argument("--max-samples", type=int, default=1500000,
-                    help="Cap labeled samples (bounds an archive run).")
+    pt.add_argument("--max-samples", type=int, default=300000,
+                    help="Cap labeled samples (bounds an archive run; keep memory-safe).")
     pt.set_defaults(func=cmd_train)
 
     pn = sub.add_parser("news", help="Preview the day's (synthetic) news headlines.")
