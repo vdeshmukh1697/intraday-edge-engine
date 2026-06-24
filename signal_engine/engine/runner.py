@@ -64,6 +64,8 @@ class EngineRunner:
         session: MarketSession,
         alerter: Alerter,
         repo=None,
+        ml_scorer=None,
+        ml_gate: float = 0.0,
     ):
         self.cfg = cfg
         self.broker = broker
@@ -71,6 +73,10 @@ class EngineRunner:
         self.session = session
         self.alerter = alerter
         self.repo = repo
+        # Optional ML entry gate: skip any signal the model scores below ml_gate (0..1).
+        # ml_gate=0 disables it (ML stays pure shadow). PLAN §4.7.
+        self.ml_scorer = ml_scorer
+        self.ml_gate = float(ml_gate)
 
         self.cost_model = CostModel(cfg.risk.costs)
         self.risk_manager = RiskManager(cfg.risk.risk)
@@ -168,6 +174,11 @@ class EngineRunner:
         plan = self.risk_manager.build_trade_plan(signal, features, self.cost_model)
         if plan is None:
             return  # vetoed by R:R floor / edge-after-cost gate
+        if self.ml_scorer is not None and self.ml_gate > 0.0:
+            from signal_engine.ml.features import build_matrix
+            prob = float(self.ml_scorer.score_matrix(build_matrix([features]))[0]) / 100.0
+            if prob < self.ml_gate:
+                return  # ML says this setup is below the win-probability threshold
         self._surface(plan)
 
     # -- helpers ------------------------------------------------------------

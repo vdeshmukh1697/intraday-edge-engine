@@ -179,8 +179,19 @@ def create_app() -> FastAPI:
         if cfg.env.data_source != "mock":
             from signal_engine.storage.bars import ParquetBarStore
 
-            n_archived = len(ParquetBarStore(cfg.env.parquet_dir).list_symbols())
-            ckey = (top, news, n_archived)
+            store = ParquetBarStore(cfg.env.parquet_dir)
+            syms = store.list_symbols()
+            # Cache key includes the symbol count AND the newest archived session date, so the
+            # leaderboard auto-refreshes both as the corpus grows and as each new session is
+            # archived (intraday refresh or nightly). It is still the most-recent COMPLETE
+            # session, not a tick-live ranking — see /api/leaderboard docs.
+            latest = None
+            for s in syms[:5] + syms[-5:]:  # cheap probe of a few symbols for the newest date
+                d = store.load_latest_session(s)
+                if d is not None and not d.empty:
+                    dt = d.index.max().date()
+                    latest = dt if latest is None or dt > latest else latest
+            ckey = (top, news, len(syms), str(latest))
             if ckey not in _LEADERBOARD_CACHE:
                 real = _archive_leaderboard(cfg, top, news)
                 if real is not None:

@@ -95,12 +95,17 @@ def train_model_from_archive(
     symbols: List[str],
     stride: int = 2,
     max_samples: Optional[int] = 200_000,
+    max_per_symbol: Optional[int] = 2_000,
     test_frac: float = 0.3,
     model_path: Optional[str] = DEFAULT_MODEL_PATH,
     min_samples: int = 200,
     log=None,
 ) -> Tuple[Optional[MLModel], TrainReport]:
-    """Train on REAL backfilled bars (the 5-year corpus) instead of synthetic sessions."""
-    ds = build_dataset_from_archive(cfg, store, symbols, stride=stride,
-                                    max_samples=max_samples, log=log)
+    """Train on REAL backfilled bars (the 5-year corpus) instead of synthetic sessions.
+
+    ``max_per_symbol`` keeps the dataset diverse across the whole universe instead of being
+    dominated by a handful of high-firing names.
+    """
+    ds = build_dataset_from_archive(cfg, store, symbols, stride=stride, max_samples=max_samples,
+                                    max_per_symbol=max_per_symbol, log=log)
     return _train_on_dataset(ds, test_frac, model_path, min_samples)

@@ -308,6 +308,7 @@ def cmd_train(args) -> int:
               f"max_samples={args.max_samples}...\n")
         model, rep = train_model_from_archive(
             cfg, store, syms, stride=args.stride, max_samples=args.max_samples,
+            max_per_symbol=args.max_per_symbol,
             test_frac=args.test_frac, model_path=args.out, log=get_logger("train"))
     else:
         symbols = args.symbols.split(",") if args.symbols else cfg.settings.watchlist
@@ -506,6 +507,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Archive: train on the N most-liquid names (default 400).")
     pt.add_argument("--max-samples", type=int, default=300000,
                     help="Cap labeled samples (bounds an archive run; keep memory-safe).")
+    pt.add_argument("--max-per-symbol", type=int, default=2000,
+                    help="Archive: cap samples per symbol so all names are represented.")
     pt.set_defaults(func=cmd_train)
 
     pn = sub.add_parser("news", help="Preview the day's (synthetic) news headlines.")

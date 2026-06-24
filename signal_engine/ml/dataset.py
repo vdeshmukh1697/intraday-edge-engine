@@ -172,6 +172,7 @@ def build_dataset_from_archive(
     symbols: List[str],
     stride: int = 2,
     max_samples: Optional[int] = None,
+    max_per_symbol: Optional[int] = None,
     progress_every: int = 100,
     log=None,
 ) -> Dataset:
@@ -179,8 +180,11 @@ def build_dataset_from_archive(
 
     Splits each symbol's multi-year history into per-day sessions and runs the same
     signal->plan->first-touch labeling as the synthetic builder. Sessions are processed
-    oldest-first so the chronological train/test split stays out-of-sample. Stops once
-    ``max_samples`` labeled signals are gathered, bounding an overnight run.
+    oldest-first so the chronological train/test split stays out-of-sample.
+
+    ``max_per_symbol`` caps each symbol's contribution so a few high-firing names don't
+    saturate the total budget — without it the dataset is dominated by ~11 symbols and the
+    model never sees the rest of the universe. ``max_samples`` bounds the overall run.
     """
     params = dict(cfg.settings.strategy.params)
     strategy = create_strategy(cfg.settings.strategy.active, params)
@@ -196,9 +200,21 @@ def build_dataset_from_archive(
     for i, sym in enumerate(symbols, 1):
         hist = store.load_symbol_history(sym)
         if hist is not None and not hist.empty:
+            # Collect this symbol's samples separately so we can cap its contribution evenly.
+            s_raw: List[dict] = []
+            s_lab: List[int] = []
+            s_conf: List[float] = []
             for _day, df in hist.groupby(hist.index.normalize()):  # one session/day, oldest first
                 _session_samples(df, sym, strategy, risk, cost, params, max_hold, min_bars,
-                                 stride, raws, labels, confs)
+                                 stride, s_raw, s_lab, s_conf)
+                if max_per_symbol and len(s_lab) >= max_per_symbol:
+                    break
+            if max_per_symbol and len(s_lab) > max_per_symbol:
+                s_raw, s_lab, s_conf = (s_raw[:max_per_symbol], s_lab[:max_per_symbol],
+                                        s_conf[:max_per_symbol])
+            raws.extend(s_raw)
+            labels.extend(s_lab)
+            confs.extend(s_conf)
         if log and (i % progress_every == 0 or i == len(symbols)):
             log.info("ml dataset: %d/%d symbols, %d labeled signals", i, len(symbols), len(labels))
         if max_samples and len(labels) >= max_samples:
