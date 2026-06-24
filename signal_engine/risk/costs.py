@@ -20,13 +20,31 @@ class CostModel:
     ``reference_trade_value`` (any object with those attributes works, e.g.
     :class:`signal_engine.config.CostParams`).
 
-    ``slippage`` is accepted for forward-compatibility (PLAN §5.4 models entry/exit
-    slippage separately) but is not applied to the statutory cost breakdown here.
+    ``slippage`` (any object exposing ``pct_per_side``, e.g.
+    :class:`signal_engine.config.SlippageParams`) models execution slippage. It is NOT part
+    of the itemized statutory :meth:`charges` breakdown, but IS folded into
+    :meth:`breakeven_pct` as a round-trip add-on (PLAN V3) — see :meth:`slippage_pct`.
     """
 
     def __init__(self, costs, slippage=None):
         self.costs = costs
         self.slippage = slippage
+
+    def slippage_pct(self) -> float:
+        """Round-trip slippage as a percentage move (entry + exit), scaled by the configured
+        ``slippage_scalar``. Returns 0.0 when no slippage model is supplied.
+
+        ``slippage.pct_per_side`` is a per-side percentage (e.g. 0.03 == 0.03%); a round trip
+        crosses the spread twice, so the move that must be cleared is ``2 * pct_per_side``.
+        ``slippage_scalar`` (default 1.0) lets us stress-test wider/tighter execution.
+        """
+        if self.slippage is None:
+            return 0.0
+        per_side = getattr(self.slippage, "pct_per_side", 0.0) or 0.0
+        scalar = getattr(self.costs, "slippage_scalar", 1.0)
+        if scalar is None:
+            scalar = 1.0
+        return 2.0 * per_side * scalar
 
     def charges(self, buy_price: float, sell_price: float, qty: float) -> CostBreakdown:
         """Itemized round-trip charges for buying ``qty`` at ``buy_price`` and
@@ -55,9 +73,23 @@ class CostModel:
 
     def breakeven_pct(self, price: float, trade_value: Optional[float] = None) -> float:
         """Percentage move (round-trip, same price both sides) needed to clear all
-        charges, sized off ``trade_value`` (defaults to ``reference_trade_value``)."""
+        charges PLUS round-trip slippage, sized off ``trade_value`` (defaults to
+        ``reference_trade_value``).
+
+        Statutory charges are computed off the notional; round-trip slippage
+        (:meth:`slippage_pct`) is added directly as a percentage move (it scales with price,
+        not notional). When no slippage model is supplied the add-on is 0.0, preserving the
+        prior behaviour.
+        """
+        # Guard against a degenerate price (0/negative/NaN): the qty division below would
+        # crash or produce nonsense. A non-positive price has no meaningful break-even.
+        try:
+            if price is None or price <= 0 or price != price:  # price != price => NaN
+                return 0.0
+        except TypeError:
+            return 0.0
         if trade_value is None:
             trade_value = self.costs.reference_trade_value
         qty = max(1, round(trade_value / price))
         total = self.charges(price, price, qty).total
-        return total / (price * qty) * 100.0
+        return total / (price * qty) * 100.0 + self.slippage_pct()

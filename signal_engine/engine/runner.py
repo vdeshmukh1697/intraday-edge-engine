@@ -31,9 +31,53 @@ from signal_engine.market.session import MarketSession
 from signal_engine.paper.trader import PaperTrader
 from signal_engine.risk.costs import CostModel
 from signal_engine.risk.manager import RiskManager
+from signal_engine.risk.sizing import size_plan
 from signal_engine.strategies.base import Strategy, StrategyContext
 
 _MAX_HISTORY = 300  # bars kept per symbol for feature computation
+
+
+@dataclass
+class _LossBreaker:
+    """Session capital-preservation circuit breaker (PLAN §5.3 M1, paper-only).
+
+    Tracks cumulative realized PnL% for the session and a run of consecutive losing
+    trades. Halts NEW entries once the daily loss limit is breached OR after N straight
+    losses; it never touches open positions and never places/cancels real orders — it only
+    gates the runner's entry path. State is per-session (a fresh runner == a fresh session).
+
+    ``daily_max_loss_pct`` is a positive number (e.g. 2.0 == halt at -2.0% on the book).
+    """
+
+    daily_max_loss_pct: float
+    max_consecutive_losses: int
+    realized_pnl_pct: float = 0.0
+    consecutive_losses: int = 0
+    _halted: bool = False
+    halt_reason: str = ""
+
+    def record(self, pnl_pct_net: Optional[float]) -> None:
+        """Fold one CLOSED trade's net PnL% into the session tally and update the run."""
+        pnl = float(pnl_pct_net or 0.0)
+        self.realized_pnl_pct += pnl
+        if pnl < 0:
+            self.consecutive_losses += 1
+        else:
+            self.consecutive_losses = 0
+        if not self._halted:
+            if self.daily_max_loss_pct > 0 and self.realized_pnl_pct <= -abs(self.daily_max_loss_pct):
+                self._halted = True
+                self.halt_reason = (f"daily loss limit hit "
+                                    f"({self.realized_pnl_pct:+.2f}% <= -{abs(self.daily_max_loss_pct):.2f}%)")
+            elif (self.max_consecutive_losses > 0
+                  and self.consecutive_losses >= self.max_consecutive_losses):
+                self._halted = True
+                self.halt_reason = (f"{self.consecutive_losses} consecutive losses "
+                                    f">= {self.max_consecutive_losses}")
+
+    @property
+    def halted(self) -> bool:
+        return self._halted
 
 
 @dataclass
@@ -96,6 +140,19 @@ class EngineRunner:
         self._daily_trades = 0
         self.summary = RunSummary()
 
+        # M1: session capital-preservation breaker. daily_max_loss_pct reuses the existing
+        # daily_loss_pct config (a % of the user's chosen capital, applied to the paper book).
+        self.breaker = _LossBreaker(
+            daily_max_loss_pct=float(getattr(cfg.risk.risk, "daily_loss_pct", 0.0)),
+            max_consecutive_losses=int(getattr(cfg.risk.risk, "max_consecutive_losses", 0)),
+        )
+
+        # D1b: per-bar candidate buffer for ranked top-N surfacing. Candidates that clear the
+        # gates within one event-time minute are collected, then ranked and the top-N opened
+        # when the bar minute advances. top_n_alerts==0 => fall back to max_trades_per_day.
+        self._pending: List[tuple] = []   # (rank, tiebreak, plan) for the current minute
+        self._pending_minute = None       # event-time minute currently being collected
+
         # Hardening (PLAN §9.3): structured logging + opt-in stale-data fail-safe.
         from signal_engine.obs.freshness import FreshnessGuard
         from signal_engine.obs.logging_setup import get_logger
@@ -144,6 +201,18 @@ class EngineRunner:
     # -- core per-bar logic -------------------------------------------------
     def on_closed_bar(self, bar: Bar) -> None:
         self.summary.bars_processed += 1
+
+        # D1b: as soon as the event-time MINUTE advances, the previous minute's collection of
+        # qualified candidates is complete — rank it and open the top-N. Doing this at the TOP
+        # (before this bar's position-management / fills) preserves the original fill timing: a
+        # candidate that fired on bar T is opened before bar T+1's fills, exactly as immediate
+        # surfacing did. Single-candidate minutes are surfaced unchanged, so replay stays
+        # byte-identical for the advisor=None path.
+        cur_minute = bar.ts.replace(second=0, microsecond=0)
+        if self._pending_minute is not None and cur_minute > self._pending_minute:
+            self._flush_pending()
+        self._pending_minute = cur_minute
+
         hist = self._history.setdefault(bar.symbol, [])
         hist.append(bar)
         if len(hist) > _MAX_HISTORY:
@@ -189,24 +258,90 @@ class EngineRunner:
             if prob < self.ml_gate:
                 plan = None  # ML says this setup is below the win-probability threshold
 
+        # D1 (gate-before-advisor): decide ACTIONABILITY with a READ-ONLY gate check BEFORE
+        # re-rating, so a symbol we can't actually enter (already held, daily/concurrent limit
+        # hit, breaker tripped, in cooldown) never emits a fresh-looking NEW alert. Re-rating /
+        # reversal / invalidation of an already-tracked symbol stays exempt (handled inside the
+        # advisor) — a thesis change on a position we hold is still worth flagging.
+        actionable = plan is not None and self._gate_ok(bar.symbol, bar.ts)
+
         # Live re-rating: alert the moment the plan materially changes (target/dir/conviction).
         if self.advisor is not None:
-            msg = self.advisor.update(bar.symbol, plan)
+            msg = self.advisor.update(bar.symbol, plan, actionable=actionable)
             if msg:
                 self._alert(msg, "signal")
 
-        # 4) Open a NEW position only if the plan is valid and all execution gates pass.
-        if plan is None:
+        # 4) Collect a NEW candidate only if the plan is valid and all execution gates pass.
+        #    Actual opening is deferred to the ranked top-N flush when the minute advances.
+        if not actionable:
             return
-        if not self._symbol_free(bar.symbol, bar.ts):
+        self._collect_candidate(plan)
+
+    # -- ranking / candidate collection (D1b) -------------------------------
+    def _collect_candidate(self, plan: TradePlan) -> None:
+        """Buffer a gate-cleared candidate for this event-time minute (ranked at flush)."""
+        rank = self._rank(plan)
+        # Deterministic tie-break: higher rank first, then symbol, then direction.
+        tiebreak = (plan.symbol, plan.direction.value)
+        self._pending.append((rank, tiebreak, plan))
+
+    @staticmethod
+    def _rank(plan: TradePlan) -> float:
+        """rank = (t1_pct - cost_pct) / stop_pct * confidence (PLAN D1b).
+
+        Rewards net-of-cost reward per unit risk, scaled by conviction. stop_pct is always
+        > 0 for a surfaced plan (the risk manager floors it), so no divide-by-zero here.
+        """
+        stop_pct = plan.stop_pct or 1e-9
+        edge = plan.target_pcts[0] - plan.cost_to_break_even_pct
+        return (edge / stop_pct) * plan.confidence
+
+    def _top_n(self) -> int:
+        """N for top-N alerting: ``top_n_alerts`` (0 => fall back to max_trades_per_day)."""
+        n = int(getattr(self.cfg.risk.alerts, "top_n_alerts", 0) or 0)
+        return n if n > 0 else int(self.cfg.risk.risk.max_trades_per_day)
+
+    def _flush_pending(self) -> None:
+        """Rank the buffered candidates for the just-finished minute and open the top-N.
+
+        Re-checks each gate at open time (counts evolve as we open within the flush), so the
+        daily/concurrent caps and the breaker stay authoritative. Empty/clears the buffer.
+        """
+        pending, self._pending = self._pending, []
+        if not pending:
             return
-        if self._daily_trades >= self.cfg.risk.risk.max_trades_per_day:
-            return
-        if len(self.paper.open_positions) >= self.cfg.risk.risk.max_concurrent_positions:
-            return
-        self._surface(plan)
+        # Highest rank first; deterministic tie-break by (symbol, direction).
+        pending.sort(key=lambda item: (-item[0], item[1]))
+        n = self._top_n()
+        opened = 0
+        for _rank, _tb, plan in pending:
+            if opened >= n:
+                break
+            # Re-validate against live counts/breaker — gates may have closed mid-flush.
+            if not self._gate_ok(plan.symbol, plan.ts):
+                continue
+            self._surface(plan)
+            opened += 1
 
     # -- helpers ------------------------------------------------------------
+    def _gate_ok(self, symbol: str, ts) -> bool:
+        """READ-ONLY combined entry gate (D1 / M1). Mutates nothing — never increments any
+        counter — so it can be probed before the advisor AND re-checked at flush time.
+
+        A symbol is actionable only if: the session breaker hasn't halted NEW entries, the
+        symbol is free (no open position + not in post-stop cooldown), the daily-trade cap
+        isn't reached, and a concurrent-position slot is free.
+        """
+        if self.breaker.halted:
+            return False
+        if not self._symbol_free(symbol, ts):
+            return False
+        if self._daily_trades >= self.cfg.risk.risk.max_trades_per_day:
+            return False
+        if len(self.paper.open_positions) >= self.cfg.risk.risk.max_concurrent_positions:
+            return False
+        return True
+
     def _symbol_free(self, symbol: str, ts) -> bool:
         # one position per symbol at a time + cooldown after a stop-out
         if any(p.symbol == symbol for p in self.paper.open_positions):
@@ -229,13 +364,28 @@ class EngineRunner:
         if self.repo:
             self.repo.save_plan(plan)
         self.paper.open_from_plan(plan)
+        self._alert(self._format_alert(plan), level="signal")
+
+    def _format_alert(self, plan: TradePlan) -> str:
+        """D4 alert content: expected move, key level (T1), R:R, reasons, and position qty.
+
+        Position qty + rupee risk come from the M0 sizing helper using the config's reference
+        ``account_capital`` (the user overrides it). Conviction is labelled "conf" — never
+        "win-rate" — and any ML score is surfaced elsewhere as "model score", never win-rate.
+        """
+        size = size_plan(plan, self.cfg.risk.risk)
         tgt = f"{plan.t1:.2f} (+{plan.target_pcts[0]:.2f}%)"
-        self._alert(
+        qty_part = ""
+        if size["qty"] > 0:
+            qty_part = (f" | qty {size['qty']} (~₹{size['rupee_risk']:.0f} risk "
+                        f"@ ₹{size['capital']:.0f} cap)")
+        reasons = f" [{', '.join(plan.reasons)}]" if plan.reasons else ""
+        return (
             f"{plan.symbol} {plan.direction.value} @~{plan.entry:.2f} "
-            f"SL {plan.stop_loss:.2f} (-{plan.stop_pct:.2f}%) T1 {tgt} "
-            f"R:R {plan.risk_reward:.2f} conf {plan.confidence:.0f} "
-            f"[{', '.join(plan.reasons)}]",
-            level="signal",
+            f"SL {plan.stop_loss:.2f} (-{plan.stop_pct:.2f}%) "
+            f"T1 {tgt} (key level {plan.t1:.2f}) "
+            f"exp move {plan.expected_move_pct:.2f}% R:R {plan.risk_reward:.2f} "
+            f"conf {plan.confidence:.0f}{qty_part}{reasons}"
         )
 
     def _on_position_closed(self, pos: PaperPosition, bar: Bar) -> None:
@@ -246,12 +396,24 @@ class EngineRunner:
             self._cooldown_until[pos.symbol] = bar.ts + timedelta(
                 minutes=self.cfg.risk.risk.per_symbol_cooldown_minutes
             )
-        if pos.entry_fill is not None:  # don't alert never-filled cancels noisily
+        # M1: fold the realized result into the session breaker. Only FILLED trades count
+        # toward the loss tally / consecutive-loss run (never-filled cancels are skipped).
+        if pos.entry_fill is not None:
+            was_halted = self.breaker.halted
+            self.breaker.record(pos.pnl_pct_net)
             self._alert(
                 f"{pos.symbol} CLOSED {pos.exit_reason.value} "
                 f"net {pos.pnl_pct_net:+.2f}% R {pos.r_multiple:+.2f}",
                 level="info",
             )
+            if self.breaker.halted and not was_halted:
+                self.log.warning("session breaker tripped: %s — halting NEW entries",
+                                 self.breaker.halt_reason)
+                self._alert(
+                    f"⛔ session halt — no new entries: {self.breaker.halt_reason} "
+                    f"(session {self.breaker.realized_pnl_pct:+.2f}%)",
+                    level="warning",
+                )
 
     # -- entrypoints --------------------------------------------------------
     def replay(self, watchlist: Optional[List[str]] = None) -> RunSummary:
@@ -266,6 +428,8 @@ class EngineRunner:
             last = agg.flush()
             if last is not None:
                 self.on_closed_bar(last)
+        # Open any candidates still buffered from the final minute (D1b), then flatten.
+        self._flush_pending()
         # Safety net: flatten anything still open at end of feed.
         for hist in self._history.values():
             if not hist:
@@ -287,7 +451,13 @@ class EngineRunner:
 
         ist = pytz.timezone("Asia/Kolkata")
         symbols = watchlist or self.cfg.settings.watchlist
-        self.advisor = LiveAdvisor()  # live re-rating + prediction-change alerts
+        # Live re-rating + prediction-change alerts, with D2 debounce/hysteresis wired from
+        # the alert config (min_realert_seconds / entry_band_bps).
+        alerts = self.cfg.risk.alerts
+        self.advisor = LiveAdvisor(
+            min_realert_seconds=float(getattr(alerts, "min_realert_seconds", 0) or 0),
+            entry_band_bps=float(getattr(alerts, "entry_band_bps", 0) or 0),
+        )
         self.broker.connect()
 
         # Warm-start: seed today's elapsed bars (09:15 -> now) so indicators are ready
@@ -309,6 +479,7 @@ class EngineRunner:
             last = agg.flush()
             if last is not None:
                 self.on_closed_bar(last)
+        self._flush_pending()  # open any candidates buffered from the final minute (D1b)
         for hist in self._history.values():
             if not hist:
                 continue
@@ -322,13 +493,13 @@ class EngineRunner:
 
         Best-effort: a fetch failure for one symbol never blocks the live session. Freshness
         enforcement is kept OFF here (these are past bars, intentionally not 'fresh')."""
-        from datetime import time as _time
+        import time as _wallclock
+        from datetime import time as _time_of_day
 
         now = datetime.now(ist)
-        start = ist.localize(datetime.combine(now.date(), _time(9, 15)))
+        start = ist.localize(datetime.combine(now.date(), _time_of_day(9, 15)))
         if now <= start:
             return
-        import time as _time
 
         seeded = []
         for i, sym in enumerate(symbols):
@@ -337,7 +508,7 @@ class EngineRunner:
             except Exception as exc:  # noqa: BLE001
                 self.log.warning("warm-start fetch failed for %s: %s", sym, exc)
             if i < len(symbols) - 1:
-                _time.sleep(0.25)  # stay under Dhan's 5 req/s Data-API cap
+                _wallclock.sleep(0.25)  # stay under Dhan's 5 req/s Data-API cap
         seeded.sort(key=lambda b: b.ts)
         self._suppress_alerts = True  # replaying past bars must not fire live alerts
         try:

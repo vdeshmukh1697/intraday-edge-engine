@@ -188,6 +188,7 @@ def run_feed(
     backoff_s: float = 2.0,
     backoff_cap_s: float = 15.0,
     sleep_fn: Callable[[float], None] = _time.sleep,
+    tick_tap: Optional[Callable[[Tick], None]] = None,
 ) -> None:
     """Connect, subscribe, and stream ticks to ``on_tick`` until ``stop()`` or the feed ends.
 
@@ -197,6 +198,11 @@ def run_feed(
     the high default (200 × ≤15s ≈ ~45 min of retrying) lets the live session ride through a
     multi-minute network outage and resume in place when connectivity returns. A falsy
     ``recv()`` (empty/None) ends the current connection cleanly — used by tests.
+
+    ``tick_tap`` is an OPTIONAL, default-OFF observer invoked with each parsed tick BEFORE
+    ``on_tick`` (e.g. a :class:`~signal_engine.ingestion.tick_recorder.TickRecorder.record`
+    bound method). Default None preserves the current behaviour exactly; a tap exception is
+    swallowed so recording can never break the live signal path.
     """
     def _backoff(n: int) -> float:
         return min(backoff_s * n, backoff_cap_s)
@@ -222,7 +228,7 @@ def run_feed(
                 ws.send(json.dumps(msg))
             log.info("dhan feed: subscribed (%d messages)", len(subscribe_msgs))
             attempts = 0  # a clean connect + subscribe resets the failure counter
-            _consume(ws, resolve, on_tick, now_fn, stop)
+            _consume(ws, resolve, on_tick, now_fn, stop, tick_tap)
             # recv loop returned without error -> feed ended; close and stop.
             _safe_close(ws)
             return
@@ -237,7 +243,7 @@ def run_feed(
             sleep_fn(_backoff(attempts))
 
 
-def _consume(ws, resolve: ResolveFn, on_tick, now_fn, stop) -> None:
+def _consume(ws, resolve: ResolveFn, on_tick, now_fn, stop, tick_tap=None) -> None:
     """Inner recv loop: pull frames, parse, fan out ticks. Returns when the feed ends."""
     while True:
         if stop is not None and stop():
@@ -248,6 +254,11 @@ def _consume(ws, resolve: ResolveFn, on_tick, now_fn, stop) -> None:
         if isinstance(msg, str):
             continue          # control / JSON status text — no ticks to extract
         for tick in iter_ticks(msg, resolve, now_fn):
+            if tick_tap is not None:
+                try:
+                    tick_tap(tick)
+                except Exception:  # noqa: BLE001 - recording must never break the live path
+                    log.warning("dhan feed: tick_tap raised; continuing", exc_info=True)
             on_tick(tick)
 
 

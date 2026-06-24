@@ -13,6 +13,7 @@ Conventions
 
 from __future__ import annotations
 
+import math
 from typing import Tuple
 
 import numpy as np
@@ -208,6 +209,71 @@ def opening_range(df: pd.DataFrame, minutes: int = 15) -> Tuple[float, float]:
         return (float("nan"), float("nan"))
     window = df.iloc[:minutes]
     return (float(window["high"].max()), float(window["low"].min()))
+
+
+def vwap_bands(df: pd.DataFrame, k: float = 2.0) -> pd.DataFrame:
+    """Session VWAP with +/- k*sigma bands (point-in-time, causal).
+
+    ``sigma`` at bar ``t`` is the volume-weighted standard deviation of the
+    typical price about the *running* VWAP, using only bars ``0..t`` — so the
+    value at any row depends solely on data up to and including that row (no
+    look-ahead). Bands are ``vwap +/- k*sigma``.
+
+    Returns a DataFrame with columns ``vwap``, ``vwap_sigma``, ``vwap_upper``,
+    ``vwap_lower`` aligned to ``df.index``. The first bar has zero dispersion
+    (sigma=0) so its bands collapse onto the VWAP.
+    """
+    typical = (df["high"] + df["low"] + df["close"]) / 3.0
+    vol = df["volume"]
+    cum_vol = vol.cumsum()
+    cum_pv = (typical * vol).cumsum()
+    vwap_s = cum_pv / cum_vol
+    # Volume-weighted running variance: E_w[x^2] - (E_w[x])^2, all expanding.
+    cum_pv2 = (typical * typical * vol).cumsum()
+    mean_sq = cum_pv2 / cum_vol
+    var = mean_sq - vwap_s * vwap_s
+    # Tiny negatives from float cancellation -> clip to 0 before sqrt.
+    var = var.clip(lower=0.0)
+    sigma = np.sqrt(var)
+    return pd.DataFrame(
+        {
+            "vwap": vwap_s,
+            "vwap_sigma": sigma,
+            "vwap_upper": vwap_s + k * sigma,
+            "vwap_lower": vwap_s - k * sigma,
+        },
+        index=df.index,
+    )
+
+
+def round_number_levels(price: float, step_pct: float = 0.5) -> Tuple[float, float]:
+    """Nearest round-number support/resistance bracketing ``price``.
+
+    The grid step is ``step_pct`` percent of ``price`` (so the spacing scales
+    with the instrument's price level), rounded to a "nice" magnitude (1, 2 or 5
+    times a power of ten) so levels land on human round numbers (e.g. 1000, 1010,
+    1050). Returns ``(level_below, level_above)`` — the largest grid level at or
+    below ``price`` and the smallest strictly above it.
+
+    Point-in-time by construction: depends only on the current ``price``.
+    Returns ``(nan, nan)`` for a non-positive / NaN price or step.
+    """
+    if (not (price == price)) or price <= 0.0 or step_pct <= 0.0:
+        return (float("nan"), float("nan"))
+    raw_step = price * step_pct / 100.0
+    if raw_step <= 0.0:
+        return (float("nan"), float("nan"))
+    # Snap the step to the NEAREST 1/2/5 * 10^n "nice" grid spacing (in log space),
+    # so human round numbers fall on the grid (e.g. 0.5% of 1000 ~ 5 -> step 5).
+    exp = math.floor(math.log10(raw_step))
+    base = 10.0 ** exp
+    candidates = [1.0 * base, 2.0 * base, 5.0 * base, 10.0 * base]
+    step = min(candidates, key=lambda c: abs(math.log(c) - math.log(raw_step)))
+    below = math.floor(price / step) * step
+    above = below + step
+    if above <= price:  # price sat exactly on a grid line
+        above = below + step
+    return (float(below), float(above))
 
 
 def _frac_diff_weights(d: float, size: int) -> np.ndarray:

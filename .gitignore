@@ -21,6 +21,7 @@ htmlcov/
 
 # Data artifacts (do not commit large/generated data)
 data/parquet/
+data/ticks/
 data/*.duckdb
 *.sqlite
 *.sqlite3

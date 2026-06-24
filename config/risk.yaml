@@ -9,20 +9,45 @@ risk:
   # Wider stops + a true 2:1 target survive noise and clear the ~0.14% cost+slippage drag.
   # NOTE: this is better risk DISCIPLINE; it reduces losses but does not by itself make the
   # base VWAP/EMA/ADX strategy profitable — see logs (the entry signal lacks edge).
-  atr_stop_multiple: 2.0        # stop distance = atr_stop_multiple * ATR (was 1.5)
-  min_stop_pct: 0.50            # floor on stop distance — past typical intraday noise (was 0.30)
+  atr_stop_multiple: 2.0        # stop distance = atr_stop_multiple * ATR
+  min_stop_pct: 0.30            # operational stop floor (was 0.50; 0.50 floored the stop so high
+                                # that the vol target could not clear rr_floor on liquid large-caps
+                                # -> zero picks. 0.30 is the intraday-noise equilibrium per A1.)
   max_stop_pct: 3.0             # cap; wider than this and intraday R:R rarely works
 
-  # Targets / reward
-  target_rr: 2.0                # T1 at 2x stop distance, so a winner clears costs (was 1.5)
-  rr_floor: 1.8                 # reject any plan with R:R below this (was 1.5)
-  second_target_rr: 3.0         # optional T2
+  # Targets / reward — structure-aware exits (A2). Target is the VOLATILITY move
+  # (target_atr_multiple * ATR), so it de-clusters with each name's volatility instead of
+  # pinning to one ~1% bucket. With atr_stop_multiple=2 and target_atr_multiple=4 the unfloored
+  # R:R is ~2.0. rr_floor lowered to 1.5 to leave margin so well-formed setups surface.
+  target_rr: 2.0                # legacy ratio kept for compatibility (no longer defines the target)
+  rr_floor: 1.5                 # reject any plan with R:R below this (was 1.8)
+  second_target_rr: 3.0         # legacy T2 ratio (unused; T2 now extends T1 by t2_extension_mult)
 
-  # Edge-after-cost gate (PLAN §5.1): require expected move >= k * break-even cost %
-  edge_cost_multiple: 4.0       # k — only trade when the target is well clear of costs (was 3.0)
+  # Edge-after-cost gate (PLAN §5.1): require expected move >= k * break-even cost %.
+  # break-even now INCLUDES round-trip slippage (V3), so the effective hurdle rose; k lowered
+  # 4.0 -> 3.0 so the gate stays a sane rejection filter rather than rejecting everything.
+  edge_cost_multiple: 3.0       # k — only trade when the target is clear of (cost + slippage)
 
   # Time stop (PLAN §5.2)
   max_hold_minutes: 90
+
+  # Targets / exits (PLAN §5.2) — structure-aware exit construction.
+  hard_floor_pct: 0.20          # safety stop floor, decoupled from target sizing
+  # Target is now an EXPECTED-MOVE multiple of ATR (decoupled from the stop), so to keep
+  # the documented "T1 at 2x the stop distance" intent (target_rr/rr_floor above) this must
+  # equal 2 * atr_stop_multiple: 2 * 2.0 = 4.0 -> vol target 4xATR vs stop 2xATR = R:R 2.0.
+  # (At 2.0 it equalled atr_stop_multiple, pinning R:R to 1.0 and rejecting EVERY plan.)
+  target_atr_multiple: 4.0      # vol target = target_atr_multiple * atr_pct
+  structure_buffer_pct: 0.05    # buffer placed inside a structure level
+  vwap_band_mult: 2.0           # VWAP band = VWAP +/- vwap_band_mult * sigma
+  round_number_step_pct: 0.5    # round-number level granularity as % of price
+
+  # Sizing / risk (PLAN §5.3) — capital-aware position sizing (user overrides capital).
+  account_capital: 100000.0     # reference capital for qty; user overrides
+  risk_per_trade_pct: 0.5       # % of capital risked per trade
+  kelly_fraction_cap: 0.25      # cap on Kelly fraction when sizing
+  max_consecutive_losses: 4     # halt after N straight losses
+  # NOTE: daily-max-loss % reuses the existing daily_loss_pct above (2.0).
 
   # Daily guardrails — guidance + health-tracked (PLAN §5.3). Capital-agnostic:
   # daily_loss_pct is a % of the user's chosen capital, applied to the paper book.
@@ -45,6 +70,13 @@ costs:
   # Flat brokerage makes break-even % value-dependent; compute the %-gate at this
   # notional reference trade value (PLAN §5.4 note). Capital-agnostic proxy.
   reference_trade_value: 100000.0
+  slippage_scalar: 1.0          # multiplies slippage_pct in the breakeven/cost gate
+
+alerts:
+  # Re-alert / throttling controls (PLAN §5 — avoid alert spam on the same setup).
+  min_realert_seconds: 180      # minimum gap before re-alerting the same setup
+  entry_band_bps: 25            # re-alert hysteresis band (basis points)
+  top_n_alerts: 0               # max alerts/day; 0 => use risk.max_trades_per_day
 
 slippage:
   pct_per_side: 0.03            # % slippage applied to entry and exit fills

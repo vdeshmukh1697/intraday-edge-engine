@@ -39,10 +39,28 @@ def test_charges_hand_verified():
 
 
 def test_breakeven_pct_hand_verified():
-    """breakeven_pct = total / (price*qty) * 100 = 82.4092 / 100000 * 100 = 0.0824092%."""
+    """Statutory charges = 82.4092 / 100000 * 100 = 0.0824092%, PLUS round-trip slippage
+    (2 * pct_per_side * scalar = 2 * 0.03 * 1.0 = 0.06%) = 0.1424092%."""
     cm = _model()
     be = cm.breakeven_pct(1000.0)
-    assert abs(be - 0.0824092) < TOL
+    assert abs(be - (0.0824092 + 0.06)) < TOL
+
+
+def test_breakeven_includes_round_trip_slippage_times_scalar():
+    """breakeven WITH slippage exceeds breakeven WITHOUT it by exactly 2*pct_per_side*scalar."""
+    no_slip = CostModel(CostParams())  # slippage=None -> add-on is 0.0
+    base = no_slip.breakeven_pct(1000.0)
+    for scalar in (1.0, 0.5, 2.5):
+        cm = CostModel(CostParams(slippage_scalar=scalar), SlippageParams(pct_per_side=0.03))
+        be = cm.breakeven_pct(1000.0)
+        assert abs((be - base) - 2.0 * 0.03 * scalar) < TOL
+
+
+def test_breakeven_no_slippage_model_matches_pure_charges():
+    """With no slippage model the add-on is 0.0 (backward-compatible with the old API)."""
+    cm = CostModel(CostParams())
+    assert cm.slippage_pct() == 0.0
+    assert abs(cm.breakeven_pct(1000.0) - 0.0824092) < TOL
 
 
 def test_breakeven_default_trade_value_matches_reference():
@@ -74,7 +92,7 @@ def test_qty_rounds_and_floors_at_one():
     # trade_value default 100000, price 250000 -> round(0.4)=0 -> max(1,0)=1.
     be = cm.breakeven_pct(250000.0)
     cb = cm.charges(250000.0, 250000.0, 1)
-    assert abs(be - cb.total / 250000.0 * 100.0) < TOL
+    assert abs(be - (cb.total / 250000.0 * 100.0 + cm.slippage_pct())) < TOL
 
 
 def test_accepts_duck_typed_costs_object():

@@ -81,3 +81,78 @@ def test_on_price_fires_once_near_target():
     msg = a.on_price("X", 100.8)                        # 80% of the way (>=75%)
     assert msg is not None and "approaching T1" in msg
     assert a.on_price("X", 100.9) is None               # already flagged, no repeat
+
+
+# -- D1: gate-before-advisor (actionable flag) ------------------------------------------
+def test_non_actionable_new_setup_is_suppressed_and_not_latched():
+    """A symbol we can't enter must NOT emit a fresh-looking NEW alert, and must stay free to
+    fire NEW once it becomes actionable (no silent latching)."""
+    a = LiveAdvisor()
+    assert a.update("X", _plan(), actionable=False) is None   # gate closed -> no NEW alert
+    # Not latched: when it later becomes actionable, it fires the NEW alert.
+    assert "NEW LONG" in a.update("X", _plan(), actionable=True)
+
+
+def test_non_actionable_does_not_suppress_rerate_on_tracked_symbol():
+    """Once tracked, a thesis change (reversal) on a held symbol is flagged even if the gate
+    is closed for fresh entries."""
+    a = LiveAdvisor()
+    a.update("X", _plan(direction=Direction.LONG))            # now tracked
+    msg = a.update("X", _plan(direction=Direction.SHORT), actionable=False)
+    assert msg is not None and "REVERSAL" in msg
+
+
+# -- D2: debounce / hysteresis ----------------------------------------------------------
+from datetime import timedelta  # noqa: E402
+
+
+def _plan_ts(ts, **kw):
+    p = _plan(**kw)
+    return TradePlan(
+        symbol=p.symbol, ts=ts, direction=p.direction, strategy=p.strategy, entry=p.entry,
+        stop_loss=p.stop_loss, stop_pct=p.stop_pct, targets=p.targets, target_pcts=p.target_pcts,
+        expected_move_pct=p.expected_move_pct, risk_reward=p.risk_reward,
+        cost_to_break_even_pct=p.cost_to_break_even_pct, confidence=p.confidence,
+    )
+
+
+def test_debounce_suppresses_echo_within_window():
+    """Inside min_realert_seconds, a non-material re-rate with tiny entry drift is squelched."""
+    a = LiveAdvisor(min_realert_seconds=180, entry_band_bps=25)
+    a.update("X", _plan_ts(TS, t1_pct=1.0, entry=100.0))                       # NEW
+    # 60s later, entry drifts 2bps (< 25), target unchanged -> echo suppressed.
+    msg = a.update("X", _plan_ts(TS + timedelta(seconds=60), t1_pct=1.05, entry=100.02))
+    assert msg is None
+
+
+def test_debounce_does_not_suppress_after_window():
+    a = LiveAdvisor(min_realert_seconds=180, entry_band_bps=25, conf_delta=12.0)
+    a.update("X", _plan_ts(TS, t1_pct=1.0, conf=70))
+    # After the window a conviction jump surfaces normally.
+    msg = a.update("X", _plan_ts(TS + timedelta(seconds=200), t1_pct=1.0, conf=85))
+    assert msg is not None and "conviction" in msg
+
+
+def test_debounce_exempts_reversal():
+    """REVERSAL is exempt from debounce even within the window."""
+    a = LiveAdvisor(min_realert_seconds=180, entry_band_bps=25)
+    a.update("X", _plan_ts(TS, direction=Direction.LONG))
+    msg = a.update("X", _plan_ts(TS + timedelta(seconds=10), direction=Direction.SHORT))
+    assert msg is not None and "REVERSAL" in msg
+
+
+def test_debounce_exempts_material_target_move():
+    """A hard-material target move is surfaced even inside the debounce window."""
+    a = LiveAdvisor(min_realert_seconds=180, entry_band_bps=25)
+    a.update("X", _plan_ts(TS, t1_pct=1.0))
+    msg = a.update("X", _plan_ts(TS + timedelta(seconds=30), t1_pct=3.0))  # +1->+3 material
+    assert msg is not None and "strengthening" in msg
+
+
+def test_debounce_off_by_default():
+    """Default config (no debounce args) keeps legacy behaviour: small drift still squelched
+    only by the material thresholds, not by a time window — i.e. a conviction jump fires."""
+    a = LiveAdvisor()
+    a.update("X", _plan_ts(TS, conf=70))
+    msg = a.update("X", _plan_ts(TS + timedelta(seconds=5), conf=90))
+    assert msg is not None and "conviction" in msg

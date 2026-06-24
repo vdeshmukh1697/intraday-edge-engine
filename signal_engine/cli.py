@@ -170,8 +170,66 @@ def _run_backtest(args):
     return cfg, run_backtest(cfg, symbols, start, args.days, seed=args.seed)
 
 
+def _print_walkforward(wf) -> None:
+    """Print a walk-forward result: per-window test PF + the plan's acceptance bar."""
+    print("=== ARCHIVE WALK-FORWARD (real corpus, out-of-sample windows) ===")
+    if not wf.windows:
+        print("  (not enough archived session dates for even one window — widen the corpus "
+              "or lower --train-size/--test-size)")
+        return
+    for i, (_train_days, test_days, m) in enumerate(wf.windows, 1):
+        pf = "inf" if m.profit_factor == float("inf") else f"{m.profit_factor:.2f}"
+        span = f"{test_days[0]}..{test_days[-1]}" if test_days else "(empty)"
+        print(f"  window {i:>2d}: test {span}  trades {m.trades:>4d}  "
+              f"win {m.win_rate:4.1f}%  PF {pf}")
+    med = wf.median_pf
+    med_s = "inf" if med == float("inf") else f"{med:.2f}"
+    pct = wf.pct_windows_pf_gt_1 * 100.0
+    print(f"\nmedian PF       : {med_s}   windows PF>1: {pct:.0f}%  "
+          f"({len(wf.windows)} windows)")
+    ok = (med > 1.0) and (wf.pct_windows_pf_gt_1 > 0.60)
+    print(f"acceptance bar  : median PF>1 AND >60% windows PF>1  ->  "
+          f"{'PASS' if ok else 'FAIL'}")
+
+
 def cmd_backtest(args) -> int:
-    """Multi-day event-driven backtest over the shared core (PLAN §6)."""
+    """Multi-day event-driven backtest over the shared core (PLAN §6).
+
+    With ``--source archive`` the backtest runs over the REAL backfilled corpus; add
+    ``--walkforward`` to roll out-of-sample windows and report median PF + % windows PF>1
+    (the plan's acceptance gate). The default ``--source`` stays ``synthetic`` for the
+    fast event-driven path; archive runs require the backfilled Parquet store.
+    """
+    if getattr(args, "source", "synthetic") == "archive":
+        cfg = load_config()
+        from signal_engine.storage.bars import ParquetBarStore
+
+        store = ParquetBarStore(cfg.env.parquet_dir)
+        symbols = (args.symbols.split(",") if args.symbols
+                   else cfg.settings.watchlist)
+        if getattr(args, "walkforward", False):
+            from signal_engine.backtest.archive import run_archive_walkforward
+
+            print(f"Archive walk-forward over {symbols} "
+                  f"(train {args.train_size} / test {args.test_size} sessions)...\n")
+            wf = run_archive_walkforward(cfg, store, symbols, train_size=args.train_size,
+                                         test_size=args.test_size)
+            _print_walkforward(wf)
+            print("\n" + _DISCLAIMER)
+            return 0
+        from signal_engine.backtest.archive import run_archive_backtest
+
+        print(f"Archive backtest over {symbols} (most-recent {args.max_sessions} sessions)...\n")
+        m, _ledger = run_archive_backtest(cfg, store, symbols, max_sessions=args.max_sessions)
+        pf = "inf" if m.profit_factor == float("inf") else f"{m.profit_factor:.2f}"
+        print("=== ARCHIVE BACKTEST METRICS (net of costs) ===")
+        print(f"trades          : {m.trades}   (W {m.wins} / L {m.losses})")
+        print(f"win rate        : {m.win_rate:.1f}%   profit factor: {pf}")
+        print(f"expectancy/trade: {m.expectancy_pct:+.3f}%   total net: {m.total_net_pct:+.2f}%")
+        print(f"max drawdown    : {m.max_drawdown_pct:.2f}%  ({m.max_drawdown_days} day(s))")
+        print("\n" + _DISCLAIMER)
+        return 0
+
     cfg, res = _run_backtest(args)
     m = res.metrics
     pf = "inf" if m.profit_factor == float("inf") else f"{m.profit_factor:.2f}"
@@ -530,6 +588,16 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--days", type=int, default=10, help="Number of trading days.")
     pb.add_argument("--symbols", help="Comma-separated symbols (default config watchlist).")
     pb.add_argument("--seed", type=int, default=42, help="Synthetic data seed.")
+    pb.add_argument("--source", choices=["synthetic", "archive"], default="synthetic",
+                    help="'archive' backtests over the real backfilled corpus.")
+    pb.add_argument("--walkforward", action="store_true",
+                    help="Archive only: roll out-of-sample windows; report median PF + %% windows PF>1.")
+    pb.add_argument("--train-size", type=int, default=60,
+                    help="Walk-forward: train sessions per window (default 60).")
+    pb.add_argument("--test-size", type=int, default=20,
+                    help="Walk-forward: out-of-sample test sessions per window (default 20).")
+    pb.add_argument("--max-sessions", type=int, default=120,
+                    help="Archive backtest: most-recent sessions per symbol (default 120).")
     pb.set_defaults(func=cmd_backtest)
 
     ph = sub.add_parser("health", help="Backtest then show Strategy Health + degradation alert.")

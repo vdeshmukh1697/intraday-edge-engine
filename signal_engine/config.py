@@ -64,6 +64,19 @@ class RiskParams(BaseModel):
     max_concurrent_positions: int = 3
     per_symbol_cooldown_minutes: int = 15
 
+    # Targets / exits (PLAN §5.2) — structure-aware exit construction.
+    hard_floor_pct: float = 0.20          # safety stop floor, decoupled from target sizing
+    target_atr_multiple: float = 2.0      # vol target = target_atr_multiple * atr_pct
+    structure_buffer_pct: float = 0.05    # buffer placed inside a structure level
+    vwap_band_mult: float = 2.0           # VWAP band = VWAP +/- vwap_band_mult * sigma
+    round_number_step_pct: float = 0.5    # round-number level granularity as % of price
+
+    # Sizing / risk (PLAN §5.3) — capital-aware position sizing (user overrides capital).
+    account_capital: float = 100000.0     # reference capital for qty; user overrides
+    risk_per_trade_pct: float = 0.5       # % of capital risked per trade
+    kelly_fraction_cap: float = 0.25      # cap on Kelly fraction when sizing
+    max_consecutive_losses: int = 4       # halt after N straight losses
+
 
 class CostParams(BaseModel):
     brokerage_flat: float = 20.0
@@ -74,6 +87,13 @@ class CostParams(BaseModel):
     sebi_pct: float = 0.000001
     stamp_pct: float = 0.00003
     reference_trade_value: float = 100000.0
+    slippage_scalar: float = 1.0          # multiplies slippage_pct in the breakeven/cost gate
+
+
+class AlertParams(BaseModel):
+    min_realert_seconds: int = 180        # minimum gap before re-alerting the same setup
+    entry_band_bps: int = 25              # re-alert hysteresis band (basis points)
+    top_n_alerts: int = 0                 # max alerts/day; 0 => use risk.max_trades_per_day
 
 
 class SlippageParams(BaseModel):
@@ -89,6 +109,7 @@ class LiquidityParams(BaseModel):
 class RiskConfig(BaseModel):
     risk: RiskParams = Field(default_factory=RiskParams)
     costs: CostParams = Field(default_factory=CostParams)
+    alerts: AlertParams = Field(default_factory=AlertParams)
     slippage: SlippageParams = Field(default_factory=SlippageParams)
     liquidity: LiquidityParams = Field(default_factory=LiquidityParams)
 

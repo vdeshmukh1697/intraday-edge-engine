@@ -8,11 +8,22 @@ for tests.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import time
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from signal_engine.domain.models import PaperPosition, TradePlan
+
+
+def _default_run_id() -> str:
+    """A stable-per-process run id: process start epoch + pid.
+
+    Stable for the lifetime of one process (so every row a single run writes shares it) and
+    distinct across runs, which is what makes cross-run rows separable (PLAN §3 "also").
+    """
+    return f"{int(time.time())}-{os.getpid()}"
 
 
 def _path_from_url(db_url: str) -> str:
@@ -23,12 +34,15 @@ def _path_from_url(db_url: str) -> str:
 
 
 class SignalRepository:
-    def __init__(self, db_url: str = "sqlite:///data/signal_engine.sqlite3"):
+    def __init__(self, db_url: str = "sqlite:///data/signal_engine.sqlite3",
+                 run_id: Optional[str] = None):
         path = _path_from_url(db_url)
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
+        # A stable-per-process tag for every row this repo writes, unless a call overrides it.
+        self.run_id = run_id or _default_run_id()
         self.init_db()
 
     def init_db(self) -> None:
@@ -57,21 +71,27 @@ class SignalRepository:
             )
             """
         )
-        # Forward-compatible migration: add columns that predate this schema.
+        # Forward-compatible migration: add columns that predate this schema. ALTER TABLE ...
+        # ADD COLUMN is safe on an existing populated DB (existing rows get NULL).
         existing = {r["name"] for r in cur.execute("PRAGMA table_info(paper_trades)")}
         for col in ("stop_loss", "target"):
             if col not in existing:
                 cur.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} REAL")
+        # run_id makes cross-run rows distinguishable; added to BOTH tables (PLAN §3 "also").
+        for table in ("trade_plans", "paper_trades"):
+            cols = {r["name"] for r in cur.execute(f"PRAGMA table_info({table})")}
+            if "run_id" not in cols:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN run_id TEXT")
         self.conn.commit()
 
-    def save_plan(self, plan: TradePlan) -> int:
+    def save_plan(self, plan: TradePlan, run_id: Optional[str] = None) -> int:
         cur = self.conn.cursor()
         cur.execute(
             """INSERT INTO trade_plans
                (symbol, ts, direction, strategy, entry, stop_loss, stop_pct,
                 targets, target_pcts, expected_move_pct, risk_reward,
-                cost_to_break_even_pct, confidence, reasons, time_validity)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                cost_to_break_even_pct, confidence, reasons, time_validity, run_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 plan.symbol, plan.ts.isoformat(), plan.direction.value, plan.strategy,
                 plan.entry, plan.stop_loss, plan.stop_pct,
@@ -79,20 +99,21 @@ class SignalRepository:
                 plan.expected_move_pct, plan.risk_reward, plan.cost_to_break_even_pct,
                 plan.confidence, json.dumps(plan.reasons),
                 plan.time_validity.isoformat() if plan.time_validity else None,
+                run_id or self.run_id,
             ),
         )
         self.conn.commit()
         return cur.lastrowid
 
-    def save_position(self, pos: PaperPosition) -> None:
+    def save_position(self, pos: PaperPosition, run_id: Optional[str] = None) -> None:
         cur = self.conn.cursor()
         target = pos.plan.t1 if pos.plan.targets else None
         cur.execute(
             """INSERT OR REPLACE INTO paper_trades
                (id, symbol, strategy, direction, entry_fill, entry_ts, exit_fill,
                 exit_ts, exit_reason, pnl_pct_net, r_multiple, hold_minutes, won, confidence,
-                stop_loss, target)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                stop_loss, target, run_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 pos.id, pos.symbol, pos.plan.strategy, pos.direction.value,
                 pos.entry_fill, pos.entry_ts.isoformat() if pos.entry_ts else None,
@@ -100,6 +121,7 @@ class SignalRepository:
                 pos.exit_reason.value, pos.pnl_pct_net, pos.r_multiple,
                 pos.hold_minutes, int(pos.won) if pos.won is not None else None,
                 pos.plan.confidence, pos.plan.stop_loss, target,
+                run_id or self.run_id,
             ),
         )
         self.conn.commit()

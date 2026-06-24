@@ -21,9 +21,11 @@ from signal_engine.indicators.core import (
     ema,
     frac_diff,
     opening_range,
+    round_number_levels,
     rsi,
     rvol,
     vwap,
+    vwap_bands,
 )
 
 
@@ -148,6 +150,80 @@ def test_opening_range_insufficient_rows():
     assert math.isnan(orb_low)
 
 
+# --------------------------------------------------------------------------------
+# A3 — VWAP +/- k*sigma bands (point-in-time)
+# --------------------------------------------------------------------------------
+
+def test_vwap_bands_constant_price_zero_sigma():
+    # All typical prices identical -> running dispersion is 0 -> bands collapse on VWAP.
+    df = _ohlcv([42.0] * 10, volumes=[100, 200, 50, 300, 10, 1, 999, 7, 5, 88])
+    vb = vwap_bands(df, k=2.0)
+    assert vb["vwap"].iloc[-1] == pytest.approx(42.0)
+    assert vb["vwap_sigma"].iloc[-1] == pytest.approx(0.0, abs=1e-9)
+    assert vb["vwap_upper"].iloc[-1] == pytest.approx(42.0)
+    assert vb["vwap_lower"].iloc[-1] == pytest.approx(42.0)
+
+
+def test_vwap_bands_hand_computed_two_bars():
+    # Equal volume, typical prices 100 then 102.
+    #   VWAP = 101. mean_sq = (100^2+102^2)/2 = 10202. var = 10202 - 101^2 = 1.
+    #   sigma = 1. upper = 101+2 = 103, lower = 101-2 = 99.
+    df = pd.DataFrame(
+        {"open": [100.0, 102.0], "high": [100.0, 102.0], "low": [100.0, 102.0],
+         "close": [100.0, 102.0], "volume": [10, 10]},
+        index=_index(2),
+    )
+    vb = vwap_bands(df, k=2.0)
+    assert vb["vwap"].iloc[-1] == pytest.approx(101.0)
+    assert vb["vwap_sigma"].iloc[-1] == pytest.approx(1.0)
+    assert vb["vwap_upper"].iloc[-1] == pytest.approx(103.0)
+    assert vb["vwap_lower"].iloc[-1] == pytest.approx(99.0)
+
+
+def test_vwap_bands_point_in_time_no_lookahead():
+    # Extending the session must not change earlier band values (causal/expanding).
+    closes = [100.0, 101.0, 99.0, 103.0, 98.0, 104.0]
+    vols = [10, 20, 30, 40, 50, 60]
+    base = _ohlcv(closes[:3], volumes=vols[:3])
+    ext = _ohlcv(closes, volumes=vols)
+    vb_base = vwap_bands(base, k=2.0)
+    vb_ext = vwap_bands(ext, k=2.0)
+    for col in ("vwap", "vwap_sigma", "vwap_upper", "vwap_lower"):
+        assert np.allclose(vb_base[col].to_numpy(), vb_ext[col].to_numpy()[:3])
+
+
+# --------------------------------------------------------------------------------
+# A3 — round-number levels (point-in-time, price-scaled)
+# --------------------------------------------------------------------------------
+
+def test_round_number_levels_brackets_price():
+    # price=1003, step 0.5% of 1000-ish -> ~5; snapped to nice 5 grid -> 1000 / 1005.
+    below, above = round_number_levels(1003.0, step_pct=0.5)
+    assert below == pytest.approx(1000.0)
+    assert above == pytest.approx(1005.0)
+    assert below <= 1003.0 < above
+
+
+def test_round_number_levels_scales_with_price():
+    # A cheap stock gets a finer absolute grid than an expensive one (price-scaled).
+    below_cheap, above_cheap = round_number_levels(50.0, step_pct=0.5)
+    below_exp, above_exp = round_number_levels(5000.0, step_pct=0.5)
+    assert (above_cheap - below_cheap) < (above_exp - below_exp)
+
+
+def test_round_number_levels_point_in_time_pure_function_of_price():
+    # Depends ONLY on the current price -> deterministic, no history.
+    a = round_number_levels(2487.0, step_pct=0.5)
+    b = round_number_levels(2487.0, step_pct=0.5)
+    assert a == b
+
+
+def test_round_number_levels_invalid_price_nan():
+    for bad in (0.0, -10.0, float("nan")):
+        below, above = round_number_levels(bad, step_pct=0.5)
+        assert math.isnan(below) and math.isnan(above)
+
+
 REQUIRED_KEYS = {
     "close",
     "prev_close",
@@ -173,6 +249,12 @@ REQUIRED_KEYS = {
     "rv_5_pct",
     "regime_trend",
     "frac_diff_close_pct",
+    # A3 structure levels (point-in-time, for structure-aware targets).
+    "vwap_sigma",
+    "vwap_upper",
+    "vwap_lower",
+    "round_below",
+    "round_above",
 }
 
 
@@ -438,3 +520,44 @@ def test_compute_features_new_keys_nan_safe_on_short_frame():
     assert math.isnan(feats["ret_5_pct"])
     assert math.isnan(feats["rv_5_pct"])
     assert math.isnan(feats["regime_trend"])
+
+
+# --------------------------------------------------------------------------------
+# A3 — structure-level keys emitted by compute_features
+# --------------------------------------------------------------------------------
+
+_STRUCT_KEYS = ("vwap_sigma", "vwap_upper", "vwap_lower", "round_below", "round_above")
+
+
+def test_compute_features_emits_structure_levels_on_long_frame():
+    rng = np.random.default_rng(11)
+    closes = list(1000.0 + np.cumsum(rng.normal(0.0, 1.5, 60)))
+    # Give bars a real high/low range so VWAP sigma is non-degenerate.
+    n = len(closes)
+    df = pd.DataFrame(
+        {
+            "open": closes,
+            "high": [c + 1.0 for c in closes],
+            "low": [c - 1.0 for c in closes],
+            "close": closes,
+            "volume": [1000] * n,
+        },
+        index=_index(n),
+    )
+    feats = compute_features(df, params={})
+    for key in _STRUCT_KEYS:
+        assert key in feats, key
+        assert not math.isnan(feats[key]), key
+    # Bands bracket the VWAP; round levels bracket the close.
+    assert feats["vwap_lower"] <= feats["vwap"] <= feats["vwap_upper"]
+    assert feats["round_below"] <= feats["close"] < feats["round_above"]
+
+
+def test_compute_features_structure_keys_present_on_empty_frame():
+    df = pd.DataFrame(
+        {"open": [], "high": [], "low": [], "close": [], "volume": []},
+        index=pd.DatetimeIndex([], tz="Asia/Kolkata"),
+    )
+    feats = compute_features(df, params={})
+    for key in _STRUCT_KEYS:
+        assert key in feats and math.isnan(feats[key]), key

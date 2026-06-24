@@ -15,10 +15,12 @@ from signal_engine.indicators.core import (
     frac_diff,
     macd,
     opening_range,
+    round_number_levels,
     rsi,
     rvol,
     supertrend,
     vwap,
+    vwap_bands,
 )
 
 __all__ = [
@@ -27,10 +29,12 @@ __all__ = [
     "atr",
     "adx",
     "vwap",
+    "vwap_bands",
     "rvol",
     "macd",
     "supertrend",
     "opening_range",
+    "round_number_levels",
     "frac_diff",
     "compute_features",
     "bar_shape",
@@ -73,7 +77,19 @@ _FEATURE_KEYS = [
     "rv_5_pct",
     "regime_trend",
     "frac_diff_close_pct",
+    # A3 — point-in-time structure levels for de-clustered, structure-aware targets.
+    "vwap_sigma",
+    "vwap_upper",
+    "vwap_lower",
+    "round_below",
+    "round_above",
 ]
+
+# Default VWAP-band width (k * sigma) and round-number grid step (% of price) used
+# when compute_features is called without overriding params. The RiskManager reads
+# its own cfg values; these only shape the *features dict* the live aggregator emits.
+_VWAP_BAND_MULT = 2.0
+_ROUND_STEP_PCT = 0.5
 
 
 def _last(series: pd.Series) -> float:
@@ -225,6 +241,8 @@ def compute_features(
     atr_p = int(params.get("atr_period", 14))
     rvol_lb = int(params.get("rvol_lookback", 20))
     orb_min = int(params.get("opening_range_minutes", 15))
+    vwap_band_mult = float(params.get("vwap_band_mult", _VWAP_BAND_MULT))
+    round_step_pct = float(params.get("round_number_step_pct", _ROUND_STEP_PCT))
 
     out = {key: _NAN for key in _FEATURE_KEYS}
     n = 0 if bars is None else len(bars)
@@ -276,6 +294,20 @@ def compute_features(
     orb_high, orb_low = opening_range(bars, orb_min)
     out["orb_high"] = float(orb_high)
     out["orb_low"] = float(orb_low)
+
+    # --- A3 point-in-time structure levels (causal; only bars 0..now) ---
+    # VWAP +/- k*sigma bands (running volume-weighted dispersion about VWAP).
+    try:
+        vb = vwap_bands(bars, vwap_band_mult)
+        out["vwap_sigma"] = _last(vb["vwap_sigma"])
+        out["vwap_upper"] = _last(vb["vwap_upper"])
+        out["vwap_lower"] = _last(vb["vwap_lower"])
+    except Exception:
+        out["vwap_sigma"] = out["vwap_upper"] = out["vwap_lower"] = _NAN
+    # Nearest round-number levels bracketing the latest close (price-scaled grid).
+    r_below, r_above = round_number_levels(out["close"], round_step_pct)
+    out["round_below"] = float(r_below)
+    out["round_above"] = float(r_above)
 
     # --- Task 1B richer stationary features (NaN-safe on short history) ---
     # Microstructure: current-bar shape (always available once n >= 1).

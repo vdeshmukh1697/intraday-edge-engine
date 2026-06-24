@@ -16,8 +16,8 @@ Indicators are computed vectorized once per session for speed, then sliced per b
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
-from typing import Dict, List, Optional
+from datetime import date, datetime
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -48,6 +48,14 @@ class Dataset:
     y: np.ndarray                       # (n,) binary
     rules_conf: np.ndarray              # (n,) rules confidence / 100 (baseline prob)
     raws: List[dict] = field(default_factory=list)
+    # V0/V2 — per-sample temporal coordinates for an HONEST out-of-sample split.
+    # ``ts`` is each sample's entry-bar timestamp; ``ts_exit`` is the timestamp of the
+    # bar at which the forward label window ends (first-touch bar, or the max-hold bar
+    # if neither barrier is hit). Both are np.datetime64[ns] arrays aligned to X/y.
+    # The label of sample i depends on price action over [ts[i], ts_exit[i]], so a
+    # train/test split must purge any sample whose interval straddles the cutoff (V2).
+    ts: np.ndarray = field(default_factory=lambda: np.array([], dtype="datetime64[ns]"))
+    ts_exit: np.ndarray = field(default_factory=lambda: np.array([], dtype="datetime64[ns]"))
 
     def __len__(self) -> int:
         return len(self.y)
@@ -110,9 +118,15 @@ def _raw_at(fr: Dict[str, np.ndarray], t: int) -> dict:
 
 
 def _label(df, entry_idx: int, direction: Direction, stop: float, target: float,
-           max_hold: int) -> Optional[int]:
+           max_hold: int) -> Optional[Tuple[int, int]]:
     """First-touch label from the NEXT bar onward. Pessimistic: stop before target
-    within the same bar. 1 if T1 reached before stop, else 0. None if no future bars."""
+    within the same bar.
+
+    Returns ``(label, exit_idx)`` where ``label`` is 1 if T1 reached before stop else 0,
+    and ``exit_idx`` is the bar index at which the label was decided (the first-touch bar,
+    or the last bar in the max-hold window if no barrier was hit). Returns ``None`` if there
+    are no future bars to label against. ``exit_idx`` lets the caller record the label
+    window ``[ts[entry], ts[exit]]`` for interval-based embargo (V2)."""
     n = len(df)
     if entry_idx + 1 >= n:
         return None
@@ -122,23 +136,29 @@ def _label(df, entry_idx: int, direction: Direction, stop: float, target: float,
     for k in range(entry_idx + 1, end):
         if direction == Direction.LONG:
             if lows[k] <= stop:
-                return 0
+                return 0, k
             if highs[k] >= target:
-                return 1
+                return 1, k
         else:
             if highs[k] >= stop:
-                return 0
+                return 0, k
             if lows[k] <= target:
-                return 1
-    return 0  # never hit target within the window -> not a "good trade"
+                return 1, k
+    return 0, end - 1  # never hit target within the window -> not a "good trade"
 
 
 def _session_samples(df, sym, strategy, risk, cost, params, max_hold, min_bars, stride,
-                     raws: List[dict], labels: List[int], confs: List[float]) -> None:
+                     raws: List[dict], labels: List[int], confs: List[float],
+                     tss: Optional[List[datetime]] = None,
+                     ts_exits: Optional[List[datetime]] = None) -> None:
     """Extract labeled signal samples from ONE session df, appending in place.
 
     Shared by the synthetic and real-archive builders so both label trades with the exact
     same point-in-time features + pessimistic first-touch rule the paper-trader uses.
+
+    ``tss`` / ``ts_exits`` (optional, additive) collect each sample's entry-bar timestamp and
+    the label-window end timestamp so the trainer can split GLOBALLY by calendar date and
+    purge interval-straddling samples (V0/V2). Passing them is opt-in for backward-compat.
     """
     if df is None or len(df) < min_bars + 2:
         return
@@ -156,12 +176,17 @@ def _session_samples(df, sym, strategy, risk, cost, params, max_hold, min_bars, 
         plan = risk.build_trade_plan(signal, raw, cost)
         if plan is None:
             continue
-        label = _label(df, t, plan.direction, plan.stop_loss, plan.t1, max_hold)
-        if label is None:
+        res = _label(df, t, plan.direction, plan.stop_loss, plan.t1, max_hold)
+        if res is None:
             continue
+        label, exit_idx = res
         raws.append(raw)
         labels.append(label)
         confs.append(signal.confidence / 100.0)
+        if tss is not None:
+            tss.append(ts_index[t].to_pydatetime())
+        if ts_exits is not None:
+            ts_exits.append(ts_index[exit_idx].to_pydatetime())
 
 
 def build_dataset(
@@ -181,6 +206,8 @@ def build_dataset(
     raws: List[dict] = []
     labels: List[int] = []
     confs: List[float] = []
+    tss: List[datetime] = []
+    ts_exits: List[datetime] = []
 
     for di, day in enumerate(days):
         for si, sym in enumerate(symbols):
@@ -188,11 +215,13 @@ def build_dataset(
             df = generate_session(sym, day, start_price=1000.0 + 50 * si,
                                   seed=seed + di * 100 + si, regime=regime)
             _session_samples(df, sym, strategy, risk, cost, params, max_hold, min_bars,
-                             stride, raws, labels, confs)
+                             stride, raws, labels, confs, tss, ts_exits)
 
     X = build_matrix(raws)
     return Dataset(X=X, y=np.array(labels, dtype=int),
-                   rules_conf=np.array(confs, dtype=float), raws=raws)
+                   rules_conf=np.array(confs, dtype=float), raws=raws,
+                   ts=np.array(tss, dtype="datetime64[ns]"),
+                   ts_exit=np.array(ts_exits, dtype="datetime64[ns]"))
 
 
 def build_dataset_from_archive(
@@ -225,6 +254,8 @@ def build_dataset_from_archive(
     raws: List[dict] = []
     labels: List[int] = []
     confs: List[float] = []
+    tss: List[datetime] = []
+    ts_exits: List[datetime] = []
 
     for i, sym in enumerate(symbols, 1):
         hist = store.load_symbol_history(sym)
@@ -233,17 +264,22 @@ def build_dataset_from_archive(
             s_raw: List[dict] = []
             s_lab: List[int] = []
             s_conf: List[float] = []
+            s_ts: List[datetime] = []
+            s_tsx: List[datetime] = []
             for _day, df in hist.groupby(hist.index.normalize()):  # one session/day, oldest first
                 _session_samples(df, sym, strategy, risk, cost, params, max_hold, min_bars,
-                                 stride, s_raw, s_lab, s_conf)
+                                 stride, s_raw, s_lab, s_conf, s_ts, s_tsx)
                 if max_per_symbol and len(s_lab) >= max_per_symbol:
                     break
             if max_per_symbol and len(s_lab) > max_per_symbol:
                 s_raw, s_lab, s_conf = (s_raw[:max_per_symbol], s_lab[:max_per_symbol],
                                         s_conf[:max_per_symbol])
+                s_ts, s_tsx = s_ts[:max_per_symbol], s_tsx[:max_per_symbol]
             raws.extend(s_raw)
             labels.extend(s_lab)
             confs.extend(s_conf)
+            tss.extend(s_ts)
+            ts_exits.extend(s_tsx)
         if log and (i % progress_every == 0 or i == len(symbols)):
             log.info("ml dataset: %d/%d symbols, %d labeled signals", i, len(symbols), len(labels))
         if max_samples and len(labels) >= max_samples:
@@ -253,4 +289,6 @@ def build_dataset_from_archive(
 
     X = build_matrix(raws)
     return Dataset(X=X, y=np.array(labels, dtype=int),
-                   rules_conf=np.array(confs, dtype=float), raws=raws)
+                   rules_conf=np.array(confs, dtype=float), raws=raws,
+                   ts=np.array(tss, dtype="datetime64[ns]"),
+                   ts_exit=np.array(ts_exits, dtype="datetime64[ns]"))

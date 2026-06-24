@@ -163,3 +163,42 @@ def test_run_feed_stop_callable_short_circuits():
     dhan_ws.run_feed("wss://x", [], resolve=RESOLVE, on_tick=got.append,
                      ws_factory=lambda url: fake, stop=lambda: True)
     assert got == []  # stopped before consuming
+
+
+def test_tick_tap_observes_every_tick_before_on_tick():
+    fake = _FakeWS([_quote(101, 2900.0, 10), _full(102, 3800.0, 20, 3799.0, 3801.0)])
+    refs = [InstrumentRef("RELIANCE", "101", "NSE_EQ"), InstrumentRef("TCS", "102", "NSE_EQ")]
+    tapped, delivered = [], []
+    dhan_ws.run_feed(
+        dhan_ws.build_ws_url("c", "t"),
+        dhan_ws.subscribe_messages(refs, dhan_ws.QUOTE),
+        resolve=RESOLVE, on_tick=delivered.append,
+        ws_factory=lambda url: fake, tick_tap=tapped.append,
+    )
+    assert [t.symbol for t in tapped] == ["RELIANCE", "TCS"]
+    assert [t.symbol for t in delivered] == ["RELIANCE", "TCS"]
+
+
+def test_tick_tap_exception_does_not_break_feed():
+    fake = _FakeWS([_quote(101, 2900.0, 10)])
+    delivered = []
+
+    def boom(_tick):
+        raise RuntimeError("recorder disk full")
+
+    dhan_ws.run_feed(
+        "wss://x", [{"RequestCode": 17, "InstrumentCount": 0, "InstrumentList": []}],
+        resolve=RESOLVE, on_tick=delivered.append,
+        ws_factory=lambda url: fake, tick_tap=boom,
+    )
+    # on_tick still received the tick despite the tap raising.
+    assert [t.symbol for t in delivered] == ["RELIANCE"]
+
+
+def test_no_tick_tap_default_is_off():
+    """Default (no tap) preserves existing behaviour — ticks still delivered."""
+    fake = _FakeWS([_quote(101, 2900.0, 10)])
+    delivered = []
+    dhan_ws.run_feed("wss://x", [], resolve=RESOLVE, on_tick=delivered.append,
+                     ws_factory=lambda url: fake)
+    assert [t.symbol for t in delivered] == ["RELIANCE"]
