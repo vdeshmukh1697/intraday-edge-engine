@@ -12,7 +12,7 @@ market:
 # to these and the engine paper-trades signals on them intraday). Selected from the real archive
 # by recent turnover (liquidity / MIS-leverage = "high margin") + intraday range (mover-ness),
 # mixed across SECTORS, CAP sizes (mega-caps + low-priced/penny high-volume names), and HIGH
-# MOVERS. 30 names — comfortably within Dhan's WS caps. NOTE: this is a mechanics test of the
+# MOVERS. 40 names — comfortably within Dhan's WS caps. NOTE: this is a mechanics test of the
 # de-clustered targets / ranked alerts / sizing / daily-loss breaker across a diverse universe;
 # the base strategy has NO proven edge (see docs/SIGNAL_RESEARCH_FINDINGS.md) so PF<1 is expected
 # — paper only.
@@ -54,6 +54,18 @@ watchlist:
   - "SUZLON"        # renewables (low-priced ~58, retail mover)
   - "IDEA"          # telecom (penny ~14, high volume)
   - "YESBANK"       # bank (penny ~25, high volume)
+  # High-MOVEMENT additions (Dhan scrip-master verified + archive-verified; ranked by recent
+  # intraday range% with adequate turnover) — defence / EMS / new-age / EV themes.
+  - "NETWEB"        # IT hardware & servers (mover ~3.4%, ~538cr) — requested
+  - "HONASA"        # FMCG / new-age, Mamaearth (top mover ~6.3%)
+  - "ZENTEC"        # defence tech, Zen Technologies (top mover ~6.0%)
+  - "HFCL"          # telecom equipment (low-priced ~207, mover ~5.8%)
+  - "BDL"           # defence, Bharat Dynamics (mover ~4.6%)
+  - "KAYNES"        # electronics manufacturing / EMS (mover ~4.1%)
+  - "PPLPHARMA"     # pharma, Piramal Pharma (low-priced ~172, mover ~4.1%)
+  - "OLAELEC"       # EV, Ola Electric (low-priced ~43, high retail mover)
+  - "SWIGGY"        # new-age food delivery (liquid ~598cr)
+  - "GMRAIRPORT"    # airport infra (low-priced ~108, liquid ~568cr)
 
 ingestion:
   base_timeframe_minutes: 1

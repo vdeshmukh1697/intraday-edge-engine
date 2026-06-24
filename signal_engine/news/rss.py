@@ -42,9 +42,15 @@ IST = pytz.timezone("Asia/Kolkata")
 # Real Indian-market RSS feeds (no API key needed). Kept as module constants so
 # they're trivial to edit/extend.
 DEFAULT_FEEDS: List[str] = [
-    "https://www.moneycontrol.com/rss/marketreports.xml",
-    "https://www.moneycontrol.com/rss/business.xml",
+    # Economic Times — market-specific feeds (verified working 2026-06-25)
     "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
+    "https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms",
+    "https://economictimes.indiatimes.com/rssfeedstopstories.cms",
+    # NDTV Profit markets
+    "https://feeds.feedburner.com/ndtvprofit-latest",
+    # The Hindu Business/Markets
+    "https://www.thehindu.com/business/markets/?service=rss",
+    # Moneycontrol feeds removed — returning HTTP 403 as of 2026-06-25
 ]
 
 _USER_AGENT = (
