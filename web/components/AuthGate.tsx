@@ -21,8 +21,29 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  // Backend unreachable — let the app render; individual pages surface their own errors.
-  if (error) return <>{children}</>;
+  // Backend unreachable. Previously this silently rendered the app, which looked like
+  // "the dashboard opens with no OTP prompt" when the Cloudflare tunnel was actually down.
+  // Surface a clear banner so the cause is obvious (and the Dhan reconnect is reachable
+  // again once the tunnel is back), while still rendering the app below it.
+  if (error) {
+    return (
+      <>
+        <div
+          style={{
+            background: "#7f1d1d",
+            color: "#fff",
+            padding: "10px 16px",
+            fontSize: 14,
+            textAlign: "center",
+          }}
+        >
+          ⚠️ Can&apos;t reach the engine backend — live data &amp; Dhan OTP reconnect are
+          unavailable. The Cloudflare tunnel may be down; restart it (run-with-tunnel.sh).
+        </div>
+        {children}
+      </>
+    );
+  }
   if (!status) return null; // brief: status in flight
 
   if (status.auth_required && !status.connected) {
