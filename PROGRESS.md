@@ -254,9 +254,33 @@ Gated (by design): live order execution, Redis, Polars, LightGBM/FinBERT. Run: `
   or full history, the `test_dhan.py` JWT is a synthetic fixture; placeholdered the real
   `DHAN_CLIENT_ID` left in `.env.example`. `gh` installed (brew). Pending: user `gh auth login`,
   then `gh repo create … --public --source=. --push`; thereafter `git push` per change set.
-- [ ] `todo` **Task 1A** — wire the existing news stack into `EngineRunner` live re-rating.
-- [ ] `todo` **Task 1B** — richer ML features (microstructure / regime / frac-diff / rel-strength)
-  for real edge; validate on the archive backtest (bar: **PF > 1 OOS**).
+- [x] `done` **Plan v3 (`docs/IMPROVEMENT_PLAN.md`, commit `47d6948`)** — two multi-agent passes
+  (root-cause+design, then senior-quant/trader review + red-team) produced an edge-first roadmap.
+- [x] `done` **Edge-first build (commit `57508bd`)** — Phase-0 + safe quick wins, paper-only,
+  no auto-orders. Built by an 8-phase multi-agent pipeline, hand-integrated + bug-fixed
+  (the build's fix/probe phases died on transient API 529; finished by hand). Full suite + ruff green.
+  - **Validation leak FIXED (the blocker):** global calendar-date split + per-sample
+    label-interval embargo (was a per-symbol index split → cross-symbol temporal leakage);
+    label-shuffle control; `edge_verdict()` gate (n≥2000, WR≥52% or PF≥1.10, PBO<10%);
+    `run_archive_walkforward` wired (median PF + % windows PF>1).
+  - **Targets de-clustered:** vol-move primary (`target_atr_multiple*ATR`, varies by name),
+    structure (VWAP±kσ/ORB/round) caps only when far enough to keep R:R≥floor; stop decoupled
+    w/ hard safety floor. `min_stop_pct` 0.50→0.30, `rr_floor` 1.8→1.5, `edge_cost_multiple`
+    4.0→3.0 (break-even now includes round-trip slippage).
+  - **Alerts:** gate-before-advisor (no phantom alerts), top-N ranking, debounce+hysteresis,
+    richer content (expected move / level / R:R / qty). **Sizing** (fixed-fractional/Kelly-cap)
+    + **daily-loss & consecutive-loss circuit breaker**. **Tick recorder** (off by default) +
+    DB `run_id` + slippage-in-breakeven.
+  - ⚖️ **HONEST VERDICT (corrected OOS validation): NO directional edge.** Rules signal, its
+    inverse, time-of-day, volume spikes, and null baselines all PF<1 (win-rate 55–63% but
+    PF ~0.15–0.26 on the old structure-capped config; reconciled config PF ≈ 0.49 on a
+    4-symbol × 25-session real-archive slice — better than the truncating structure-cap but
+    still well below 1.0, in line with the old model's 0.45–0.61). Nothing clears
+    `edge_verdict()` on any axis. This is the pre-committed
+    **NO-GO** outcome. Stays **paper-only**; do not risk real capital. The 1B richer features
+    (commit `fceabbe`) gave no OOS lift either (and were on the leaky split — re-measure later).
+  - **Next per plan:** edge RESEARCH (signal discovery), not more execution polish. The base
+    VWAP/EMA/ADX entry is the dead end; finding a real predictive signal is the only path to PF>1.
 
 ## Notes / decisions log
 - (init) Feature-key contract for indicators frozen so strategy + indicator engine agree:
