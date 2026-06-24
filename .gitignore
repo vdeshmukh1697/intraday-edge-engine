@@ -46,3 +46,6 @@ HANDOFF.md
 .DS_Store
 .idea/
 .vscode/
+
+# Research datasets (regenerate with signal_engine/research/dataset.py)
+data/research/
