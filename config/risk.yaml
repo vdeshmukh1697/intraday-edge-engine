@@ -46,15 +46,20 @@ risk:
   account_capital: 100000.0     # reference capital for qty; user overrides
   risk_per_trade_pct: 0.5       # % of capital risked per trade
   kelly_fraction_cap: 0.25      # cap on Kelly fraction when sizing
-  max_consecutive_losses: 4     # halt after N straight losses
-  # NOTE: daily-max-loss % reuses the existing daily_loss_pct above (2.0).
+  max_consecutive_losses: 10    # ACTIVITY MODE: was 4 — raised so the breaker doesn't halt the
+                                # session early (the user wants visible activity all day; paper only)
+  # NOTE: daily-max-loss % reuses the existing daily_loss_pct above.
 
   # Daily guardrails — guidance + health-tracked (PLAN §5.3). Capital-agnostic:
   # daily_loss_pct is a % of the user's chosen capital, applied to the paper book.
-  daily_loss_pct: 2.0
-  max_trades_per_day: 4          # fewer, higher-conviction trades (was 6)
-  max_concurrent_positions: 3
-  per_symbol_cooldown_minutes: 20
+  # ACTIVITY MODE (2026-06-25, user choice): caps loosened so the live paper-trader stays active
+  # across the WHOLE session instead of hitting a cap/breaker mid-morning and going quiet. Paper
+  # only; no proven edge. Revert to selective: daily_loss 2.0 / max_trades 4 / concurrent 3 /
+  # cooldown 20 / consecutive 4.
+  daily_loss_pct: 6.0           # selective was 2.0
+  max_trades_per_day: 25         # selective was 4 (also raises alert cap via top_n_alerts=0)
+  max_concurrent_positions: 8    # selective was 3 — more simultaneous open positions to watch
+  per_symbol_cooldown_minutes: 10  # selective was 20 — allow faster re-entry on the same name
 
 costs:
   # Dhan intraday equity (PLAN §5.4). VERIFY against your contract notes (PROGRESS Q2).
