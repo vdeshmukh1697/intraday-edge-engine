@@ -170,9 +170,14 @@ def test_paper_open_and_live_status_endpoints(tmp_path, monkeypatch):
         assert wl["open_now"] >= 1
 
 
-def test_live_status_empty_is_not_live(client):
-    """With no live_status row (feed never ran), the beacon reports not-live + stale, gracefully."""
-    st = client.get("/api/live/status").json()
+def test_live_status_empty_is_not_live(tmp_path, monkeypatch):
+    """With no live_status row (feed never ran), the beacon reports not-live + stale, gracefully.
+    Uses an ISOLATED empty DB — must not read the real one a running live feed is writing to."""
+    monkeypatch.delenv("SE_API_TOKEN", raising=False)
+    monkeypatch.setenv("SE_DATA_SOURCE", "mock")
+    monkeypatch.setenv("SE_DB_URL", f"sqlite:///{tmp_path}/empty.sqlite3")
+    c = TestClient(create_app())
+    st = c.get("/api/live/status").json()
     assert st["live"] is False and st["stale"] is True
 
 
@@ -233,11 +238,12 @@ def test_leaderboard_top_change_slices_without_rescan(tmp_path, monkeypatch):
 
     # The scan ran ONCE despite three different `top` values (startup pre-warm may add one more).
     assert calls["n"] <= 2, f"expected <=2 scans across 3 top values, got {calls['n']}"
-    # `top` truncates a single shared ranking: the small list is a prefix of the big one.
-    assert len(small) <= len(big)
-    assert [e["symbol"] for e in small] == [e["symbol"] for e in big][:len(small)]
-    # Asking for more than exists just returns everything (no error, no rescan blow-up).
-    assert len(wide) == len(big)
+    # `top` truncates a single shared ranking, so smaller requests are PREFIXES of larger ones.
+    # (Don't couple to the exact candidate count — strategy selectivity changes how many fire.)
+    assert len(small) <= 2 and len(big) <= 8
+    assert len(small) <= len(big) <= len(wide)
+    assert [e["symbol"] for e in small] == [e["symbol"] for e in wide][:len(small)]
+    assert [e["symbol"] for e in big] == [e["symbol"] for e in wide][:len(big)]
 
 
 # --- Dhan auth gate endpoints (offline; no Dhan network hit) ----------------
