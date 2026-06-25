@@ -13,7 +13,7 @@ average) because a catalyst from yesterday evening still matters at today's open
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import pytz
 
@@ -59,7 +59,13 @@ def build_briefing(
     top_n: int = 20,
     cues_provider: Optional[GlobalCuesProvider] = None,
     calendar: Optional[NSECalendar] = None,
+    news_provider=None,
+    prior_state_fn: Optional[Callable[[str, date], dict]] = None,
 ) -> PreMarketBriefing:
+    """Build the pre-open briefing. Real-data injection (used by the dashboard API):
+    ``cues_provider`` = real Yahoo global cues, ``news_provider`` = real RSS headlines (its
+    ``fetch()`` is called once), ``prior_state_fn(sym, prior_day)`` = real prior-session momentum
+    from the archive. All default to the synthetic/offline path so tests stay deterministic."""
     cal = calendar or NSECalendar()
     day = day or date(2025, 6, 23)
     symbols = symbols or cfg.settings.watchlist
@@ -70,13 +76,18 @@ def build_briefing(
     prior = prior_trading_day(day, cal)
     pre_open = IST.localize(datetime.combine(day, time(8, 30)))  # briefing time
 
-    # Overnight news: generated against the PRIOR session, all timestamped before today's open.
-    news_items = MockNewsProvider(symbols, prior, seed=seed).fetch()
+    # Overnight news: real RSS headlines (current) if provided, else synthetic against the prior
+    # session. Either way, compute_news_features maps items to each symbol point-in-time.
+    if news_provider is not None:
+        news_items = news_provider.fetch()
+    else:
+        news_items = MockNewsProvider(symbols, prior, seed=seed).fetch()
 
     picks: List[PreMarketPick] = []
     for i, sym in enumerate(symbols):
         nf = compute_news_features(news_items, sym, pre_open, window_min=_OVERNIGHT_WINDOW_MIN)
-        state = _prior_day_state(sym, prior, seed + i)
+        state = (prior_state_fn(sym, prior) if prior_state_fn is not None
+                 else _prior_day_state(sym, prior, seed + i))
         pick = stock_bias(
             sym,
             news_sentiment_avg=nf["news_sentiment"],       # latest overnight catalyst

@@ -64,10 +64,20 @@ export interface PremarketPick {
   drivers: string[];
 }
 
+export interface PremarketMeta {
+  universe_source: string;
+  data: string;
+  cues?: string;
+  news?: string;
+  scored: number;
+  shown: number;
+}
+
 export interface PremarketResponse {
   day: string;
   outlook: PremarketOutlook;
   picks: PremarketPick[];
+  meta?: PremarketMeta;
 }
 
 export interface BacktestMetrics {
@@ -365,9 +375,14 @@ export function getLeaderboard(
   return getJSON<LeaderboardResponse>(`/api/leaderboard${qs ? `?${qs}` : ""}`);
 }
 
-export function getPremarket(date?: string): Promise<PremarketResponse> {
+export function getPremarket(
+  date?: string,
+  opts: { top?: number; universe?: number } = {}
+): Promise<PremarketResponse> {
   const q = new URLSearchParams();
   if (date) q.set("date", date);
+  if (opts.top != null) q.set("top", String(opts.top));
+  if (opts.universe != null) q.set("universe", String(opts.universe));
   const qs = q.toString();
   return getJSON<PremarketResponse>(`/api/premarket${qs ? `?${qs}` : ""}`);
 }

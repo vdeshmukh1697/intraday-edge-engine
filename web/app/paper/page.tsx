@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { InfoTip } from "@/components/InfoTip";
 import {
   getPaperAnalytics,
   getPaperTrades,
@@ -104,15 +105,15 @@ export default function PaperTradingPage() {
         <>
           {/* Summary cards */}
           <div className="cards">
-            <Card label="Net P&L" value={inr(s.total_pnl_abs)} tone={cls(s.total_pnl_abs)} sub={pct(s.total_pnl_pct)} />
-            <Card label="Win rate" value={`${s.win_rate.toFixed(1)}%`} sub={`${s.wins}W / ${s.losses}L`} />
-            <Card label="Trades" value={String(s.n_trades)} sub={`exp ${inr(s.expectancy)}/trade`} />
-            <Card label="Profit factor" value={s.profit_factor === null ? "∞" : s.profit_factor.toFixed(2)}
+            <Card label="Net P&L" term="net_pnl" value={inr(s.total_pnl_abs)} tone={cls(s.total_pnl_abs)} sub={pct(s.total_pnl_pct)} />
+            <Card label="Win rate" term="win_rate" value={`${s.win_rate.toFixed(1)}%`} sub={`${s.wins}W / ${s.losses}L`} />
+            <Card label="Trades" term="expectancy" value={String(s.n_trades)} sub={`exp ${inr(s.expectancy)}/trade`} />
+            <Card label="Profit factor" term="profit_factor" value={s.profit_factor === null ? "∞" : s.profit_factor.toFixed(2)}
               tone={s.profit_factor !== null && s.profit_factor < 1 ? "neg" : "pos"} sub="gross win / gross loss" />
-            <Card label="Avg win / loss" value={`${inr(s.avg_win)} / ${inr(s.avg_loss)}`} />
-            <Card label="Max drawdown" value={inr(s.max_drawdown)} tone="neg" sub="peak-to-trough" />
-            <Card label="Best trade" value={s.best_trade ? inr(s.best_trade.net_pnl_abs) : "—"} tone="pos" sub={s.best_trade?.symbol} />
-            <Card label="Worst trade" value={s.worst_trade ? inr(s.worst_trade.net_pnl_abs) : "—"} tone="neg" sub={s.worst_trade?.symbol} />
+            <Card label="Avg win / loss" term="avg_win_loss" value={`${inr(s.avg_win)} / ${inr(s.avg_loss)}`} />
+            <Card label="Max drawdown" term="max_drawdown" value={inr(s.max_drawdown)} tone="neg" sub="peak-to-trough" />
+            <Card label="Best trade" term="best_worst" value={s.best_trade ? inr(s.best_trade.net_pnl_abs) : "—"} tone="pos" sub={s.best_trade?.symbol} />
+            <Card label="Worst trade" term="best_worst" value={s.worst_trade ? inr(s.worst_trade.net_pnl_abs) : "—"} tone="neg" sub={s.worst_trade?.symbol} />
           </div>
 
           {/* Auto summary */}
@@ -125,27 +126,27 @@ export default function PaperTradingPage() {
 
           {/* Equity curve + drawdown */}
           <div className="card">
-            <h3>Equity curve (cumulative net P&L)</h3>
+            <h3>Equity curve (cumulative net P&L)<InfoTip term="equity_curve" /></h3>
             <LineSvg pts={report.equity_curve.map((p) => p.cum_pnl)} fmt={inr} />
-            <h3 style={{ marginTop: 18 }}>Drawdown</h3>
+            <h3 style={{ marginTop: 18 }}>Drawdown<InfoTip term="drawdown_series" /></h3>
             <AreaSvg pts={report.drawdown.map((p) => p.drawdown)} fmt={inr} negative />
           </div>
 
           {/* P&L distribution */}
           <div className="card">
-            <h3>P&L distribution (per trade)</h3>
+            <h3>P&L distribution (per trade)<InfoTip term="pnl_distribution" /></h3>
             <Histogram bins={report.histogram} />
           </div>
 
           {/* By strategy / symbol */}
           <div className="grid2">
-            <GroupTable title="By strategy" rows={report.by_strategy} keyName="strategy" />
-            <GroupTable title="By symbol" rows={report.by_symbol} keyName="symbol" />
+            <GroupTable title="By strategy" titleTerm="by_strategy" rows={report.by_strategy} keyName="strategy" />
+            <GroupTable title="By symbol" titleTerm="by_symbol" rows={report.by_symbol} keyName="symbol" />
           </div>
 
           {/* By time of day */}
           <div className="card">
-            <h3>By time of day</h3>
+            <h3>By time of day<InfoTip term="by_tod" /></h3>
             <GroupBars rows={report.by_time_of_day} keyName="tod" />
           </div>
 
@@ -160,10 +161,10 @@ export default function PaperTradingPage() {
   );
 }
 
-function Card({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: string }) {
+function Card({ label, value, sub, tone, term }: { label: string; value: string; sub?: string; tone?: string; term?: string }) {
   return (
     <div className="metric">
-      <div className="metric-label">{label}</div>
+      <div className="metric-label">{label}{term && <InfoTip term={term} />}</div>
       <div className={`metric-value ${tone || ""}`}>{value}</div>
       {sub && <div className="metric-sub">{sub}</div>}
     </div>
@@ -224,9 +225,9 @@ function OpenPositions({ positions, notional }: { positions: OpenPosition[]; not
       <table className="grid">
         <thead>
           <tr>
-            <th>Symbol</th><th>Dir</th><th className="num">Entry ₹</th>
-            <th className="num">LTP ₹</th><th className="num">Target</th>
-            <th className="num">Stop</th><th className="num">Unrealized</th><th>Since</th>
+            <th>Symbol</th><th>Dir<InfoTip term="direction" /></th><th className="num">Entry ₹<InfoTip term="entry" /></th>
+            <th className="num">LTP ₹<InfoTip term="ltp" /></th><th className="num">Target<InfoTip term="target" /></th>
+            <th className="num">Stop<InfoTip term="stop" /></th><th className="num">Unrealized<InfoTip term="unrealized_pnl" /></th><th>Since</th>
           </tr>
         </thead>
         <tbody>
@@ -311,12 +312,12 @@ function Histogram({ bins }: { bins: { lo: number; hi: number; count: number }[]
   );
 }
 
-function GroupTable({ title, rows, keyName }: { title: string; rows: GroupRow[]; keyName: "strategy" | "symbol" }) {
+function GroupTable({ title, titleTerm, rows, keyName }: { title: string; titleTerm?: string; rows: GroupRow[]; keyName: "strategy" | "symbol" }) {
   return (
     <div className="card">
-      <h3>{title}</h3>
+      <h3>{title}{titleTerm && <InfoTip term={titleTerm} />}</h3>
       <table className="tbl">
-        <thead><tr><th>{keyName}</th><th>Trades</th><th>Win%</th><th>Net P&L</th><th>PF</th></tr></thead>
+        <thead><tr><th>{keyName}</th><th>Trades</th><th>Win%<InfoTip term="win_rate" /></th><th>Net P&L</th><th>PF<InfoTip term="profit_factor" /></th></tr></thead>
         <tbody>
           {rows.map((r, i) => (
             <tr key={i}>

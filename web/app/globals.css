@@ -245,6 +245,106 @@ button.ghost {
 .live-label { font-weight: 600; font-size: 13px; }
 .live-counts { color: var(--text-dim); font-size: 12px; }
 
+/* Info tooltip ("?" badge with hover/focus popover). */
+.infotip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 5px;
+  vertical-align: middle;
+  cursor: help;
+  outline: none;
+}
+.infotip-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-elev-2);
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  transition: color 0.12s, border-color 0.12s;
+}
+.infotip:hover .infotip-mark,
+.infotip:focus .infotip-mark {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.infotip-pop {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 264px;
+  max-width: 70vw;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.55);
+  padding: 10px 12px;
+  z-index: 50;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.12s, visibility 0.12s;
+  pointer-events: none;
+  white-space: normal;
+  text-align: left;
+}
+.infotip:hover .infotip-pop,
+.infotip:focus .infotip-pop {
+  opacity: 1;
+  visibility: visible;
+}
+.infotip-pop::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: var(--border);
+}
+.infotip-title {
+  display: block;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+.infotip-body {
+  display: block;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+.infolabel {
+  display: inline-flex;
+  align-items: center;
+}
+/* Explanatory blurb card (e.g. "how picks are chosen"). */
+.card.explain {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  border-left: 3px solid var(--accent);
+}
+.card.explain strong { color: var(--text); }
+/* When a tooltip sits in the first/last column, nudge it so it doesn't clip off-screen. */
+th:first-child .infotip-pop,
+td:first-child .infotip-pop { left: 0; transform: none; }
+th:first-child .infotip-pop::after,
+td:first-child .infotip-pop::after { left: 18px; }
+th:last-child .infotip-pop,
+td:last-child .infotip-pop { left: auto; right: 0; transform: none; }
+th:last-child .infotip-pop::after,
+td:last-child .infotip-pop::after { left: auto; right: 18px; }
+
 /* Inline direction / status tag. */
 .tag {
   display: inline-block;

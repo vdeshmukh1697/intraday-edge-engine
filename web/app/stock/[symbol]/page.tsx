@@ -16,6 +16,7 @@ import {
   type OpenPosition,
 } from "@/lib/api";
 import CandleChart, { type CandleChartHandle } from "@/components/CandleChart";
+import { InfoTip } from "@/components/InfoTip";
 
 const inr = (n: number) =>
   `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
@@ -182,11 +183,11 @@ export default function StockPage() {
       <div className="chart-legend">
         <span className="legend-item">
           <span className="legend-swatch" style={{ background: "#d29922" }} />
-          VWAP
+          VWAP<InfoTip term="vwap" />
         </span>
         <span className="legend-item">
           <span className="legend-swatch" style={{ background: "#4493f8" }} />
-          EMA fast
+          EMA fast<InfoTip term="ema" />
         </span>
         <span className="legend-item">
           <span className="legend-swatch" style={{ background: "#a371f7" }} />
@@ -225,22 +226,22 @@ function OpenPositionCard({ pos }: { pos: OpenPosition }) {
         <span className={`tag ${pos.direction === "LONG" ? "pos" : "neg"}`}>{pos.direction}</span>
       </h3>
       <div className="cards">
-        <Metric label="Entry" value={`₹${pos.entry?.toFixed(2)}`}
+        <Metric label="Entry" term="entry" value={`₹${pos.entry?.toFixed(2)}`}
           sub={pos.entry_ts ? `since ${pos.entry_ts.slice(11, 16)}` : undefined} />
-        <Metric label="Last price" value={pos.last_price != null ? `₹${pos.last_price.toFixed(2)}` : "—"} />
-        <Metric label="Target"
+        <Metric label="Last price" term="ltp" value={pos.last_price != null ? `₹${pos.last_price.toFixed(2)}` : "—"} />
+        <Metric label="Target" term="target"
           value={pos.target != null ? `₹${pos.target.toFixed(2)}` : "—"}
           sub={pos.target_pct != null ? `${pos.target_pct >= 0 ? "+" : ""}${pos.target_pct.toFixed(2)}%` : undefined} />
-        <Metric label="Stop"
+        <Metric label="Stop" term="stop"
           value={pos.stop_loss != null ? `₹${pos.stop_loss.toFixed(2)}` : "—"}
           sub={pos.stop_pct != null ? `-${pos.stop_pct.toFixed(2)}%` : undefined} />
-        <Metric label="Unrealized P&L"
+        <Metric label="Unrealized P&L" term="unrealized_pnl"
           value={pos.unrealized_pnl_pct != null
             ? `${pos.unrealized_pnl_pct >= 0 ? "+" : ""}${pos.unrealized_pnl_pct.toFixed(2)}%`
             : "—"}
           sub={pos.unrealized_pnl_abs != null ? inr(pos.unrealized_pnl_abs) : undefined}
           tone={clsOf(pos.unrealized_pnl_pct || 0)} />
-        <Metric label="R:R" value={pos.risk_reward != null ? pos.risk_reward.toFixed(2) : "—"}
+        <Metric label="R:R" term="rr" value={pos.risk_reward != null ? pos.risk_reward.toFixed(2) : "—"}
           sub={`conf ${pos.confidence?.toFixed(0)}`} />
       </div>
     </div>
@@ -268,10 +269,10 @@ function PaperHistory({ symbol, trades }: { symbol: string; trades: PaperTrade[]
         <table className="grid">
           <thead>
             <tr>
-              <th>Dir</th><th>Entry</th><th className="num">Entry ₹</th>
+              <th>Dir<InfoTip term="direction" /></th><th>Entry</th><th className="num">Entry ₹</th>
               <th>Exit</th><th className="num">Exit ₹</th><th>Reason</th>
-              <th className="num">Target</th><th className="num">Stop</th>
-              <th className="num">Net %</th><th className="num">Net ₹</th><th className="num">R</th>
+              <th className="num">Target<InfoTip term="target" /></th><th className="num">Stop<InfoTip term="stop" /></th>
+              <th className="num">Net %</th><th className="num">Net ₹</th><th className="num">R<InfoTip term="r_multiple" /></th>
             </tr>
           </thead>
           <tbody>
@@ -299,10 +300,10 @@ function PaperHistory({ symbol, trades }: { symbol: string; trades: PaperTrade[]
   );
 }
 
-function Metric({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: string }) {
+function Metric({ label, value, sub, tone, term }: { label: string; value: string; sub?: string; tone?: string; term?: string }) {
   return (
     <div className="metric">
-      <div className="metric-label">{label}</div>
+      <div className="metric-label">{label}{term && <InfoTip term={term} />}</div>
       <div className={`metric-value ${tone || ""}`}>{value}</div>
       {sub && <div className="metric-sub">{sub}</div>}
     </div>

@@ -11,6 +11,7 @@ import {
 } from "@/lib/api";
 import { conf, num, int, pct } from "@/lib/format";
 import HealthBadge from "@/components/HealthBadge";
+import { InfoTip } from "@/components/InfoTip";
 
 export default function LeaderboardPage() {
   const [date, setDate] = useState<string>(todayStr());
@@ -130,13 +131,13 @@ export default function LeaderboardPage() {
 
       {stats && (
         <div className="stats-strip">
-          <Stat label="Universe" value={int(stats.universe)} />
-          <Stat label="Deep scanned" value={int(stats.deep_scanned)} />
-          <Stat label="Filtered out" value={int(stats.filtered_out)} />
-          <Stat label="No signal" value={int(stats.no_signal)} />
-          <Stat label="Vetoed" value={int(stats.vetoed)} />
-          <Stat label="News vetoed" value={int(stats.news_vetoed)} />
-          <Stat label="Candidates" value={int(stats.candidates)} />
+          <Stat label="Universe" value={int(stats.universe)} term="universe" />
+          <Stat label="Deep scanned" value={int(stats.deep_scanned)} term="deep_scanned" />
+          <Stat label="Filtered out" value={int(stats.filtered_out)} term="filtered_out" />
+          <Stat label="No signal" value={int(stats.no_signal)} term="no_signal" />
+          <Stat label="Vetoed" value={int(stats.vetoed)} term="vetoed" />
+          <Stat label="News vetoed" value={int(stats.news_vetoed)} term="news_vetoed" />
+          <Stat label="Candidates" value={int(stats.candidates)} term="candidates" />
         </div>
       )}
 
@@ -152,18 +153,18 @@ export default function LeaderboardPage() {
                 <tr>
                   <th>#</th>
                   <th>Symbol</th>
-                  <th>Dir</th>
-                  <th className="num">Score</th>
-                  <th className="num">Entry</th>
-                  <th className="num">Stop %</th>
-                  <th className="num">T1 %</th>
-                  <th className="num">R:R</th>
-                  <th className="num">Conf</th>
-                  {ml && <th className="num">ML conf</th>}
-                  <th className="num">Exp move</th>
-                  <th className="num">Break-even</th>
-                  <th>Sector</th>
-                  <th className="num">Turnover (Cr)</th>
+                  <th>Dir <InfoTip term="direction" /></th>
+                  <th className="num">Score <InfoTip term="score" /></th>
+                  <th className="num">Entry <InfoTip term="entry" /></th>
+                  <th className="num">Stop % <InfoTip term="stop" /></th>
+                  <th className="num">T1 % <InfoTip term="target" /></th>
+                  <th className="num">R:R <InfoTip term="rr" /></th>
+                  <th className="num">Conf <InfoTip term="confidence" /></th>
+                  {ml && <th className="num">ML conf <InfoTip term="ml_conf" /></th>}
+                  <th className="num">Exp move <InfoTip term="expected_move" /></th>
+                  <th className="num">Break-even <InfoTip term="cost_to_break_even" /></th>
+                  <th>Sector <InfoTip term="sector" /></th>
+                  <th className="num">Turnover (Cr) <InfoTip term="turnover" /></th>
                   <th>Reasons</th>
                 </tr>
               </thead>
@@ -223,11 +224,22 @@ export default function LeaderboardPage() {
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({
+  label,
+  value,
+  term,
+}: {
+  label: string;
+  value: string;
+  term?: string;
+}) {
   return (
     <div className="stat">
       <span className="stat-num">{value}</span>
-      <span className="stat-lbl">{label}</span>
+      <span className="stat-lbl">
+        {label}
+        {term && <InfoTip term={term} />}
+      </span>
     </div>
   );
 }

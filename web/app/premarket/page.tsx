@@ -8,9 +8,11 @@ import {
   type PremarketResponse,
 } from "@/lib/api";
 import { conf, signed } from "@/lib/format";
+import { InfoTip } from "@/components/InfoTip";
 
 export default function PremarketPage() {
   const [date, setDate] = useState<string>(todayStr());
+  const [count, setCount] = useState<number>(40);
   const [data, setData] = useState<PremarketResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -19,14 +21,14 @@ export default function PremarketPage() {
     setLoading(true);
     setError(null);
     try {
-      setData(await getPremarket(date));
+      setData(await getPremarket(date, { top: count }));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setData(null);
     } finally {
       setLoading(false);
     }
-  }, [date]);
+  }, [date, count]);
 
   useEffect(() => {
     load();
@@ -44,6 +46,26 @@ export default function PremarketPage() {
         </div>
       </div>
 
+      {/* How the picks are made — answers "why these stocks / how chosen". */}
+      <div className="card explain" style={{ marginBottom: 16 }}>
+        <strong>How pre-open picks are chosen.</strong> Before the bell we score the{" "}
+        {data?.meta ? data.meta.scored : "most-liquid"} most-liquid NSE names for the most likely
+        opening move. Each name gets a directional <em>bias</em> (LONG/SHORT) from four inputs —
+        overnight <InfoTip term="adr" /> moves, the expected index gap, overnight{" "}
+        <InfoTip term="catalyst" /> news, and the prior day&apos;s momentum — then they&apos;re
+        ranked by conviction and the top {count} are shown. Use the count control to see more.
+        {data?.meta && (
+          <span className="muted small">
+            {" "}Source: {data.meta.universe_source}; cues = {data.meta.cues ?? "—"}, news ={" "}
+            {data.meta.news ?? "—"}.
+          </span>
+        )}
+        <span className="muted small">
+          {" "}Note: real ADR/news catalysts only exist for headline names, so many picks lean on
+          index gap + momentum. Decision-support only — no orders.
+        </span>
+      </div>
+
       <form
         className="controls"
         onSubmit={(e) => {
@@ -59,6 +81,16 @@ export default function PremarketPage() {
             onChange={(e) => setDate(e.target.value)}
           />
         </div>
+        <div className="field">
+          <label>Show top</label>
+          <input
+            type="number"
+            min={1}
+            max={200}
+            value={count}
+            onChange={(e) => setCount(Number(e.target.value))}
+          />
+        </div>
         <button type="submit" disabled={loading}>
           {loading ? "Loading…" : "Refresh"}
         </button>
@@ -71,12 +103,13 @@ export default function PremarketPage() {
           <div className="card" style={{ marginBottom: 20 }}>
             <h2>Index outlook</h2>
             <div className="card-grid" style={{ marginBottom: 12 }}>
-              <Metric label="Gap bias" value={data.outlook.gap_bias} />
+              <Metric label="Gap bias" term="gap_bias" value={data.outlook.gap_bias} />
               <Metric
                 label="Expected gap"
+                term="expected_gap"
                 value={`${signed(data.outlook.expected_gap_pct)}%`}
               />
-              <Metric label="Risk tone" value={data.outlook.risk_tone} />
+              <Metric label="Risk tone" term="risk_tone" value={data.outlook.risk_tone} />
             </div>
             {data.outlook.drivers.length > 0 && (
               <div className="reasons">
@@ -89,7 +122,14 @@ export default function PremarketPage() {
             )}
           </div>
 
-          <h2>Pre-open picks</h2>
+          <h2>
+            Pre-open picks{" "}
+            {data.meta && (
+              <span className="muted small">
+                (showing {data.meta.shown} of {data.meta.scored} scored)
+              </span>
+            )}
+          </h2>
           {data.picks.length === 0 ? (
             <div className="notice">No pre-open picks for the selected day.</div>
           ) : (
@@ -98,12 +138,12 @@ export default function PremarketPage() {
                 <thead>
                   <tr>
                     <th>Symbol</th>
-                    <th>Bias</th>
-                    <th>Setup</th>
-                    <th className="num">Exp gap</th>
-                    <th className="num">Conf</th>
-                    <th>Catalyst</th>
-                    <th>Drivers</th>
+                    <th>Bias<InfoTip term="bias" /></th>
+                    <th>Setup<InfoTip term="setup" /></th>
+                    <th className="num">Exp gap<InfoTip term="expected_gap" /></th>
+                    <th className="num">Conf<InfoTip term="confidence" /></th>
+                    <th>Catalyst<InfoTip term="catalyst" /></th>
+                    <th>Drivers<InfoTip term="drivers" /></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -152,10 +192,10 @@ export default function PremarketPage() {
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
+function Metric({ label, value, term }: { label: string; value: string; term?: string }) {
   return (
     <div className="metric">
-      <div className="metric-label">{label}</div>
+      <div className="metric-label">{label}{term && <InfoTip term={term} />}</div>
       <div className="metric-value">{value}</div>
     </div>
   );

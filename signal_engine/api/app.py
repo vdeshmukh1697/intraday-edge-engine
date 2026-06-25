@@ -80,6 +80,65 @@ def _archive_leaderboard(cfg, top: int, news: bool):
     return leaderboard_to_json(res, day)
 
 
+_LIQUID_UNIVERSE_CACHE: dict = {}
+
+
+def _liquid_universe_data(cfg, limit: int):
+    """Return (symbols, sessions) for the N most-liquid archived NSE names, ranked by the latest
+    session's rupee turnover. `sessions[sym]` is that latest session's bars — reused for real
+    prior-day momentum in the pre-market briefing (for today's briefing the prior session IS the
+    latest archived one). Cached per (corpus size, newest date, limit); None if the archive is
+    empty (caller falls back to the watchlist)."""
+    from signal_engine.storage.bars import ParquetBarStore
+
+    store = ParquetBarStore(cfg.env.parquet_dir)
+    all_syms = store.list_symbols()
+    if not all_syms:
+        return None
+    latest = None
+    for s in all_syms[:5] + all_syms[-5:]:
+        d = store.load_latest_session(s)
+        if d is not None and not d.empty:
+            dt = d.index.max().date()
+            latest = dt if latest is None or dt > latest else latest
+    ckey = (len(all_syms), str(latest), int(limit))
+    if ckey in _LIQUID_UNIVERSE_CACHE:
+        return _LIQUID_UNIVERSE_CACHE[ckey]
+
+    sessions, turnover = {}, {}
+    for sym in all_syms:
+        df = store.load_latest_session(sym)
+        if df is None or df.empty:
+            continue
+        sessions[sym] = df
+        turnover[sym] = float((df["close"] * df["volume"]).sum()) / 1e7  # ₹cr
+    if not sessions:
+        return None
+    ranked = sorted(sessions, key=lambda s: turnover.get(s, 0.0), reverse=True)[:int(limit)]
+    result = (ranked, {s: sessions[s] for s in ranked})
+    _LIQUID_UNIVERSE_CACHE.clear()
+    _LIQUID_UNIVERSE_CACHE[ckey] = result
+    return result
+
+
+def _prior_state_from_sessions(sessions: dict):
+    """Build a prior_state_fn(sym, prior_day) closure that reads real prior-session momentum from
+    already-loaded archive bars (% return + where it closed in its range). Neutral if missing."""
+    def _fn(sym: str, _prior_day) -> dict:
+        df = sessions.get(sym)
+        if df is None or df.empty:
+            return {"prev_return_pct": 0.0, "close_position": 0.5}
+        o = float(df["open"].iloc[0])
+        c = float(df["close"].iloc[-1])
+        hi = float(df["high"].max())
+        lo = float(df["low"].min())
+        return {
+            "prev_return_pct": (c / o - 1.0) * 100.0 if o else 0.0,
+            "close_position": (c - lo) / (hi - lo) if hi > lo else 0.5,
+        }
+    return _fn
+
+
 def _watchlist_sectors() -> dict:
     """Parse the inline ``# sector / note`` comment for each watchlist symbol straight from
     config/settings.yaml (the watchlist is a plain list of strings in the typed config, so the
@@ -256,11 +315,43 @@ def create_app() -> FastAPI:
         return leaderboard_to_json(res, d)
 
     @app.get("/api/premarket", dependencies=[Depends(_require_token)])
-    def premarket(date_str: str = Query(default=None, alias="date"), seed: int = 42):
+    def premarket(date_str: str = Query(default=None, alias="date"), seed: int = 42,
+                  top: int = Query(default=40, ge=1, le=200),
+                  universe: int = Query(default=150, ge=10, le=2000)):
+        """Pre-open briefing. By default scores the `universe` most-liquid archived NSE names
+        (not just the trading watchlist) and shows the top `top` by conviction. With a real data
+        source it uses real Yahoo global cues + real RSS news + real prior-session momentum from
+        the archive; falls back to the synthetic path (and the watchlist) when the archive is
+        empty or SE_DATA_SOURCE=mock."""
+        from signal_engine.factory import build_cues_provider, build_news_provider
         from signal_engine.premarket.briefing import build_briefing
 
         d = _parse_date(date_str)
-        return premarket_to_json(build_briefing(cfg, day=d, seed=seed))
+        symbols = None
+        cues_provider = None
+        news_provider = None
+        prior_state_fn = None
+        meta = {"universe_source": "watchlist (synthetic)", "data": "synthetic"}
+        if cfg.env.data_source != "mock":
+            liquid = _liquid_universe_data(cfg, universe)
+            if liquid is not None:
+                symbols, sessions = liquid
+                prior_state_fn = _prior_state_from_sessions(sessions)
+                cues_provider = build_cues_provider(cfg)   # real Yahoo (None if not configured)
+                news_provider = build_news_provider(cfg)   # real RSS (None if not configured)
+                meta = {
+                    "universe_source": f"{len(symbols)} most-liquid NSE names (archive)",
+                    "data": "real" if (cues_provider or news_provider) else "archive+synthetic",
+                    "cues": "yahoo" if cues_provider else "synthetic",
+                    "news": "rss" if news_provider else "synthetic",
+                }
+        briefing = build_briefing(cfg, symbols=symbols, day=d, seed=seed, top_n=top,
+                                  cues_provider=cues_provider, news_provider=news_provider,
+                                  prior_state_fn=prior_state_fn)
+        payload = premarket_to_json(briefing)
+        payload["meta"] = {**meta, "scored": len(symbols) if symbols else len(cfg.settings.watchlist),
+                           "shown": len(payload["picks"])}
+        return payload
 
     @app.get("/api/backtest", dependencies=[Depends(_require_token)])
     def backtest(
@@ -504,6 +595,9 @@ def create_app() -> FastAPI:
                     if real is not None:
                         _LEADERBOARD_CACHE.clear()
                         _LEADERBOARD_CACHE[ckey] = real
+                # Also warm the pre-market liquid universe (the ~2k-session load is the slow part;
+                # do it once here so the first /api/premarket request isn't the one that pays it).
+                _liquid_universe_data(cfg, 150)
             except Exception:  # noqa: BLE001 - pre-warm is best-effort; never block startup
                 pass
 

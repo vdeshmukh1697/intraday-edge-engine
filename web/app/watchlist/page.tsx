@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { InfoTip } from "@/components/InfoTip";
 import { getWatchlist, type WatchlistResponse } from "@/lib/api";
 
 const inr = (n: number) =>
@@ -80,14 +81,14 @@ export default function WatchlistPage() {
           <thead>
             <tr>
               <th>Symbol</th>
-              <th>Sector / note</th>
-              <th>Status</th>
-              <th className="num">Entry ₹</th>
-              <th className="num">Target (₹ / %)</th>
-              <th className="num">Stop (₹ / %)</th>
-              <th className="num">Unrealized</th>
-              <th className="num">Today</th>
-              <th className="num">All-time</th>
+              <th>Sector / note<InfoTip term="sector" /></th>
+              <th>Status<InfoTip term="direction" /></th>
+              <th className="num">Entry ₹<InfoTip term="entry" /></th>
+              <th className="num">Target (₹ / %)<InfoTip term="target" /></th>
+              <th className="num">Stop (₹ / %)<InfoTip term="stop" /></th>
+              <th className="num">Unrealized<InfoTip term="unrealized_pnl" /></th>
+              <th className="num">Today<InfoTip full="Today's activity" def="Number of paper trades on this name today and their net ₹ P&L." /></th>
+              <th className="num">All-time<InfoTip full="All-time trades" def="Total paper trades recorded on this name across all sessions." /></th>
             </tr>
           </thead>
           <tbody>
