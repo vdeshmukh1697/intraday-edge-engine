@@ -26,7 +26,7 @@ from typing import Optional
 
 import pytz
 
-from signal_engine.config import AppConfig, load_config
+from signal_engine.config import AppConfig, load_config, refresh_runtime_env
 from signal_engine.market.calendar import NSECalendar
 from signal_engine.obs.logging_setup import get_logger
 from signal_engine.universe.nse import NSEUniverseProvider
@@ -62,6 +62,7 @@ def renew_token_job(cfg: Optional[AppConfig] = None) -> None:
     Persists the fresh token to .env (with backup) AND to this process's environment so the
     same-day live/scan jobs pick it up without a restart. No-op for non-Dhan sources.
     """
+    refresh_runtime_env()  # operate on the freshest token if .env was updated manually overnight
     cfg = load_config()
     if cfg.env.data_source != "dhan":
         return
@@ -83,7 +84,14 @@ def live_job(cfg: Optional[AppConfig] = None) -> None:
     Blocks for the trading session (one scheduler worker). Paper signals + alerts only;
     never places orders. No-op for non-Dhan sources or non-trading days.
     """
-    cfg = load_config()  # fresh: picks up a token renewed earlier today
+    # Re-read the daily-regenerated Dhan token from .env and OVERRIDE the (possibly stale) value
+    # this long-running process loaded at startup. Without this, a token refreshed in .env after
+    # the scheduler started is never seen — _load_dotenv runs once and never overrides — so
+    # live_job dies at 09:15 with "token expired" even though .env holds a valid one.
+    refreshed = refresh_runtime_env()
+    if refreshed:
+        _log.info("live_job: refreshed %s from .env", ", ".join(sorted(refreshed)))
+    cfg = load_config()  # now reflects the freshest token
     if cfg.env.data_source != "dhan":
         _log.info("live_job skipped: SE_DATA_SOURCE is %r, not 'dhan'", cfg.env.data_source)
         return

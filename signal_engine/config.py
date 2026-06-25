@@ -145,6 +145,39 @@ def _load_dotenv(path: Optional[Path] = None) -> None:
             os.environ[key] = val
 
 
+# Keys that legitimately change at runtime (the Dhan access token is regenerated daily in the
+# portal — portal tokens can't be auto-renewed via the API, see DH-905). A long-running process
+# (e.g. the scheduler) loads ``.env`` once at startup and ``_load_dotenv`` never overrides an
+# existing env var, so without this a token refreshed in ``.env`` mid-run is never picked up —
+# which silently kills the next ``live_job`` with an "expired token" error. This re-reads ONLY
+# these volatile keys from ``.env`` and OVERRIDES the process env, so each scheduled job sees the
+# freshest token. Stable secrets keep the normal env-wins precedence.
+_REFRESHABLE_ENV_KEYS = ("DHAN_ACCESS_TOKEN",)
+
+
+def refresh_runtime_env(path: Optional[Path] = None) -> dict:
+    """Re-read the volatile keys in :data:`_REFRESHABLE_ENV_KEYS` from ``.env`` and override
+    ``os.environ``. Returns the keys that actually changed. Best-effort and side-effect-only;
+    callers typically follow with :func:`load_config` to rebuild config from the fresh env."""
+    env_path = path or (REPO_ROOT / ".env")
+    if not env_path.exists():
+        return {}
+    changed: dict = {}
+    for raw in env_path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        if key not in _REFRESHABLE_ENV_KEYS:
+            continue
+        val = val.strip().strip('"').strip("'")
+        if val and os.environ.get(key) != val:
+            os.environ[key] = val
+            changed[key] = val
+    return changed
+
+
 class EnvConfig(BaseModel):
     data_source: str = "mock"            # "mock" | "yahoo_nse" | "angelone" | "dhan"
     news_source: str = "mock"            # "mock" | "rss" (rss = live current headlines)

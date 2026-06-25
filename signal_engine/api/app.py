@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 from datetime import date, datetime, time
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -43,6 +44,8 @@ _AUTH_TTL_S = 600
 # would re-read the whole archived universe each time.
 _LEADERBOARD_CACHE: dict = {}
 _REAL_SCAN_CAP = 600  # scan at most the N most-liquid archived names (keeps it responsive)
+_MAX_LEADERBOARD = 100  # compute the ranking once at this size; requests slice [:top] from it
+                        # (must be >= the leaderboard endpoint's `top` ceiling)
 
 
 def _archive_leaderboard(cfg, top: int, news: bool):
@@ -185,20 +188,30 @@ def create_app() -> FastAPI:
             # leaderboard auto-refreshes both as the corpus grows and as each new session is
             # archived (intraday refresh or nightly). It is still the most-recent COMPLETE
             # session, not a tick-live ranking — see /api/leaderboard docs.
+            #
+            # IMPORTANT: `top` is deliberately NOT part of the cache key. The expensive part is
+            # scanning the corpus (loading ~2k Parquet sessions, ~150s cold); the result is a
+            # ranked list that `top` only TRUNCATES. So we compute the full ranking ONCE (at
+            # _MAX_LEADERBOARD), cache it per (news, corpus, date), and slice [:top] per request.
+            # Previously `top` was in the key AND the cache was cleared on every miss, so changing
+            # the dashboard's stock-count forced a fresh ~150s scan that blew past the frontend
+            # fetch timeout — only the pre-warmed default (20) ever loaded.
             latest = None
             for s in syms[:5] + syms[-5:]:  # cheap probe of a few symbols for the newest date
                 d = store.load_latest_session(s)
                 if d is not None and not d.empty:
                     dt = d.index.max().date()
                     latest = dt if latest is None or dt > latest else latest
-            ckey = (top, news, len(syms), str(latest))
+            ckey = (news, len(syms), str(latest))
             if ckey not in _LEADERBOARD_CACHE:
-                real = _archive_leaderboard(cfg, top, news)
+                real = _archive_leaderboard(cfg, _MAX_LEADERBOARD, news)
                 if real is not None:
                     _LEADERBOARD_CACHE.clear()
                     _LEADERBOARD_CACHE[ckey] = real
             if ckey in _LEADERBOARD_CACHE:
-                return _LEADERBOARD_CACHE[ckey]
+                full = _LEADERBOARD_CACHE[ckey]
+                # Slice to the requested size without recomputing (instant on every top change).
+                return {**full, "entries": full["entries"][:top]}
 
         from signal_engine.scan.harness import run_scan
         from signal_engine.universe.mock import MockUniverseProvider
@@ -309,6 +322,39 @@ def create_app() -> FastAPI:
             await ws.send_json({"done": True})
         except WebSocketDisconnect:
             return
+
+    @app.on_event("startup")
+    def _prewarm_leaderboard() -> None:
+        """Warm the real-archive leaderboard cache in a background thread so the first user
+        request after a restart isn't the one that pays the ~150s corpus scan. No-op for the
+        synthetic universe (that path is already fast)."""
+        if cfg.env.data_source == "mock":
+            return
+
+        def _warm() -> None:
+            try:
+                from signal_engine.storage.bars import ParquetBarStore
+
+                store = ParquetBarStore(cfg.env.parquet_dir)
+                syms = store.list_symbols()
+                if not syms:
+                    return
+                latest = None
+                for s in syms[:5] + syms[-5:]:
+                    d = store.load_latest_session(s)
+                    if d is not None and not d.empty:
+                        dt = d.index.max().date()
+                        latest = dt if latest is None or dt > latest else latest
+                ckey = (True, len(syms), str(latest))  # news=True is the dashboard default
+                if ckey not in _LEADERBOARD_CACHE:
+                    real = _archive_leaderboard(cfg, _MAX_LEADERBOARD, True)
+                    if real is not None:
+                        _LEADERBOARD_CACHE.clear()
+                        _LEADERBOARD_CACHE[ckey] = real
+            except Exception:  # noqa: BLE001 - pre-warm is best-effort; never block startup
+                pass
+
+        threading.Thread(target=_warm, name="leaderboard-prewarm", daemon=True).start()
 
     return app
 

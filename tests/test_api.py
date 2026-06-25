@@ -122,6 +122,56 @@ def test_leaderboard_uses_real_archive_when_present(tmp_path, monkeypatch):
     assert syms <= {"RELIANCE", "TCS", "INFY"}        # real names, never SYN####
 
 
+def test_leaderboard_top_change_slices_without_rescan(tmp_path, monkeypatch):
+    """Changing `top` must NOT trigger another (expensive) archive scan — the ranking is
+    computed once and sliced. Regression for the bug where `top` was in the cache key and the
+    cache was cleared every miss, so picking 40 stocks forced a ~150s rescan that timed out the
+    dashboard (only the pre-warmed default of 20 ever loaded)."""
+    import datetime
+
+    from signal_engine.data.synthetic import generate_session
+    from signal_engine.storage.bars import ParquetBarStore
+
+    store = ParquetBarStore(str(tmp_path))
+    # Enough names that top=2 and top=8 produce different-length leaderboards.
+    names = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "LT",
+             "ITC", "WIPRO"]
+    for i, sym in enumerate(names):
+        df = generate_session(sym, datetime.date(2026, 6, 23), start_price=1000 + 50 * i,
+                              seed=7 + i, regime="trend_up")
+        store.save_symbol_year(sym, 2026, df)
+
+    monkeypatch.delenv("SE_API_TOKEN", raising=False)
+    monkeypatch.setenv("SE_DATA_SOURCE", "dhan")
+    monkeypatch.setenv("SE_PARQUET_DIR", str(tmp_path))
+
+    # Spy on the expensive scan so we can assert it runs at most once across top values.
+    import signal_engine.api.app as app_mod
+
+    calls = {"n": 0}
+    real_scan = app_mod._archive_leaderboard
+
+    def _counting_scan(cfg, top, news):
+        calls["n"] += 1
+        return real_scan(cfg, top, news)
+
+    monkeypatch.setattr(app_mod, "_archive_leaderboard", _counting_scan)
+    app_mod._LEADERBOARD_CACHE.clear()  # cold cache for a deterministic count
+
+    c = TestClient(create_app())
+    big = c.get("/api/leaderboard", params={"news": "false", "top": 8}).json()["entries"]
+    small = c.get("/api/leaderboard", params={"news": "false", "top": 2}).json()["entries"]
+    wide = c.get("/api/leaderboard", params={"news": "false", "top": 40}).json()["entries"]
+
+    # The scan ran ONCE despite three different `top` values (startup pre-warm may add one more).
+    assert calls["n"] <= 2, f"expected <=2 scans across 3 top values, got {calls['n']}"
+    # `top` truncates a single shared ranking: the small list is a prefix of the big one.
+    assert len(small) <= len(big)
+    assert [e["symbol"] for e in small] == [e["symbol"] for e in big][:len(small)]
+    # Asking for more than exists just returns everything (no error, no rescan blow-up).
+    assert len(wide) == len(big)
+
+
 # --- Dhan auth gate endpoints (offline; no Dhan network hit) ----------------
 
 def test_auth_status_transparent_for_non_dhan(client, monkeypatch):
