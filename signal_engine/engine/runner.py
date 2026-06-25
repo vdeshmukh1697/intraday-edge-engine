@@ -166,6 +166,11 @@ class EngineRunner:
         self.freshness = FreshnessGuard(max_staleness_seconds=30.0)
         self._errors = 0
         self._suppress_alerts = False  # True while replaying warm-start bars (no live alerts)
+        # Liveness heartbeat: the live loop is otherwise silent between trades, so a long quiet
+        # spell looks like a stall even when the feed is healthy. Log a proof-of-life line at most
+        # once per this many minutes of bar time (set in on_closed_bar).
+        self._heartbeat_every_min = 5
+        self._last_heartbeat_min = None
 
     def _alert(self, msg: str, level: str) -> None:
         if not self._suppress_alerts:
@@ -212,6 +217,22 @@ class EngineRunner:
         if self._pending_minute is not None and cur_minute > self._pending_minute:
             self._flush_pending()
         self._pending_minute = cur_minute
+
+        # Liveness heartbeat (live only): emit a proof-of-life line every few minutes so a quiet
+        # spell between trades is visibly "alive: still processing" rather than an apparent stall.
+        if self.enforce_freshness:
+            m = cur_minute
+            if self._last_heartbeat_min is None or (
+                (m - self._last_heartbeat_min).total_seconds() >= self._heartbeat_every_min * 60
+            ):
+                self._last_heartbeat_min = m
+                self.log.info(
+                    "heartbeat %s IST | bars=%d | open positions=%d | closed today=%d | "
+                    "watching=%d symbols",
+                    m.strftime("%H:%M"), self.summary.bars_processed,
+                    len(self.paper.open_positions), len(self.summary.closed),
+                    len(self._aggs) or len(self.cfg.settings.watchlist),
+                )
 
         hist = self._history.setdefault(bar.symbol, [])
         hist.append(bar)
@@ -364,6 +385,11 @@ class EngineRunner:
         if self.repo:
             self.repo.save_plan(plan)
         self.paper.open_from_plan(plan)
+        # Log entries to the live log (not just Telegram) so the session is auditable from the log.
+        if not self._suppress_alerts:
+            self.log.info("ENTRY %s %s @~%.2f SL %.2f T1 %.2f conf %.0f",
+                          plan.symbol, plan.direction.value, plan.entry, plan.stop_loss,
+                          plan.t1, plan.confidence)
         self._alert(self._format_alert(plan), level="signal")
 
     def _format_alert(self, plan: TradePlan) -> str:
@@ -401,6 +427,9 @@ class EngineRunner:
         if pos.entry_fill is not None:
             was_halted = self.breaker.halted
             self.breaker.record(pos.pnl_pct_net)
+            if not self._suppress_alerts:
+                self.log.info("EXIT  %s %s net %+.2f%% R %+.2f",
+                              pos.symbol, pos.exit_reason.value, pos.pnl_pct_net, pos.r_multiple)
             self._alert(
                 f"{pos.symbol} CLOSED {pos.exit_reason.value} "
                 f"net {pos.pnl_pct_net:+.2f}% R {pos.r_multiple:+.2f}",
