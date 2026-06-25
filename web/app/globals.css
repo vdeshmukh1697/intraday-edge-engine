@@ -201,6 +201,19 @@ button.secondary {
   border: 1px solid var(--border);
   color: var(--text);
 }
+button.ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+/* Watchlist: highlight names that have fired a paper trade today. */
+.active-row td {
+  background: rgba(63, 185, 80, 0.08);
+}
+.active-row td.mono {
+  border-left: 2px solid var(--green);
+}
 
 /* ---------- Cards ---------- */
 .card {

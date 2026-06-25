@@ -282,6 +282,27 @@ export function getPaperTrades(
   return getJSON(`/api/paper/trades${paperQuery(p)}`);
 }
 
+// --- Watchlist (the live paper-trading universe) ---------------------------
+
+export interface WatchlistRow {
+  symbol: string;
+  sector: string;
+  trades_today: number;
+  pnl_today: number;
+  trades_total: number;
+}
+
+export interface WatchlistResponse {
+  count: number;
+  date: string;
+  traded_today: number;
+  symbols: WatchlistRow[];
+}
+
+export function getWatchlist(): Promise<WatchlistResponse> {
+  return getJSON<WatchlistResponse>("/api/watchlist");
+}
+
 export function getLeaderboard(
   params: LeaderboardParams = {}
 ): Promise<LeaderboardResponse> {

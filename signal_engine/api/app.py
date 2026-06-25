@@ -80,6 +80,37 @@ def _archive_leaderboard(cfg, top: int, news: bool):
     return leaderboard_to_json(res, day)
 
 
+def _watchlist_sectors() -> dict:
+    """Parse the inline ``# sector / note`` comment for each watchlist symbol straight from
+    config/settings.yaml (the watchlist is a plain list of strings in the typed config, so the
+    human-readable sector tags only live in the YAML comments). Best-effort: returns {} on any
+    read error. e.g. `- "RELIANCE"   # energy / conglomerate` -> {"RELIANCE": "energy / ..."}."""
+    import re
+
+    from signal_engine.config import DEFAULT_CONFIG_DIR
+
+    out: dict = {}
+    try:
+        text = (DEFAULT_CONFIG_DIR / "settings.yaml").read_text()
+    except OSError:
+        return out
+    pat = re.compile(r'-\s*"([^"]+)"\s*#\s*(.+?)\s*$')
+    in_watchlist = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("watchlist:"):
+            in_watchlist = True
+            continue
+        if in_watchlist:
+            # The watchlist block ends at the next top-level (non-indented, non-comment) key.
+            if line and not line[0].isspace() and not stripped.startswith("#"):
+                break
+            m = pat.search(line)
+            if m:
+                out[m.group(1)] = m.group(2)
+    return out
+
+
 def _require_token(x_api_key: str = Header(default=None)) -> None:
     expected = os.getenv("SE_API_TOKEN")
     if expected and x_api_key != expected:
@@ -293,6 +324,47 @@ def create_app() -> FastAPI:
         report = pa.full_report(enriched)
         report["notional_per_trade"] = notional
         return report
+
+    @app.get("/api/watchlist", dependencies=[Depends(_require_token)])
+    def watchlist():
+        """The live paper-trading universe — exactly the symbols the live feed subscribes to and
+        paper-trades intraday (config/settings.yaml `watchlist`), with each name's sector tag and
+        today's activity (trades + net P&L) so the dashboard can show WHAT is being traded and
+        which names have fired today. Decision-support only; no orders."""
+        import pytz
+
+        syms = list(cfg.settings.watchlist)
+        sectors = _watchlist_sectors()
+        today = datetime.now(pytz.timezone("Asia/Kolkata")).date().isoformat()
+
+        # Per-symbol activity from the shared paper-trade DB (all-time + today).
+        try:
+            enriched, _ = _paper_enriched(None, None, None, None)
+        except Exception:  # noqa: BLE001 - never let a DB hiccup blank the watchlist
+            enriched = []
+        today_n: dict = {}
+        today_pnl: dict = {}
+        total_n: dict = {}
+        for t in enriched:
+            s = t.get("symbol")
+            total_n[s] = total_n.get(s, 0) + 1
+            if (t.get("entry_ts") or "")[:10] == today:
+                today_n[s] = today_n.get(s, 0) + 1
+                today_pnl[s] = today_pnl.get(s, 0.0) + float(t.get("net_pnl_abs") or 0.0)
+
+        rows = [{
+            "symbol": s,
+            "sector": sectors.get(s, ""),
+            "trades_today": today_n.get(s, 0),
+            "pnl_today": round(today_pnl.get(s, 0.0), 2),
+            "trades_total": total_n.get(s, 0),
+        } for s in syms]
+        return {
+            "count": len(syms),
+            "date": today,
+            "traded_today": sum(1 for r in rows if r["trades_today"] > 0),
+            "symbols": rows,
+        }
 
     @app.websocket("/ws/chart/{symbol}")
     async def ws_chart(ws: WebSocket, symbol: str, date_str: str = None, seed: int = 42,

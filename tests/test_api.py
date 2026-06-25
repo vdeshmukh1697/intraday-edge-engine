@@ -122,6 +122,20 @@ def test_leaderboard_uses_real_archive_when_present(tmp_path, monkeypatch):
     assert syms <= {"RELIANCE", "TCS", "INFY"}        # real names, never SYN####
 
 
+def test_watchlist_lists_symbols_with_sectors(client):
+    """The watchlist endpoint surfaces the configured paper-trading universe + sector tags."""
+    r = client.get("/api/watchlist")
+    assert r.status_code == 200
+    d = r.json()
+    assert d["count"] == len(d["symbols"]) > 0
+    first = d["symbols"][0]
+    assert set(first) >= {"symbol", "sector", "trades_today", "pnl_today", "trades_total"}
+    # Sector tags are parsed from the YAML comments for at least some known names.
+    by_sym = {row["symbol"]: row for row in d["symbols"]}
+    if "RELIANCE" in by_sym:
+        assert by_sym["RELIANCE"]["sector"]  # non-empty note
+
+
 def test_leaderboard_top_change_slices_without_rescan(tmp_path, monkeypatch):
     """Changing `top` must NOT trigger another (expensive) archive scan — the ranking is
     computed once and sliced. Regression for the bug where `top` was in the cache key and the
