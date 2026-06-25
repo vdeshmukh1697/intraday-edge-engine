@@ -543,6 +543,14 @@ class EngineRunner:
         # cold start needs ~35 min of live bars before it can signal at all.
         self._warm_start_today(symbols, ist)
 
+        # Warm-start REPLAYS today's already-happened trades to rebuild state — those are not live
+        # decisions and must NOT pre-spend the live session's risk budget. Reset the daily trade
+        # counter and the loss breaker so live trading starts clean. Without this, restarting after
+        # a busy/losing morning starts already capped or breaker-halted, so ZERO live entries fire
+        # and NO alerts go out (the symptom the client hit). On a normal 09:15 start warm-start is
+        # empty, so this is a harmless no-op there.
+        self._reset_live_risk_budget()
+
         self.enforce_freshness = True  # live feed: activate the stale-data fail-safe (§9.3)
         self.broker.subscribe(symbols)
         self.broker.set_tick_callback(self.on_tick)
@@ -565,6 +573,21 @@ class EngineRunner:
                 self._on_position_closed(pos, hist[-1])
         self.broker.disconnect()
         return self.summary
+
+    def _reset_live_risk_budget(self) -> None:
+        """Clear the live-session risk budget after warm-start. The day's replayed trades have
+        rebuilt indicator/position state but are NOT live decisions, so they must not pre-spend the
+        daily trade cap or pre-trip the loss breaker. Open positions stay tracked (state), only the
+        counters reset. Logs how many replayed trades were discounted."""
+        n_warm = self._daily_trades
+        self._daily_trades = 0
+        self.breaker = _LossBreaker(
+            daily_max_loss_pct=float(getattr(self.cfg.risk.risk, "daily_loss_pct", 0.0)),
+            max_consecutive_losses=int(getattr(self.cfg.risk.risk, "max_consecutive_losses", 0)),
+        )
+        if n_warm:
+            self.log.info("live risk budget reset after warm-start: %d replayed trade(s) don't "
+                          "count against the live cap/breaker (live trading starts clean)", n_warm)
 
     def _warm_start_today(self, symbols: List[str], ist) -> None:
         """Replay today's elapsed 1-min bars through the pipeline before going live.
