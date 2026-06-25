@@ -215,6 +215,48 @@ button.ghost {
   border-left: 2px solid var(--green);
 }
 
+/* Live-feed status strip. */
+.livebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+}
+.live-spacer { flex: 1; }
+.small { font-size: 11px; }
+.live-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+}
+.live-dot.live {
+  background: var(--green);
+  box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.6);
+  animation: live-pulse 2s infinite;
+}
+.live-dot.stale { background: var(--amber); }
+.live-dot.off { background: var(--text-faint); }
+@keyframes live-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.5); }
+  70% { box-shadow: 0 0 0 6px rgba(63, 185, 80, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(63, 185, 80, 0); }
+}
+.live-label { font-weight: 600; font-size: 13px; }
+.live-counts { color: var(--text-dim); font-size: 12px; }
+
+/* Inline direction / status tag. */
+.tag {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid var(--border);
+}
+.tag.pos { color: var(--green); border-color: var(--green-dim); }
+.tag.neg { color: var(--red); border-color: var(--red-dim); }
+
 /* ---------- Cards ---------- */
 .card {
   background: var(--bg-elev);

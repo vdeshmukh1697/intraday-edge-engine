@@ -209,6 +209,7 @@ export interface PaperTrade {
   confidence: number;
   stop_loss: number | null;
   target: number | null;
+  r_multiple: number | null;
   qty: number;
   gross_pnl_abs: number;
   costs_abs: number;
@@ -282,6 +283,52 @@ export function getPaperTrades(
   return getJSON(`/api/paper/trades${paperQuery(p)}`);
 }
 
+// --- Live open positions + feed status -------------------------------------
+
+export interface OpenPosition {
+  id: string;
+  symbol: string;
+  direction: Direction;
+  strategy: string;
+  confidence: number;
+  entry: number;
+  entry_ts: string;
+  stop_loss: number | null;
+  stop_pct: number | null;
+  target: number | null;
+  target_pct: number | null;
+  risk_reward: number | null;
+  expected_move_pct: number | null;
+  last_price: number | null;
+  unrealized_pnl_pct: number | null;
+  unrealized_pnl_abs: number | null;
+  updated_ts: string | null;
+}
+
+export function getOpenPositions(): Promise<{
+  notional_per_trade: number;
+  count: number;
+  positions: OpenPosition[];
+}> {
+  return getJSON("/api/paper/open");
+}
+
+export interface LiveStatus {
+  live: boolean;
+  updated_ts: string | null;
+  bar_ts?: string | null;
+  open_count: number;
+  closed_today: number;
+  bars_processed: number;
+  watching: number;
+  age_seconds: number | null;
+  stale: boolean;
+}
+
+export function getLiveStatus(): Promise<LiveStatus> {
+  return getJSON<LiveStatus>("/api/live/status");
+}
+
 // --- Watchlist (the live paper-trading universe) ---------------------------
 
 export interface WatchlistRow {
@@ -290,12 +337,14 @@ export interface WatchlistRow {
   trades_today: number;
   pnl_today: number;
   trades_total: number;
+  open_position: OpenPosition | null;
 }
 
 export interface WatchlistResponse {
   count: number;
   date: string;
   traded_today: number;
+  open_now: number;
   symbols: WatchlistRow[];
 }
 

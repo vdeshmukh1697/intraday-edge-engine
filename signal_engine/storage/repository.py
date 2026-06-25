@@ -26,6 +26,15 @@ def _default_run_id() -> str:
     return f"{int(time.time())}-{os.getpid()}"
 
 
+def _now_iso() -> str:
+    """Wall-clock IST timestamp for 'last updated' fields (the dashboard shows it to the user)."""
+    import datetime as _dt
+
+    import pytz
+
+    return _dt.datetime.now(pytz.timezone("Asia/Kolkata")).isoformat()
+
+
 def _path_from_url(db_url: str) -> str:
     """Accept 'sqlite:///path', 'sqlite:///:memory:' or a bare path."""
     if db_url.startswith("sqlite:///"):
@@ -68,6 +77,32 @@ class SignalRepository:
                 exit_reason TEXT, pnl_pct_net REAL, r_multiple REAL,
                 hold_minutes REAL, won INTEGER, confidence REAL,
                 stop_loss REAL, target REAL
+            )
+            """
+        )
+        # Currently-open paper positions: written on entry, updated each bar with the live mark
+        # (so the dashboard can show unrealized P&L), and deleted on close. Lets the read-only API
+        # surface live entries the moment they happen — closed trades alone never showed entries.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS open_positions (
+                id TEXT PRIMARY KEY,
+                symbol TEXT, strategy TEXT, direction TEXT,
+                entry_fill REAL, entry_ts TEXT,
+                stop_loss REAL, stop_pct REAL, target REAL, target_pct REAL,
+                confidence REAL, expected_move_pct REAL, risk_reward REAL,
+                last_price REAL, unrealized_pnl_pct REAL, updated_ts TEXT, run_id TEXT
+            )
+            """
+        )
+        # Single-row liveness beacon: the live loop upserts it each minute so the dashboard can
+        # show "feed alive, last update HH:MM" and an open/closed-today count without guessing.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS live_status (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                updated_ts TEXT, bar_ts TEXT, bars_processed INTEGER,
+                open_count INTEGER, closed_today INTEGER, watching INTEGER, run_id TEXT
             )
             """
         )
@@ -125,6 +160,73 @@ class SignalRepository:
             ),
         )
         self.conn.commit()
+
+    def save_open_position(self, pos: PaperPosition, last_price: Optional[float] = None,
+                           unrealized_pnl_pct: Optional[float] = None,
+                           run_id: Optional[str] = None) -> None:
+        """Upsert a currently-open position so the dashboard can show live entries + unrealized
+        P&L. Called on entry and again each bar with a fresh mark; ``remove_open_position`` on
+        close. ``last_price``/``unrealized_pnl_pct`` are best-effort (None until first mark)."""
+        plan = pos.plan
+        target = plan.t1 if plan.targets else None
+        target_pct = plan.target_pcts[0] if plan.target_pcts else None
+        cur = self.conn.cursor()
+        cur.execute(
+            """INSERT OR REPLACE INTO open_positions
+               (id, symbol, strategy, direction, entry_fill, entry_ts, stop_loss, stop_pct,
+                target, target_pct, confidence, expected_move_pct, risk_reward,
+                last_price, unrealized_pnl_pct, updated_ts, run_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                pos.id, pos.symbol, plan.strategy, pos.direction.value,
+                pos.entry_fill, pos.entry_ts.isoformat() if pos.entry_ts else None,
+                plan.stop_loss, plan.stop_pct, target, target_pct, plan.confidence,
+                plan.expected_move_pct, plan.risk_reward, last_price, unrealized_pnl_pct,
+                _now_iso(), run_id or self.run_id,
+            ),
+        )
+        self.conn.commit()
+
+    def remove_open_position(self, pos_id: str) -> None:
+        self.conn.execute("DELETE FROM open_positions WHERE id = ?", (pos_id,))
+        self.conn.commit()
+
+    def clear_open_positions(self) -> None:
+        """Drop all open-position rows (called at live warm-start: any rows left over are stale
+        from a prior process, and warm-start re-derives the true current set)."""
+        self.conn.execute("DELETE FROM open_positions")
+        self.conn.commit()
+
+    def fetch_open_positions(self) -> List[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT * FROM open_positions ORDER BY entry_ts")]
+
+    def delete_trades_for_day(self, day: str) -> int:
+        """Delete all paper_trades whose entry falls on ``day`` (YYYY-MM-DD). Used at live
+        warm-start so the latest run re-derives the whole session as the single source of truth —
+        prevents duplicate rows when a restart replays trades a prior process recorded live (the
+        live vs. historical bar timestamps differ slightly, so INSERT OR REPLACE can't dedupe)."""
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM paper_trades WHERE date(entry_ts) = ?", (day,))
+        self.conn.commit()
+        return cur.rowcount
+
+    def update_live_status(self, *, bar_ts: Optional[str], bars_processed: int,
+                           open_count: int, closed_today: int, watching: int,
+                           run_id: Optional[str] = None) -> None:
+        """Upsert the single live-status row (the dashboard's 'feed alive' beacon)."""
+        self.conn.execute(
+            """INSERT OR REPLACE INTO live_status
+               (id, updated_ts, bar_ts, bars_processed, open_count, closed_today, watching, run_id)
+               VALUES (1,?,?,?,?,?,?,?)""",
+            (_now_iso(), bar_ts, bars_processed, open_count, closed_today, watching,
+             run_id or self.run_id),
+        )
+        self.conn.commit()
+
+    def fetch_live_status(self) -> Optional[dict]:
+        row = self.conn.execute("SELECT * FROM live_status WHERE id = 1").fetchone()
+        return dict(row) if row else None
 
     def fetch_plans(self) -> List[dict]:
         return [dict(r) for r in self.conn.execute("SELECT * FROM trade_plans ORDER BY ts")]

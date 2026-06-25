@@ -122,6 +122,60 @@ def test_leaderboard_uses_real_archive_when_present(tmp_path, monkeypatch):
     assert syms <= {"RELIANCE", "TCS", "INFY"}        # real names, never SYN####
 
 
+def test_paper_open_and_live_status_endpoints(tmp_path, monkeypatch):
+    """Open positions surface entry/stop/target in ₹ + % and live unrealized P&L; the live-status
+    beacon reports freshness. These are what let the dashboard show entries the moment they fill."""
+    import datetime
+
+    from signal_engine.domain.enums import Direction, PositionStatus
+    from signal_engine.domain.models import PaperPosition, TradePlan
+    from signal_engine.storage.repository import SignalRepository
+
+    db = f"sqlite:///{tmp_path}/open.sqlite3"
+    plan = TradePlan(symbol="HONASA", ts=datetime.datetime(2026, 6, 25, 10, 0),
+                     direction=Direction.LONG, strategy="vwap_ema_adx", entry=540.0,
+                     stop_loss=535.0, stop_pct=0.93, targets=[550.0], target_pcts=[1.85],
+                     expected_move_pct=1.85, risk_reward=2.0, cost_to_break_even_pct=0.3,
+                     confidence=82.0, reasons=["above VWAP"])
+    pos = PaperPosition(id="HONASA-x-1", plan=plan, status=PositionStatus.OPEN, entry_fill=540.0,
+                        entry_ts=datetime.datetime(2026, 6, 25, 10, 1))
+    repo = SignalRepository(db)
+    repo.save_open_position(pos, last_price=546.0, unrealized_pnl_pct=1.11)
+    repo.update_live_status(bar_ts="2026-06-25T12:40", bars_processed=8000, open_count=1,
+                            closed_today=4, watching=40)
+    repo.close()
+
+    monkeypatch.delenv("SE_API_TOKEN", raising=False)
+    monkeypatch.setenv("SE_DB_URL", db)
+    c = TestClient(create_app())
+
+    op = c.get("/api/paper/open").json()
+    assert op["count"] == 1
+    p = op["positions"][0]
+    assert p["symbol"] == "HONASA" and p["entry"] == 540.0
+    assert p["stop_loss"] == 535.0 and p["stop_pct"] == 0.93   # ₹ + %
+    assert p["target"] == 550.0 and p["target_pct"] == 1.85    # ₹ + %
+    assert p["unrealized_pnl_pct"] == 1.11
+    assert p["unrealized_pnl_abs"] == round(100000.0 * 1.11 / 100.0, 2)  # ₹ at notional
+
+    st = c.get("/api/live/status").json()
+    assert st["live"] is True and st["open_count"] == 1 and st["closed_today"] == 4
+    assert st["stale"] is False
+
+    # Watchlist folds the open position into the symbol row.
+    wl = c.get("/api/watchlist").json()
+    honasa = next((r for r in wl["symbols"] if r["symbol"] == "HONASA"), None)
+    if honasa is not None:  # HONASA is in the default watchlist
+        assert honasa["open_position"] and honasa["open_position"]["target"] == 550.0
+        assert wl["open_now"] >= 1
+
+
+def test_live_status_empty_is_not_live(client):
+    """With no live_status row (feed never ran), the beacon reports not-live + stale, gracefully."""
+    st = client.get("/api/live/status").json()
+    assert st["live"] is False and st["stale"] is True
+
+
 def test_watchlist_lists_symbols_with_sectors(client):
     """The watchlist endpoint surfaces the configured paper-trading universe + sector tags."""
     r = client.get("/api/watchlist")

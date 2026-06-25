@@ -23,7 +23,7 @@ import pytz
 from signal_engine.alerts.base import Alerter
 from signal_engine.brokers.base import BrokerAdapter
 from signal_engine.config import AppConfig
-from signal_engine.domain.enums import ExitReason, MarketState
+from signal_engine.domain.enums import Direction, ExitReason, MarketState, PositionStatus
 from signal_engine.domain.models import Bar, PaperPosition, TradePlan
 from signal_engine.indicators import compute_features
 from signal_engine.ingestion.aggregator import BarAggregator
@@ -171,6 +171,7 @@ class EngineRunner:
         # once per this many minutes of bar time (set in on_closed_bar).
         self._heartbeat_every_min = 5
         self._last_heartbeat_min = None
+        self._last_status_min = None  # throttle the per-minute live_status DB upsert
 
     def _alert(self, msg: str, level: str) -> None:
         if not self._suppress_alerts:
@@ -218,10 +219,21 @@ class EngineRunner:
             self._flush_pending()
         self._pending_minute = cur_minute
 
-        # Liveness heartbeat (live only): emit a proof-of-life line every few minutes so a quiet
-        # spell between trades is visibly "alive: still processing" rather than an apparent stall.
+        # Liveness beacon (live only). Mirror a status row to the DB EVERY minute so the dashboard
+        # shows an always-fresh "feed alive, last update HH:MM"; log a proof-of-life LINE less
+        # often (every few minutes) to keep the log readable.
         if self.enforce_freshness:
             m = cur_minute
+            watching = len(self._aggs) or len(self.cfg.settings.watchlist)
+            if self.repo and m != self._last_status_min:
+                self._last_status_min = m
+                try:
+                    self.repo.update_live_status(
+                        bar_ts=m.isoformat(), bars_processed=self.summary.bars_processed,
+                        open_count=len(self.paper.open_positions),
+                        closed_today=len(self.summary.closed), watching=watching)
+                except Exception:  # noqa: BLE001 - status mirroring must never break the feed
+                    pass
             if self._last_heartbeat_min is None or (
                 (m - self._last_heartbeat_min).total_seconds() >= self._heartbeat_every_min * 60
             ):
@@ -230,8 +242,7 @@ class EngineRunner:
                     "heartbeat %s IST | bars=%d | open positions=%d | closed today=%d | "
                     "watching=%d symbols",
                     m.strftime("%H:%M"), self.summary.bars_processed,
-                    len(self.paper.open_positions), len(self.summary.closed),
-                    len(self._aggs) or len(self.cfg.settings.watchlist),
+                    len(self.paper.open_positions), len(self.summary.closed), watching,
                 )
 
         hist = self._history.setdefault(bar.symbol, [])
@@ -242,6 +253,10 @@ class EngineRunner:
         # 1) Manage existing positions against this bar.
         for pos in self.paper.on_bar(bar):
             self._on_position_closed(pos, bar)
+
+        # Mirror this symbol's currently-open position (if any) to the DB with a fresh mark, so
+        # the read-only dashboard can show the live entry + unrealized P&L the moment it fills.
+        self._sync_open_position(bar)
 
         # 2) Forced square-off window: flatten, no new entries.
         if self.session.is_square_off_time(bar.ts):
@@ -414,10 +429,32 @@ class EngineRunner:
             f"conf {plan.confidence:.0f}{qty_part}{reasons}"
         )
 
+    def _sync_open_position(self, bar: Bar) -> None:
+        """Upsert the OPEN position for ``bar.symbol`` (if one is filled) to the DB with the
+        current mark, so the dashboard sees live entries + unrealized P&L. No-op without a repo."""
+        if not self.repo:
+            return
+        pos = next((p for p in self.paper.open_positions
+                    if p.symbol == bar.symbol and p.status == PositionStatus.OPEN
+                    and p.entry_fill), None)
+        if pos is None:
+            return
+        # Gross unrealized % on the move (direction-aware); the realized net figure lands on close.
+        entry = pos.entry_fill
+        if pos.direction == Direction.LONG:
+            upnl = (bar.close - entry) / entry * 100.0 if entry else None
+        else:
+            upnl = (entry - bar.close) / entry * 100.0 if entry else None
+        try:
+            self.repo.save_open_position(pos, last_price=bar.close, unrealized_pnl_pct=upnl)
+        except Exception:  # noqa: BLE001 - dashboard mirroring must never break the feed
+            pass
+
     def _on_position_closed(self, pos: PaperPosition, bar: Bar) -> None:
         self.summary.closed.append(pos)
         if self.repo:
             self.repo.save_position(pos)
+            self.repo.remove_open_position(pos.id)  # no longer open — drop the live mirror row
         if pos.exit_reason == ExitReason.STOP:
             self._cooldown_until[pos.symbol] = bar.ts + timedelta(
                 minutes=self.cfg.risk.risk.per_symbol_cooldown_minutes
@@ -488,6 +525,18 @@ class EngineRunner:
             entry_band_bps=float(getattr(alerts, "entry_band_bps", 0) or 0),
         )
         self.broker.connect()
+
+        # Single source of truth for today: warm-start re-derives the WHOLE session from 09:15, so
+        # clear today's trades + any stale open-position rows first. Without this, a mid-session
+        # restart double-records trades a prior process logged live (live vs. historical bar
+        # timestamps differ, so the id-keyed REPLACE can't dedupe them) — inflating the tracker.
+        if self.repo:
+            today = datetime.now(ist).date().isoformat()
+            removed = self.repo.delete_trades_for_day(today)
+            self.repo.clear_open_positions()
+            if removed:
+                self.log.info("cleared %d existing trade(s) for %s; warm-start will re-derive "
+                              "them as the single source of truth", removed, today)
 
         # Warm-start: seed today's elapsed bars (09:15 -> now) so indicators are ready
         # immediately and any setups already missed this session are processed — otherwise a

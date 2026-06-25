@@ -325,6 +325,77 @@ def create_app() -> FastAPI:
         report["notional_per_trade"] = notional
         return report
 
+    def _open_positions_view():
+        """Current open paper positions with entry/stop/target in BOTH ₹ (price) and % (move),
+        plus live unrealized P&L (% and ₹ at the capital-agnostic reference notional)."""
+        from signal_engine.storage.repository import SignalRepository
+
+        notional = float(cfg.risk.costs.reference_trade_value)
+        repo = SignalRepository(cfg.env.db_url)
+        try:
+            rows = repo.fetch_open_positions()
+        finally:
+            repo.close()
+        out = []
+        for r in rows:
+            upnl_pct = r.get("unrealized_pnl_pct")
+            out.append({
+                "id": r["id"], "symbol": r["symbol"], "direction": r["direction"],
+                "strategy": r["strategy"], "confidence": r["confidence"],
+                "entry": r["entry_fill"], "entry_ts": r["entry_ts"],
+                "stop_loss": r["stop_loss"], "stop_pct": r["stop_pct"],
+                "target": r["target"], "target_pct": r["target_pct"],
+                "risk_reward": r.get("risk_reward"),
+                "expected_move_pct": r.get("expected_move_pct"),
+                "last_price": r.get("last_price"),
+                "unrealized_pnl_pct": upnl_pct,
+                "unrealized_pnl_abs": (round(notional * upnl_pct / 100.0, 2)
+                                       if upnl_pct is not None else None),
+                "updated_ts": r.get("updated_ts"),
+            })
+        return out, notional
+
+    @app.get("/api/paper/open", dependencies=[Depends(_require_token)])
+    def paper_open():
+        """Live open positions (entries currently in the market) — the piece the closed-trade
+        views could never show. Refreshed each bar by the live loop."""
+        positions, notional = _open_positions_view()
+        return {"notional_per_trade": notional, "count": len(positions),
+                "positions": positions}
+
+    @app.get("/api/live/status", dependencies=[Depends(_require_token)])
+    def live_status():
+        """Liveness beacon for the dashboard: when the live loop last processed a bar, how many
+        positions are open, how many trades closed today. `stale` is True if no update in >180s
+        (during market hours that means the feed is likely down)."""
+        from signal_engine.storage.repository import SignalRepository
+
+        repo = SignalRepository(cfg.env.db_url)
+        try:
+            st = repo.fetch_live_status()
+        finally:
+            repo.close()
+        if not st:
+            return {"live": False, "updated_ts": None, "open_count": 0, "closed_today": 0,
+                    "bars_processed": 0, "watching": len(cfg.settings.watchlist),
+                    "stale": True, "age_seconds": None}
+        age = None
+        try:
+            from datetime import datetime as _dt
+            updated = _dt.fromisoformat(st["updated_ts"])
+            now = _dt.now(updated.tzinfo)
+            age = (now - updated).total_seconds()
+        except Exception:  # noqa: BLE001
+            pass
+        return {
+            "live": True, "updated_ts": st["updated_ts"], "bar_ts": st.get("bar_ts"),
+            "open_count": st.get("open_count", 0), "closed_today": st.get("closed_today", 0),
+            "bars_processed": st.get("bars_processed", 0),
+            "watching": st.get("watching", len(cfg.settings.watchlist)),
+            "age_seconds": round(age) if age is not None else None,
+            "stale": (age is not None and age > 180),
+        }
+
     @app.get("/api/watchlist", dependencies=[Depends(_require_token)])
     def watchlist():
         """The live paper-trading universe — exactly the symbols the live feed subscribes to and
@@ -352,17 +423,27 @@ def create_app() -> FastAPI:
                 today_n[s] = today_n.get(s, 0) + 1
                 today_pnl[s] = today_pnl.get(s, 0.0) + float(t.get("net_pnl_abs") or 0.0)
 
+        # Live open position per symbol (entry/stop/target in ₹ + %), so the watchlist shows the
+        # active trade levels — not just "did it trade". Keyed by symbol (one open pos per name).
+        try:
+            open_positions, _ = _open_positions_view()
+        except Exception:  # noqa: BLE001
+            open_positions = []
+        open_by_sym = {p["symbol"]: p for p in open_positions}
+
         rows = [{
             "symbol": s,
             "sector": sectors.get(s, ""),
             "trades_today": today_n.get(s, 0),
             "pnl_today": round(today_pnl.get(s, 0.0), 2),
             "trades_total": total_n.get(s, 0),
+            "open_position": open_by_sym.get(s),  # null when flat; full levels when in a trade
         } for s in syms]
         return {
             "count": len(syms),
             "date": today,
             "traded_today": sum(1 for r in rows if r["trades_today"] > 0),
+            "open_now": len(open_by_sym),
             "symbols": rows,
         }
 

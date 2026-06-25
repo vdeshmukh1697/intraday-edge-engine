@@ -1,12 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import {
   getPaperAnalytics,
   getPaperTrades,
+  getOpenPositions,
+  getLiveStatus,
   type PaperReport,
   type PaperTrade,
   type GroupRow,
+  type OpenPosition,
+  type LiveStatus,
 } from "@/lib/api";
 
 const inr = (n: number) =>
@@ -14,28 +19,50 @@ const inr = (n: number) =>
 const pct = (n: number) => `${n.toFixed(2)}%`;
 const cls = (n: number) => (n > 0 ? "pos" : n < 0 ? "neg" : "");
 
+const REFRESH_MS = 15000; // auto-refresh so trades appear without a manual reload
+
 export default function PaperTradingPage() {
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
   const [symbol, setSymbol] = useState("");
   const [report, setReport] = useState<PaperReport | null>(null);
   const [trades, setTrades] = useState<PaperTrade[]>([]);
+  const [open, setOpen] = useState<OpenPosition[]>([]);
+  const [status, setStatus] = useState<LiveStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const [auto, setAuto] = useState(true);
 
-  const load = () => {
-    setLoading(true);
+  // Keep the latest filter values for the polling closure without re-arming the timer each keystroke.
+  const filterRef = useRef({ start, end, symbol });
+  filterRef.current = { start, end, symbol };
+
+  const load = useCallback((spinner = true) => {
+    if (spinner) setLoading(true);
     setError(null);
+    const { start, end, symbol } = filterRef.current;
     const f = { start: start || undefined, end: end || undefined, symbol: symbol || undefined };
-    Promise.all([getPaperAnalytics(f), getPaperTrades(f)])
-      .then(([r, t]) => {
+    Promise.all([getPaperAnalytics(f), getPaperTrades(f), getOpenPositions(), getLiveStatus()])
+      .then(([r, t, o, st]) => {
         setReport(r);
         setTrades(t.trades);
+        setOpen(o.positions);
+        setStatus(st);
+        setLastRefresh(new Date());
       })
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
-  };
-  useEffect(load, []); // initial load
+  }, []);
+
+  useEffect(() => { load(); }, [load]); // initial load
+
+  // Auto-refresh: poll every REFRESH_MS so new entries/exits show up live.
+  useEffect(() => {
+    if (!auto) return;
+    const id = setInterval(() => load(false), REFRESH_MS);
+    return () => clearInterval(id);
+  }, [auto, load]);
 
   if (error) return <div className="card">Could not load paper trades: {error}</div>;
   if (!report) return <div className="card">Loading…</div>;
@@ -54,12 +81,18 @@ export default function PaperTradingPage() {
         </p>
       </div>
 
+      <LiveBar status={status} lastRefresh={lastRefresh} auto={auto}
+        onToggle={() => setAuto((a) => !a)} onRefresh={() => load(true)} loading={loading} />
+
+      {/* Open positions — live entries currently in the market (the piece that was missing). */}
+      <OpenPositions positions={open} notional={report.notional_per_trade} />
+
       <div className="filters card">
         <label>From <input type="date" value={start} onChange={(e) => setStart(e.target.value)} /></label>
         <label>To <input type="date" value={end} onChange={(e) => setEnd(e.target.value)} /></label>
         <label>Symbol <input placeholder="e.g. RELIANCE" value={symbol}
           onChange={(e) => setSymbol(e.target.value.toUpperCase())} /></label>
-        <button onClick={load} disabled={loading}>{loading ? "…" : "Apply"}</button>
+        <button onClick={() => load(true)} disabled={loading}>{loading ? "…" : "Apply"}</button>
       </div>
 
       {!hasData ? (
@@ -133,6 +166,98 @@ function Card({ label, value, sub, tone }: { label: string; value: string; sub?:
       <div className="metric-label">{label}</div>
       <div className={`metric-value ${tone || ""}`}>{value}</div>
       {sub && <div className="metric-sub">{sub}</div>}
+    </div>
+  );
+}
+
+// Live-feed status strip: connection dot, last-update age, open/closed counts, auto-refresh toggle.
+function LiveBar({ status, lastRefresh, auto, onToggle, onRefresh, loading }: {
+  status: LiveStatus | null; lastRefresh: Date | null; auto: boolean;
+  onToggle: () => void; onRefresh: () => void; loading: boolean;
+}) {
+  const live = status?.live && !status?.stale;
+  const dot = live ? "live" : status?.live ? "stale" : "off";
+  const label = live
+    ? `Feed live — last bar ${status?.age_seconds != null ? `${status.age_seconds}s ago` : "just now"}`
+    : status?.live
+      ? `Feed stale — no update for ${status?.age_seconds ?? "?"}s (market closed or feed down)`
+      : "Feed offline — start the live session to record trades";
+  return (
+    <div className="card livebar">
+      <span className={`live-dot ${dot}`} />
+      <span className="live-label">{label}</span>
+      {status?.live && (
+        <span className="live-counts">
+          {status.open_count} open · {status.closed_today} closed today · {status.watching} watched
+        </span>
+      )}
+      <span className="live-spacer" />
+      {lastRefresh && (
+        <span className="muted small">refreshed {lastRefresh.toLocaleTimeString("en-IN")}</span>
+      )}
+      <label className="toggle small">
+        <input type="checkbox" checked={auto} onChange={onToggle} /> auto
+      </label>
+      <button className="ghost" onClick={onRefresh} disabled={loading}>
+        {loading ? "…" : "Refresh"}
+      </button>
+    </div>
+  );
+}
+
+// Live open positions table with entry/stop/target (₹ + %) and unrealized P&L.
+function OpenPositions({ positions, notional }: { positions: OpenPosition[]; notional: number }) {
+  if (positions.length === 0) {
+    return (
+      <div className="card empty small">
+        No open positions right now. Live entries appear here the instant they fill (auto-refreshing).
+      </div>
+    );
+  }
+  const totUpnl = positions.reduce((a, p) => a + (p.unrealized_pnl_abs || 0), 0);
+  return (
+    <div className="card">
+      <h3>
+        Open positions ({positions.length}){" "}
+        <span className={cls(totUpnl)}>· unrealized {inr(totUpnl)}</span>
+      </h3>
+      <table className="grid">
+        <thead>
+          <tr>
+            <th>Symbol</th><th>Dir</th><th className="num">Entry ₹</th>
+            <th className="num">LTP ₹</th><th className="num">Target</th>
+            <th className="num">Stop</th><th className="num">Unrealized</th><th>Since</th>
+          </tr>
+        </thead>
+        <tbody>
+          {positions.map((p) => (
+            <tr key={p.id} className="active-row">
+              <td className="mono">
+                <Link href={`/stock/${encodeURIComponent(p.symbol)}`}>{p.symbol}</Link>
+              </td>
+              <td><span className={`tag ${p.direction === "LONG" ? "pos" : "neg"}`}>{p.direction}</span></td>
+              <td className="num">{p.entry?.toFixed(2)}</td>
+              <td className="num">{p.last_price != null ? p.last_price.toFixed(2) : "—"}</td>
+              <td className="num">
+                {p.target != null ? p.target.toFixed(2) : "—"}
+                {p.target_pct != null && <span className="muted small"> ({p.target_pct >= 0 ? "+" : ""}{p.target_pct.toFixed(2)}%)</span>}
+              </td>
+              <td className="num">
+                {p.stop_loss != null ? p.stop_loss.toFixed(2) : "—"}
+                {p.stop_pct != null && <span className="muted small"> (-{p.stop_pct.toFixed(2)}%)</span>}
+              </td>
+              <td className={`num ${cls(p.unrealized_pnl_pct || 0)}`}>
+                {p.unrealized_pnl_pct != null ? `${p.unrealized_pnl_pct >= 0 ? "+" : ""}${p.unrealized_pnl_pct.toFixed(2)}%` : "—"}
+                {p.unrealized_pnl_abs != null && <span className="small"> ({inr(p.unrealized_pnl_abs)})</span>}
+              </td>
+              <td className="muted small">{p.entry_ts ? p.entry_ts.slice(11, 16) : "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="muted small" style={{ marginTop: 8 }}>
+        Unrealized P&amp;L is gross at the {inr(notional)} reference notional, marked to the latest bar.
+      </p>
     </div>
   );
 }
