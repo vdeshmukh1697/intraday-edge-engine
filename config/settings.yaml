@@ -78,17 +78,17 @@ strategy:
     ema_slow: 21
     rsi_period: 14
     adx_period: 14
-    # ACTIVITY MODE (2026-06-25, user choice): loosened so the live paper-trader fires more
-    # trades across the whole session — the selective config (conf 75 / adx 25 / rvol 1.3) only
-    # fired ~4/day, all in the morning, so the dashboard sat idle most of the day. These looser
-    # gates trade ~3-4x more often for visibility/evaluation. Quality-per-trade is lower and the
-    # base strategy still has NO proven edge (see docs/SIGNAL_RESEARCH_FINDINGS.md) — paper only.
-    # To revert to the higher-PF selective config: adx_min 25 / adx_hard_floor 20 / rvol 1.3 /
-    # confidence 75.
-    adx_min: 20            # gate: suppress trend trades below this (selective was 25)
-    adx_hard_floor: 15     # below this, no trade at all (selective was 20)
+    # BALANCED MODE (2026-06-25 EOD, post-analysis). Activity mode (conf 62 / adx 20 / rvol 1.2)
+    # fired 41 trades and lost −4.5% — confidence proved NON-PREDICTIVE (the 90-100 band beat the
+    # 75-89 band), so these gates are conservative DEFAULTS, explicitly NOT credited with selecting
+    # quality (see docs/EOD_ANALYSIS_2026-06-25.md). They fire fewer trades (less cost-wall bleed)
+    # while max_trades_per_day=15 still leaves visible activity. The base strategy has NO proven
+    # edge — paper only. The real loss-reduction lever (suppress counter-regime longs) is being
+    # built shadow/log-only, not gated live, until validated across many sessions.
+    adx_min: 25            # conservative default (unproven; log adx/rvol to test, don't credit)
+    adx_hard_floor: 20     # below this, no trade at all
     atr_period: 14
     rvol_lookback: 20
-    rvol_min: 1.2          # volume confirmation (selective was 1.3)
-    confidence_threshold: 62   # selective was 75
+    rvol_min: 1.3          # conservative default (unproven)
+    confidence_threshold: 75   # sane default ONLY — non-predictive, not a quality lever
     opening_range_minutes: 15

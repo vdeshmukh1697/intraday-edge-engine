@@ -23,7 +23,7 @@ import pytz
 from signal_engine.alerts.base import Alerter
 from signal_engine.brokers.base import BrokerAdapter
 from signal_engine.config import AppConfig
-from signal_engine.domain.enums import Direction, ExitReason, MarketState, PositionStatus
+from signal_engine.domain.enums import Direction, MarketState, PositionStatus
 from signal_engine.domain.models import Bar, PaperPosition, TradePlan
 from signal_engine.indicators import compute_features
 from signal_engine.ingestion.aggregator import BarAggregator
@@ -52,23 +52,34 @@ class _LossBreaker:
     daily_max_loss_pct: float
     max_consecutive_losses: int
     realized_pnl_pct: float = 0.0
+    peak_pnl_pct: float = 0.0
     consecutive_losses: int = 0
     _halted: bool = False
     halt_reason: str = ""
 
     def record(self, pnl_pct_net: Optional[float]) -> None:
-        """Fold one CLOSED trade's net PnL% into the session tally and update the run."""
+        """Fold one CLOSED trade's net PnL% into the session tally and update the run.
+
+        The daily cap trips on DRAWDOWN-FROM-PEAK, not cumulative realized PnL: a book that
+        ran to +3% then bled to -1% has drawn down 4% and should halt, even though the
+        cumulative figure (-1%) is well within a -4% cumulative cap. The old cumulative test
+        let a -7.8% intra-session trough pass because earlier wins netted it up (the 2026-06-25
+        failure). Drawdown-from-peak binds on the actual capital give-back.
+        """
         pnl = float(pnl_pct_net or 0.0)
         self.realized_pnl_pct += pnl
+        self.peak_pnl_pct = max(self.peak_pnl_pct, self.realized_pnl_pct)
+        drawdown = self.peak_pnl_pct - self.realized_pnl_pct
         if pnl < 0:
             self.consecutive_losses += 1
         else:
             self.consecutive_losses = 0
         if not self._halted:
-            if self.daily_max_loss_pct > 0 and self.realized_pnl_pct <= -abs(self.daily_max_loss_pct):
+            if self.daily_max_loss_pct > 0 and drawdown >= abs(self.daily_max_loss_pct):
                 self._halted = True
-                self.halt_reason = (f"daily loss limit hit "
-                                    f"({self.realized_pnl_pct:+.2f}% <= -{abs(self.daily_max_loss_pct):.2f}%)")
+                self.halt_reason = (f"daily drawdown limit hit "
+                                    f"(drawdown {drawdown:.2f}% from peak {self.peak_pnl_pct:+.2f}% "
+                                    f">= {abs(self.daily_max_loss_pct):.2f}%)")
             elif (self.max_consecutive_losses > 0
                   and self.consecutive_losses >= self.max_consecutive_losses):
                 self._halted = True
@@ -311,7 +322,48 @@ class EngineRunner:
         #    Actual opening is deferred to the ranked top-N flush when the minute advances.
         if not actionable:
             return
+        self._log_entry_context(plan, features)  # C3/B1: measurement only, never gates
         self._collect_candidate(plan)
+
+    def _log_entry_context(self, plan: TradePlan, features: dict) -> None:
+        """C3 + B1 (SHADOW, measurement only — never gates an entry). Log the at-entry regime
+        context for every candidate, plus whether a counter-regime LONG-block WOULD have fired.
+        This is the data the EOD analysis (2026-06-25) says we need to VALIDATE a regime filter
+        across many sessions before ever gating it live. Pure logging; zero behavior change."""
+        if self._suppress_alerts:
+            return  # don't emit during warm-start replay
+        try:
+            import math
+
+            def g(k):
+                v = features.get(k)
+                return None if v is None or (isinstance(v, float) and math.isnan(v)) else float(v)
+
+            close, vwap = g("close"), g("vwap")
+            rt, adx, rvol = g("regime_trend"), g("adx"), g("rvol")
+            orb_low, orb_high = g("orb_low"), g("orb_high")
+            side = "—" if (close is None or vwap is None) else ("above-VWAP" if close >= vwap else "below-VWAP")
+            # SHADOW counter-regime LONG flag: a fresh LONG while price is below VWAP, the short-window
+            # trend is down, AND price is below the opening range low = the "buying a fading gap" setup
+            # that bled today. LOG ONLY — we are NOT blocking it (needs multi-day validation first).
+            faded = (plan.direction == Direction.LONG and close is not None and vwap is not None
+                     and rt is not None and close < vwap and rt < 0
+                     and orb_low is not None and close < orb_low)
+            self.log.info(
+                "ENTRY-CTX %s %s | %s | regime_trend=%s adx=%s rvol=%s | close=%s vwap=%s "
+                "orb=[%s,%s]%s",
+                plan.symbol, plan.direction.value, side,
+                f"{rt:+.3f}" if rt is not None else "NA",
+                f"{adx:.1f}" if adx is not None else "NA",
+                f"{rvol:.2f}" if rvol is not None else "NA",
+                f"{close:.2f}" if close is not None else "NA",
+                f"{vwap:.2f}" if vwap is not None else "NA",
+                f"{orb_low:.2f}" if orb_low is not None else "NA",
+                f"{orb_high:.2f}" if orb_high is not None else "NA",
+                "  [SHADOW: faded-gap LONG — would block if filter were live]" if faded else "",
+            )
+        except Exception:  # noqa: BLE001 - measurement must never break the feed
+            pass
 
     # -- ranking / candidate collection (D1b) -------------------------------
     def _collect_candidate(self, plan: TradePlan) -> None:
@@ -455,7 +507,10 @@ class EngineRunner:
         if self.repo:
             self.repo.save_position(pos)
             self.repo.remove_open_position(pos.id)  # no longer open — drop the live mirror row
-        if pos.exit_reason == ExitReason.STOP:
+        # Arm the per-symbol cooldown after ANY losing exit (not just a hard STOP). Previously
+        # only STOP armed it, so a TIME_STOP loss let the same name re-enter the very next bar
+        # (e.g. SWIGGY on 2026-06-25) and double the cost bleed. A loss is a loss.
+        if pos.entry_fill is not None and (pos.pnl_pct_net or 0.0) < 0:
             self._cooldown_until[pos.symbol] = bar.ts + timedelta(
                 minutes=self.cfg.risk.risk.per_symbol_cooldown_minutes
             )

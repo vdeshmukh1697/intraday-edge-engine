@@ -193,9 +193,22 @@ def test_breaker_halts_on_daily_loss():
     b = _LossBreaker(daily_max_loss_pct=2.0, max_consecutive_losses=99)
     b.record(-1.0)
     assert not b.halted
-    b.record(-1.5)            # cumulative -2.5% <= -2.0% -> halt
+    b.record(-1.5)            # drawdown 2.5% from a 0 peak >= 2.0% -> halt
     assert b.halted
-    assert "daily loss limit" in b.halt_reason
+    assert "drawdown" in b.halt_reason
+
+
+def test_breaker_trips_on_drawdown_from_peak():
+    """The 2026-06-25 fix: a book that ran up then gave it back must halt on the give-back,
+    even though cumulative realized PnL is still positive/small. The OLD cumulative test let a
+    deep intra-session trough pass because earlier wins netted it up."""
+    b = _LossBreaker(daily_max_loss_pct=4.0, max_consecutive_losses=99)
+    b.record(+3.0)           # peak +3%
+    b.record(-1.5)           # realized +1.5%, drawdown 1.5% from peak -> not yet
+    assert not b.halted
+    b.record(-2.6)           # realized -1.1%, drawdown 4.1% from peak +3% -> halt
+    assert b.halted          # note: cumulative realized is only -1.1%, far inside a -4% cumulative cap
+    assert "drawdown" in b.halt_reason
 
 
 def test_breaker_halts_on_consecutive_losses():
