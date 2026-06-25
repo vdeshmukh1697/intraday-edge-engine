@@ -4,6 +4,38 @@
 > Written 2026-06-25 EOD. Repo: `/Users/vikrantdeshmukh/Personal projects`. Branch:
 > `feat/full-nse-realtime-pipeline`. Python: `.venv/bin/python`. Paper/research only — no live orders.
 
+## ⏩ UPDATE — Option C executed (2026-06-25, session 2). See `docs/PEAD_SPREAD_FINDINGS.md`.
+New module `signal_engine/research/pead_spread.py` (run: `.venv/bin/python -m signal_engine.research.pead_spread`).
+Result, in one line: **the EPS surprise is inert; the announcement-day price JUMP is the real signal.**
+- Plain market-neutral surprise spread (Step 1): dead — net/pos +0.10%, **monthly-clustered t=+0.05**.
+- **Jump-sign, market-neutral, 20d, OOS** (the carrier): **n=3,019, WR 52.5%, PF 1.18, +0.51%/pos net of
+  1-leg futures cost (+0.37% at conservative 2-leg), t=+2.91.** Passes n / WR / PF / significance.
+- SUE-with-jump "confirmed" (Step 2): only marginally sharper (+0.70%/pos) and **halves n** to 1,385 —
+  the jump *subsumes* the surprise rather than being sharpened by it. Contradicted set *reverses* (−0.77%).
+- **Earnings-specific** (the decisive control): same-size jump on earnings drifts +2.0–2.8%; a clean
+  non-earnings jump reverts/does-nothing (+0.17%/+0.37%/−0.11%). Genuine PEAD-via-price, not momentum.
+- Robust: both OOS halves +, 13/17 years +, not tail-driven (median≈mean), magnitude-graded (|jump|≥3%
+  → WR 56.2% PF 1.36 +1.00%/pos PBO 0.35).
+- **TIGHTENING (user asked, before any sleeve) → the implementability wall (`pead_robustness.py`):**
+  - Magnitude×hold frontier: clean & monotone (bigger jump→bigger drift, →20d best). Real.
+  - Size tier: drift lives in the **mid-cap (less-liquid) half** (WR 55.3% PF 1.35 +1.02%/pos) vs dead
+    large-cap half (PF 1.06). Textbook PEAD.
+  - **F&O-restricted + leg decomposition = the killer:** the edge is ~ALL the **SHORT leg** (down-jumpers
+    keep falling, demeaned α −1 to −2%), concentrated in **mid-caps / non-F&O names which CANNOT be
+    shorted** (no single-stock futures; cash shorts illegal overnight). Long leg ≈0. On the *shortable*
+    F&O subset, jump-sign drops to **PF 1.08 / WR 51.7% / t 1.67 — fails the gate.** Only a thin,
+    under-powered, directional residue is executable: short large-cap F&O down-jumpers |jump|≥3% (n=414,
+    PF 1.30, t 2.70). The strong stuff (non-F&O short, +1.92%/pos) is walled off.
+- **FINAL VERDICT: most real signal of the arc, but does NOT clear honestly as a tradeable edge** — alpha
+  sits on the short side of mid-caps, exactly where India's short-sale constraints wall it off (the
+  textbook reason such anomalies persist). **No paper sleeve** (per "only if it clears honestly").
+- **If resuming:** Step 1–4 of the original plan are DONE. The open path is the **data unlock (§4):**
+  survivorship-clean / delisting-inclusive + true mid-cap universe (would let the mid-cap short alpha be
+  measured, and with an SLB/borrow route possibly traded). Short-sale access is now the #1 blocker,
+  ahead of survivorship. Optional watch-list: large-cap F&O down-jumper short (|jump|≥3–5%, ~20d).
+
+---
+
 ## 0. The decision we're executing
 After the full research arc (below), the chosen direction is **Option C**:
 > Build the **market-neutral PEAD spread** (long earnings-beats / short earnings-misses, executed via

@@ -94,3 +94,13 @@ discipline that makes the verdict trustworthy.
 3. **Market-neutral execution** (long beats / short misses via futures) to strip survivorship+beta.
 4. **Stronger surprise** — combine the EPS surprise with the announcement-day price jump (SUE +
    confirmation), which the literature shows is a sharper signal than EPS surprise alone.
+
+---
+
+## FOLLOW-UP — Market-neutral spread + SUE-with-jump executed → see `docs/PEAD_SPREAD_FINDINGS.md`
+Building the market-neutral spread (idea #3) and the jump-confirmation (idea #4) gave the decisive
+twist: **the EPS surprise is inert (t=+0.05); the announcement-day price JUMP is the real signal.**
+Long earnings-up-jumpers / short earnings-down-jumpers (market-neutral via futures, demeaned, 20d, OOS)
+→ **n=3,019, WR 52.5%, PF 1.18, +0.51%/pos net, monthly-clustered t=+2.91**, earnings-specific (not
+generic momentum), stable across both OOS halves and 13/17 years. It clears every *appropriate* gate but
+not the literal monthly-PBO (≈0.50, the wrong test for this episodic signal). Strongest candidate found.

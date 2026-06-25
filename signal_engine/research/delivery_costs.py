@@ -26,7 +26,7 @@ grows, so we expose the reference value explicitly and report the % at it.
 NOTE on shorting: India does NOT allow carrying a short cash-equity position overnight, so a
 "delivery short" is not implementable in cash. A long-short swing strategy's short leg must
 be expressed in single-stock / index FUTURES or OPTIONS, which carry their OWN cost & roll
-structure (futures: much lower STT 0.02% sell-side on notional, but margin + roll/financing).
+structure (futures: STT 0.05% sell-side on notional from FY2026-27, but margin + roll/financing).
 ``futures_short_leg_pct`` gives a rough, deliberately conservative proxy round-trip cost for
 flagging long-short results; it is NOT a substitute for a real futures-cost study.
 """
@@ -116,11 +116,14 @@ def futures_short_leg_pct(reference_notional: float = DEFAULT_REFERENCE_NOTIONAL
                           roll_legs_per_hold: float = 1.0) -> float:
     """Rough, deliberately conservative round-trip cost (fraction) for a FUTURES short leg
     used to implement the short side of a long-short swing strategy overnight (cash shorts
-    are illegal overnight in India). Models STT 0.02% sell-side on notional, exchange txn,
+    are illegal overnight in India). Models STT 0.05% sell-side on notional, exchange txn,
     GST, plus ``roll_legs_per_hold`` extra round-trips of brokerage+txn for monthly rolls.
     This is a FLAG-AND-PENALIZE proxy, not a real futures-cost study.
     """
-    stt = 0.0002  # 0.02% sell side on futures notional
+    # STT raised from 0.02% -> 0.05% sell-side on equity-futures notional in the FY2026-27
+    # budget (SEBI/Finance Ministry), effective 1 Apr 2026 — see finnovate.in budget-2026
+    # STT-hike explainer. ~3 bps higher round-trip vs the old 0.02% rate.
+    stt = 0.0005  # 0.05% sell side on futures notional (FY2026-27, eff. 2026-04-01)
     txn = 2.0 * 0.0000173  # NSE futures exchange txn ~0.00173% per side (lower than cash)
     gst = GST_PCT * txn
     brokerage = (2.0 + 2.0 * roll_legs_per_hold) * (DEFAULT_BROKERAGE_FLAT / reference_notional)
