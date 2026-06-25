@@ -294,6 +294,10 @@ button.ghost {
   pointer-events: none;
   white-space: normal;
   text-align: left;
+  /* Never inherit uppercasing/spacing from a parent label — definitions must read as sentences. */
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 400;
 }
 .infotip:hover .infotip-pop,
 .infotip:focus .infotip-pop {
