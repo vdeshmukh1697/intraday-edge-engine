@@ -51,3 +51,46 @@ extension.
 
 **Status: the most promising lead found so far — real signal, beats cost via futures, blocked only
 by sample size.** Paper/research only.
+
+---
+
+## UPDATE — Properly-powered (16y panel) + the survivorship correction (decisive)
+
+Extended the price panel to 2010–2026 (`long_panel.py`, 738k rows, 3,053 OOS post-earnings entries).
+
+**Naive long-only result looked like a breakthrough:** beat ≥+5%, 20d, net of futures cost →
+**PF 1.62, +1.75%/trade, WR 54.7%, n=1,213, OOS** — strong and consistent across +5%/+10%
+thresholds and both cost models. *But it failed the survivorship test.*
+
+**Survivorship-robust check (demean each trade by that day's universe-average return):**
+| bucket | alpha vs universe (20d) |
+|---|---|
+| beat ≥+5% | **−0.17%** |
+| beat ≥+10% | −0.35% |
+| miss ≤−5% | −0.67% |
+| miss ≤−10% | −0.75% |
+
+→ **The long-only beat leg is flat-to-negative vs the universe** — the +1.75% was the 230 *survivor*
+names all drifting up (even misses drifted +0.5% gross). The naive long-only PEAD return is a
+**survivorship mirage**.
+
+**What's actually real:** a consistent, monotonic **beat-vs-miss spread of ~+0.4–0.5% over 20d**
+(beats outperform misses) — directionally correct PEAD. But it requires a **market-neutral**
+(long-beats / short-misses via futures) implementation, ~2-leg cost (~26 bps), leaving net
+~+0.15–0.25%/20d — thin, and it does not clear the strict PBO gate (episodic event returns are
+month-to-month noisy).
+
+### Honest verdict (final for now)
+PEAD is **directionally real** (the cleanest signal found — the sign is right and the spread is
+consistent across thresholds and 16 years), but on this **liquid, survivor-biased** universe it is
+**not a clean long-only edge**, and the market-neutral spread is too thin to confidently clear
+costs + robustness. The rigorous demeaning caught what the naive backtest missed — exactly the
+discipline that makes the verdict trustworthy.
+
+### To make PEAD a real, trustable edge would require
+1. **Survivorship-clean (delisting-inclusive) data** — the single biggest blocker; every long-only
+   number here is optimistic until then (a CMIE Prowess / proper point-in-time universe).
+2. **Mid-cap universe** — PEAD is larger where attention is scarcer (but slippage is larger too).
+3. **Market-neutral execution** (long beats / short misses via futures) to strip survivorship+beta.
+4. **Stronger surprise** — combine the EPS surprise with the announcement-day price jump (SUE +
+   confirmation), which the literature shows is a sharper signal than EPS surprise alone.
