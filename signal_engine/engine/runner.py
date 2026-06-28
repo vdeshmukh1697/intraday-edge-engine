@@ -149,6 +149,7 @@ class EngineRunner:
         self._history: Dict[str, List[Bar]] = {}
         self._cooldown_until: Dict[str, object] = {}
         self._daily_trades = 0
+        self._daily_per_symbol: Dict[str, int] = {}  # entries opened per symbol today (freq cap)
         self.summary = RunSummary()
 
         # M1: session capital-preservation breaker. daily_max_loss_pct reuses the existing
@@ -401,6 +402,11 @@ class EngineRunner:
         # Highest rank first; deterministic tie-break by (symbol, direction).
         pending.sort(key=lambda item: (-item[0], item[1]))
         n = self._top_n()
+        # Per-minute burst cap (paper-analysis #1) — 0 disables; otherwise tighten this minute's
+        # opens below top_n to break up correlated same-minute baskets.
+        max_per_min = int(getattr(self.cfg.risk.risk, "max_entries_per_minute", 0) or 0)
+        if max_per_min > 0:
+            n = min(n, max_per_min)
         opened = 0
         for _rank, _tb, plan in pending:
             if opened >= n:
@@ -428,6 +434,10 @@ class EngineRunner:
             return False
         if len(self.paper.open_positions) >= self.cfg.risk.risk.max_concurrent_positions:
             return False
+        # Per-symbol/day frequency cap (paper-analysis #1) — 0 disables (only 1-open + cooldown).
+        max_sym = int(getattr(self.cfg.risk.risk, "max_entries_per_symbol_per_day", 0) or 0)
+        if max_sym > 0 and self._daily_per_symbol.get(symbol, 0) >= max_sym:
+            return False
         return True
 
     def _symbol_free(self, symbol: str, ts) -> bool:
@@ -449,6 +459,7 @@ class EngineRunner:
     def _surface(self, plan: TradePlan) -> None:
         self.summary.picks.append(plan)
         self._daily_trades += 1
+        self._daily_per_symbol[plan.symbol] = self._daily_per_symbol.get(plan.symbol, 0) + 1
         if self.repo:
             self.repo.save_plan(plan)
         self.paper.open_from_plan(plan)
@@ -636,6 +647,7 @@ class EngineRunner:
         counters reset. Logs how many replayed trades were discounted."""
         n_warm = self._daily_trades
         self._daily_trades = 0
+        self._daily_per_symbol = {}  # warm-start replays don't count against the per-symbol cap
         self.breaker = _LossBreaker(
             daily_max_loss_pct=float(getattr(self.cfg.risk.risk, "daily_loss_pct", 0.0)),
             max_consecutive_losses=int(getattr(self.cfg.risk.risk, "max_consecutive_losses", 0)),

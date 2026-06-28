@@ -40,11 +40,22 @@ class StrategyConfig(BaseModel):
     params: Dict[str, float] = Field(default_factory=dict)
 
 
+class LiveUniverseConfig(BaseModel):
+    """Universe gate (paper-analysis #3, 2026-06-26) — DEFAULT OFF. When ``restrict_to_allowlist``
+    is true AND ``allowlist`` is non-empty, the live feed trades only allowlisted (large-cap/liquid)
+    names, dropping the smid/new-IPO cohort that bled in the first sessions. Pre-register the
+    allowlist BEFORE enabling so it's a structural gate, not a fit to past losses."""
+
+    restrict_to_allowlist: bool = False
+    allowlist: List[str] = Field(default_factory=list)
+
+
 class Settings(BaseModel):
     market: MarketConfig = Field(default_factory=MarketConfig)
     watchlist: List[str] = Field(default_factory=list)
     ingestion: IngestionConfig = Field(default_factory=IngestionConfig)
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
+    live_universe: LiveUniverseConfig = Field(default_factory=LiveUniverseConfig)
 
 
 # --------------------------------------------------------------------------- #
@@ -63,6 +74,12 @@ class RiskParams(BaseModel):
     max_trades_per_day: int = 6
     max_concurrent_positions: int = 3
     per_symbol_cooldown_minutes: int = 15
+    # Frequency caps (paper-analysis #1, 2026-06-26) — DEFAULT 0 == OFF (no behavior change).
+    # Enable post-validation to cut the deterministic ~8bps/trade cost tax + the correlated
+    # same-minute re-bets (effective independent bets were ~6-10 of 48). See
+    # docs/PAPER_TRADING_ANALYSIS_2026-06.md.
+    max_entries_per_minute: int = 0          # cap NEW entries opened in one event-minute (0 => top_n governs)
+    max_entries_per_symbol_per_day: int = 0  # cap entries per symbol per day (0 => only 1-open + cooldown apply)
 
     # Targets / exits (PLAN §5.2) — structure-aware exit construction.
     hard_floor_pct: float = 0.20          # safety stop floor, decoupled from target sizing
@@ -263,3 +280,21 @@ def load_config(config_dir: Optional[Path] = None) -> AppConfig:
     risk = RiskConfig(**_read_yaml(cdir / "risk.yaml"))
     env = EnvConfig.from_env()
     return AppConfig(settings=settings, risk=risk, env=env)
+
+
+def resolve_live_watchlist(cfg: AppConfig) -> List[str]:
+    """The symbols the live feed should trade today, after the optional universe gate.
+
+    DEFAULT: the full ``settings.watchlist`` (no change). When ``settings.live_universe`` is
+    enabled with a non-empty allowlist, restrict to allowlisted names (order preserved). Never
+    returns empty just because the gate is on with a bad allowlist — if the intersection is
+    empty it falls back to the full watchlist (so a mis-set allowlist can't silently halt the day).
+    """
+    wl = list(cfg.settings.watchlist)
+    lu = getattr(cfg.settings, "live_universe", None)
+    if lu is not None and lu.restrict_to_allowlist and lu.allowlist:
+        allow = {s.upper() for s in lu.allowlist}
+        filtered = [s for s in wl if s.upper() in allow]
+        if filtered:
+            return filtered
+    return wl

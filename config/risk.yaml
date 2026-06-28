@@ -62,6 +62,13 @@ risk:
   max_concurrent_positions: 4    # was 8 — break up correlated single-minute baskets (robust lever)
   per_symbol_cooldown_minutes: 10  # arms on ANY losing exit now (code), not just STOP
 
+  # Frequency caps (paper-analysis #1, 2026-06-26) — DEFAULT 0 == OFF (today's session unaffected).
+  # First 48 trades were a GROSS coin-flip turned into a net loss almost entirely by a deterministic
+  # ~8bps/trade cost tax, amplified by correlated same-minute baskets (effective independent bets
+  # ~6-10 of 48). After validating on a few more sessions, enable e.g. per-minute 2 / per-symbol 2:
+  max_entries_per_minute: 0          # 0 => off (top_n / max_concurrent govern); try 2 to break baskets
+  max_entries_per_symbol_per_day: 0  # 0 => off (only one-open + cooldown apply); try 2 to stop re-bets
+
 costs:
   # Dhan intraday equity (PLAN §5.4). VERIFY against your contract notes (PROGRESS Q2).
   brokerage_flat: 20.0          # rupees per executed order

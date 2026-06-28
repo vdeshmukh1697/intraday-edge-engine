@@ -16,7 +16,7 @@ from __future__ import annotations
 import argparse
 from datetime import date, datetime
 
-from signal_engine.config import load_config
+from signal_engine.config import load_config, resolve_live_watchlist
 from signal_engine.factory import build_alerter, build_broker
 from signal_engine.market.calendar import NSECalendar
 from signal_engine.market.session import MarketSession
@@ -424,7 +424,7 @@ def cmd_live(args) -> int:
         print(f"{now.date()} is not an NSE trading day (weekend/holiday). Nothing to stream.")
         return 2
 
-    symbols = args.symbols.split(",") if args.symbols else cfg.settings.watchlist
+    symbols = args.symbols.split(",") if args.symbols else resolve_live_watchlist(cfg)
     broker = build_broker(cfg, day=now.date())  # loads Dhan instrument master + token
     strategy = create_strategy(cfg.settings.strategy.active, cfg.settings.strategy.params)
     session = MarketSession(cfg.settings.market, cal)

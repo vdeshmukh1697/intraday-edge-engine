@@ -9,7 +9,7 @@ from datetime import date, time
 
 from signal_engine.alerts.console import ConsoleAlerter
 from signal_engine.brokers.mock import MockBroker
-from signal_engine.config import load_config
+from signal_engine.config import load_config, resolve_live_watchlist
 from signal_engine.domain.enums import PositionStatus
 from signal_engine.engine.runner import EngineRunner
 from signal_engine.market.calendar import NSECalendar
@@ -264,6 +264,56 @@ def test_flush_surfaces_only_top_n():
     # The two highest-ranked (largest t1_pct) win: DDD (t1 5.0) then CCC (t1 4.0).
     surfaced = {p.symbol for p in runner.summary.picks}
     assert surfaced == {"DDD", "CCC"}
+
+
+def test_max_entries_per_minute_caps_flush():
+    """Frequency cap (paper-analysis #1): with a per-minute cap below top_n, only that many
+    open in one flush — breaking up correlated same-minute baskets. Default 0 leaves top_n in charge."""
+    cfg, runner, _ = _run()
+    runner._reset_live_risk_budget()
+    runner.summary.picks.clear()
+    cfg.risk.alerts.top_n_alerts = 3
+    cfg.risk.risk.max_entries_per_minute = 1   # tighter than top_n
+    for i, sym in enumerate(["AAA", "BBB", "CCC", "DDD"]):
+        runner._collect_candidate(_mk_plan(symbol=sym, t1_pct=2.0 + i, stop_pct=1.0, conf=70))
+    runner._flush_pending()
+    assert len(runner.summary.picks) == 1               # capped at 1, not top_n (3)
+    assert {p.symbol for p in runner.summary.picks} == {"DDD"}  # highest-ranked wins
+
+
+def test_max_entries_per_symbol_per_day_gate():
+    """Frequency cap (paper-analysis #1): a per-symbol/day cap blocks re-betting the same name
+    once its daily count is reached; default 0 disables it (only one-open + cooldown apply)."""
+    from datetime import datetime
+    cfg, runner, _ = _run()
+    runner._reset_live_risk_budget()
+    ts = _IST.localize(datetime(2025, 6, 23, 10, 30))
+    # Default OFF (cap=0): a name with many prior entries still passes the gate.
+    runner._daily_per_symbol = {"AAA": 99}
+    assert runner._gate_ok("AAA", ts) is True
+    # Enable cap=2: AAA already at 2 is blocked; a fresh name passes.
+    cfg.risk.risk.max_entries_per_symbol_per_day = 2
+    runner._daily_per_symbol = {"AAA": 2}
+    assert runner._gate_ok("AAA", ts) is False
+    assert runner._gate_ok("BBB", ts) is True
+    # _surface increments the per-symbol counter.
+    runner._daily_per_symbol = {}
+    runner.summary.picks.clear()
+    runner._surface(_mk_plan(symbol="CCC", t1_pct=2.0, stop_pct=1.0, conf=70))
+    assert runner._daily_per_symbol.get("CCC") == 1
+
+
+def test_resolve_live_watchlist_gate():
+    """Universe gate (paper-analysis #3): default returns the full watchlist (no change); when
+    enabled it restricts to the allowlist; an empty allowlist safely falls back to the full list."""
+    cfg = load_config()
+    full = list(cfg.settings.watchlist)
+    assert resolve_live_watchlist(cfg) == full                 # default OFF -> unchanged
+    cfg.settings.live_universe.restrict_to_allowlist = True
+    cfg.settings.live_universe.allowlist = ["RELIANCE", "TCS", "ZZZ_NOT_IN_LIST"]
+    assert resolve_live_watchlist(cfg) == [s for s in full if s in {"RELIANCE", "TCS"}]
+    cfg.settings.live_universe.allowlist = []                   # enabled but empty
+    assert resolve_live_watchlist(cfg) == full                 # safe fallback, never halts the day
 
 
 def test_ranking_tiebreak_is_deterministic():

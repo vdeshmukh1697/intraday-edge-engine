@@ -26,7 +26,7 @@ from typing import Optional
 
 import pytz
 
-from signal_engine.config import AppConfig, load_config, refresh_runtime_env
+from signal_engine.config import AppConfig, load_config, refresh_runtime_env, resolve_live_watchlist
 from signal_engine.market.calendar import NSECalendar
 from signal_engine.obs.logging_setup import get_logger
 from signal_engine.universe.nse import NSEUniverseProvider
@@ -112,7 +112,10 @@ def live_job(cfg: Optional[AppConfig] = None) -> None:
         # Persist every live paper trade so the Paper-Trading tracker accumulates real history.
         repo = SignalRepository(cfg.env.db_url)
         runner = EngineRunner(cfg, broker, strategy, session, build_alerter(cfg), repo=repo)
-        symbols = cfg.settings.watchlist
+        symbols = resolve_live_watchlist(cfg)  # optional large-cap/liquid gate (default: full list)
+        if len(symbols) != len(cfg.settings.watchlist):
+            _log.info("live_job: universe gate ON — trading %d of %d watchlist names",
+                      len(symbols), len(cfg.settings.watchlist))
         _log.info("live_job: streaming Dhan feed for %d symbols until close", len(symbols))
         summary = runner.live(symbols)
         _log.info("live_job done: %d bars, %d picks, %d paper trades (persisted)",
