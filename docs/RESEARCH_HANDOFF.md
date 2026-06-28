@@ -26,13 +26,21 @@ Result, in one line: **the EPS surprise is inert; the announcement-day price JUM
     F&O subset, jump-sign drops to **PF 1.08 / WR 51.7% / t 1.67 — fails the gate.** Only a thin,
     under-powered, directional residue is executable: short large-cap F&O down-jumpers |jump|≥3% (n=414,
     PF 1.30, t 2.70). The strong stuff (non-F&O short, +1.92%/pos) is walled off.
-- **FINAL VERDICT: most real signal of the arc, but does NOT clear honestly as a tradeable edge** — alpha
-  sits on the short side of mid-caps, exactly where India's short-sale constraints wall it off (the
-  textbook reason such anomalies persist). **No paper sleeve** (per "only if it clears honestly").
-- **If resuming:** Step 1–4 of the original plan are DONE. The open path is the **data unlock (§4):**
-  survivorship-clean / delisting-inclusive + true mid-cap universe (would let the mid-cap short alpha be
-  measured, and with an SLB/borrow route possibly traded). Short-sale access is now the #1 blocker,
-  ahead of survivorship. Optional watch-list: large-cap F&O down-jumper short (|jump|≥3–5%, ~20d).
+- **MULTIPLE-TESTING RE-GRADE (`signal_engine/research/overfitting.py`, Deflated Sharpe + HLZ Bonferroni
+  haircut, 2026-06-26):** our harness never corrected for the ~1,900 variants searched. Re-grading the
+  jump-drift: the **headline (t=2.91) does NOT survive** (DSR→0.03; Bonferroni req. t 3.4–4.2). **Every
+  TRADEABLE/shortable variant collapses** (best F&O DSR 0.04, large-cap 0.01); the *only* selection-robust
+  variant is the **un-shortable mid-cap** (t=4.53, DSR 0.60). Third independent method → same verdict.
+- **FINAL VERDICT: most real signal of the arc, but does NOT clear honestly as a tradeable edge** (proven
+  3 ways: leg-decomposition, F&O-restriction, Deflated-Sharpe). Alpha sits on the short side of mid-caps,
+  where India's short-sale constraints wall it off. **No paper sleeve. The PEAD/jump-drift line is now
+  honestly EXHAUSTED — more variant-mining is −EV (each test raises the selection bar).**
+- **If resuming:** Steps 1–4 DONE + deflation done. TWO honest paths, no middle: **(A) stop active
+  signal-mining** on this data (bank the negative result + the new instrument — not deploying an overfit
+  strategy IS the win); **(B) pursue the structural unlock (§4):** survivorship-clean / delisting-inclusive
+  + true mid-cap universe + SLB/borrow access (data/infra project; only with appetite). Short-sale access is
+  the #1 blocker, ahead of survivorship. **Durable win to lock in: wire `overfitting.py` (DSR + multiple-
+  testing) into the standing harness** so every future candidate is auto-corrected for selection.
 
 ---
 

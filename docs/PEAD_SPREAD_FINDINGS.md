@@ -111,16 +111,40 @@ actually executable:
 - The strong stuff — short non-F&O down-jumpers |jump|≥3% (n=209, WR 63%, PF 1.70, **+1.92%/pos**) — is
   **un-executable** (no single-stock future to short; cash short illegal overnight).
 
+## Multiple-testing re-grade — Deflated Sharpe Ratio (`overfitting.py`, decisive)
+Our harness corrects PBO + survivorship but NOT *selection across the ~1,900 variants we searched*.
+Adding the de Prado / Harvey-Liu-Zhu instruments (Bailey & López de Prado 2014 Deflated Sharpe; HLZ 2016
+Bonferroni t-haircut) and re-grading the jump-drift grid (72 variants = 6 thresholds × 3 holds × 4
+subsets, monthly Sharpes, OOS):
+
+| best variant per subset | monthly Sharpe | t | DSR (N=1900 trials) | Bonferroni req. t | shortable? |
+|---|---|---|---|---|---|
+| **headline** (j>0, 20d, all) | 0.46 | **2.91** | **0.03** | 3.4–4.2 | mixed |
+| mid-cap (j≥5%, 20d) | 0.74 | 4.53 | 0.60 | 4.20 | **NO** (no SLB) |
+| **F&O** (j≥3%, 20d) | 0.45 | 2.84 | **0.04** | 4.20 | YES |
+| **large-cap** (j≥2%, 20d) | 0.40 | 2.55 | **0.01** | 4.20 | YES |
+
+Two decisive reads: **(1)** the full-universe headline we reported (t=2.91) does **not** survive multiple
+testing — it fails the Bonferroni bar (req. 3.4 even at N=72) and DSR collapses to 0.03; that number was
+selection-inflated. **(2)** Every **tradeable** (shortable) variant collapses under deflation (DSR 0.01–
+0.42); the *only* variant with selection-robust strength (mid-cap big-jump, t=4.53, DSR 0.60) is the
+**un-shortable** one — and even it fails the strict DSR>0.95 bar (short T=37mo, now negative skew = short-
+squeeze tail risk). Caveat: DSR assumes independent trials; ours are correlated variants of one signal, so
+the strict numbers are conservative — but the headline fails so comfortably that the caveat doesn't rescue
+it. This is now the **third independent method** (after leg-decomposition and F&O-restriction) reaching the
+same verdict.
+
 ## Honest verdict (final)
 The jump-drift PEAD is **the most real signal of the entire arc** — earnings-specific (not momentum),
 monotone in jump size and horizon, mid-cap-concentrated, stable across halves/years/thresholds, significant
-under a fair clustered-t. **But it does NOT clear honestly as a tradeable market-neutral edge:** its alpha
-lives on the **short side of mid-caps**, precisely the leg India's market structure walls off (no
-single-stock futures for most mid-caps; no overnight cash shorts). This is the textbook reason such
-anomalies *persist* — short-sale constraints sit exactly where the mispricing is. The implementable
-residue (short large-cap F&O down-jumpers, big jumps) is significant but under-powered and directional —
-a **watch-list candidate, not a sleeve**. Per the gate ("paper-trade only if it clears honestly"), **no
-paper sleeve.**
+under a fair clustered-t. **But it does NOT clear honestly as a tradeable edge, established THREE
+independent ways:** (1) leg-decomposition — the alpha is the short leg of mid-caps; (2) F&O-restriction —
+the shortable subset fails the gate (PF 1.08); (3) **Deflated Sharpe / multiple-testing — every tradeable
+variant collapses (DSR 0.01–0.42) and the headline t=2.91 fails the Bonferroni bar; only the un-shortable
+mid-cap variant survives selection correction.** Its alpha lives on the **short side of mid-caps**,
+precisely the leg India's market structure walls off — the textbook reason such anomalies *persist*. Per
+the gate ("paper-trade only if it clears honestly"), **no paper sleeve, and the PEAD/jump-drift line is now
+honestly exhausted** — further variant-mining is −EV (each new test raises the selection bar for all).
 
 ## Caveats / what would change this
 1. **Short-sale constraint is the binding wall** (newly the #1 blocker, ahead of survivorship): the alpha
@@ -130,7 +154,11 @@ paper sleeve.**
 3. **The executable short book is directional and thin** (n=414) — not gate-clearing on its own.
 
 ## Recommended next step
-**Pivot to the data unlock** (survivorship-clean / delisting-inclusive + a true mid-cap universe), which is
-what would let the real (mid-cap short) alpha be measured and — with an SLB/borrow route — possibly traded.
-Optionally keep the **large-cap F&O down-jumper short** (|jump|≥3–5%, ~20d) on a watch-list and revisit if
-more OOS events accumulate. No paper sleeve until something clears honestly.
+Two honest options, no middle: **(A) stop active signal-mining on this data** — bank the negative result
+and the new `overfitting.py` instrument; not deploying an overfit strategy is itself the win the whole
+discipline exists to deliver. **(B) pursue the structural unlock** (survivorship-clean / delisting-inclusive
++ true mid-cap universe + SLB/borrow access) — the only thing that would let the real (mid-cap short) alpha
+be measured and traded; a data/infrastructure project, worth it only with appetite to invest. **Do NOT**
+keep mining PEAD variants — the deflation layer shows the tradeable corners don't survive, and every new
+test raises the bar. Durable win from this session: **wire `overfitting.py` (DSR + multiple-testing
+haircut) into the standing harness** so every future candidate is auto-corrected for selection.
