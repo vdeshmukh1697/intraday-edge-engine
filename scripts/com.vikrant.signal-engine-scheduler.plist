@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.vikrant.signal-engine-scheduler</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/vikrantdeshmukh/Personal projects/scripts/run-scheduler-service.sh</string>
+    </array>
+
+    <!-- Start at login and keep the trading scheduler alive (fires the 09:15 live session). -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>120</integer>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/vikrantdeshmukh/Personal projects</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/vikrantdeshmukh/Personal projects/logs/launchd-scheduler.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/vikrantdeshmukh/Personal projects/logs/launchd-scheduler.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

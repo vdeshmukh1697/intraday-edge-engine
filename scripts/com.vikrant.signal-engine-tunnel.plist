@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.vikrant.signal-engine-tunnel</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/vikrantdeshmukh/Personal projects/scripts/run-engine-service.sh</string>
+    </array>
+
+    <!-- Start at login and keep it alive: if the engine/tunnel dies, relaunch it. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <!-- Don't hot-loop if it crashes on startup; wait 2 min between (re)starts. -->
+    <key>ThrottleInterval</key>
+    <integer>120</integer>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/vikrantdeshmukh/Personal projects</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/vikrantdeshmukh/Personal projects/logs/launchd-engine.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/vikrantdeshmukh/Personal projects/logs/launchd-engine.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
