@@ -227,8 +227,11 @@ def build_scheduler(cfg: AppConfig):
     sched.add_job(archive_job, CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone=IST),
                   args=[cfg], id="archive_morning", replace_existing=True,
                   misfire_grace_time=3600, coalesce=True)
+    # Generous misfire grace + coalesce so a brief sleep/wake delay around 08:30 still fires the
+    # briefing once (rather than silently skipping the morning prediction).
     sched.add_job(premarket_job, CronTrigger(hour=8, minute=30, timezone=IST),
-                  args=[cfg], id="premarket", replace_existing=True)
+                  args=[cfg], id="premarket", replace_existing=True,
+                  misfire_grace_time=1800, coalesce=True)
     # Live intraday feed: blocks one worker for the whole session. Generous misfire grace +
     # coalesce so a slightly late start (e.g. scheduler restart) still launches the session.
     sched.add_job(live_job, CronTrigger(day_of_week="mon-fri", hour=9, minute=15, timezone=IST),

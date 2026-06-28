@@ -17,4 +17,8 @@ set -uo pipefail
 
 export HOME="${HOME:-/Users/vikrantdeshmukh}"
 cd "/Users/vikrantdeshmukh/Personal projects" || exit 1
-exec ./run.sh schedule
+# Hold the Mac awake for the scheduler's whole lifetime so the morning jobs (08:00 archive /
+# 08:30 pre-market / 09:15 live) actually fire if the laptop is left open. caffeinate -i prevents
+# IDLE sleep (works on battery too, lid-open); -s prevents system sleep on AC. KEEP IT PLUGGED IN —
+# on battery the system stays awake but the battery still drains over ~8h. (caffeinate is /usr/bin.)
+exec /usr/bin/caffeinate -i -s ./run.sh schedule
