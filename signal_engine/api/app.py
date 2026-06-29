@@ -567,6 +567,54 @@ def create_app() -> FastAPI:
         except WebSocketDisconnect:
             return
 
+    @app.websocket("/ws/quotes")
+    async def ws_quotes(ws: WebSocket, interval: float = 1.0):
+        """Stream live LTP for the whole watchlist, pushing every ``interval`` seconds.
+
+        Backs the dashboard's live-price + sparkline watchlist. Uses the Dhan REST LTP batch
+        (``broker.quote``) on a background thread so the event loop never blocks. During market
+        hours these tick; outside hours they hold the last traded price (so the UI isn't empty).
+        Needs SE_DATA_SOURCE=dhan + a valid token (refreshed from .env per connection).
+        """
+        await ws.accept()
+        if cfg.env.data_source != "dhan":
+            await ws.send_json({"error": f"live quotes need SE_DATA_SOURCE=dhan (is {cfg.env.data_source!r})"})
+            await ws.close()
+            return
+        from datetime import datetime as _dt
+
+        import pytz
+
+        from signal_engine.config import load_config as _load, refresh_runtime_env, resolve_live_watchlist
+        from signal_engine.factory import build_broker
+
+        refresh_runtime_env()           # pick up the freshest (TOTP-renewed) token from .env
+        live_cfg = _load()
+        try:
+            broker = await asyncio.to_thread(
+                build_broker, live_cfg, _dt.now(pytz.timezone("Asia/Kolkata")).date())
+        except Exception as exc:  # noqa: BLE001
+            await ws.send_json({"error": f"broker init failed: {str(exc)[:200]}"})
+            await ws.close()
+            return
+        symbols = resolve_live_watchlist(live_cfg)
+        interval = max(0.5, min(float(interval), 5.0))  # clamp to a sane 0.5–5s cadence
+        try:
+            while True:
+                try:
+                    quotes = await asyncio.to_thread(broker.quote, symbols)
+                    await ws.send_json({
+                        "ts": int(_dt.now().timestamp()),
+                        "quotes": {s: round(t.ltp, 2) for s, t in quotes.items() if t.ltp},
+                    })
+                except WebSocketDisconnect:
+                    return
+                except Exception as exc:  # noqa: BLE001 - one bad poll shouldn't kill the stream
+                    await ws.send_json({"warn": str(exc)[:200]})
+                await asyncio.sleep(interval)
+        except WebSocketDisconnect:
+            return
+
     @app.on_event("startup")
     def _prewarm_leaderboard() -> None:
         """Warm the real-archive leaderboard cache in a background thread so the first user

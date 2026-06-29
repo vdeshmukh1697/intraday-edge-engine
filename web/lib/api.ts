@@ -431,6 +431,22 @@ export function chartWsUrl(
   return `${wsBase}/ws/chart/${encodeURIComponent(symbol)}?${q.toString()}`;
 }
 
+// Live watchlist quotes stream: the backend pushes {ts, quotes:{SYMBOL: ltp}} every `interval`s.
+export function quotesWsUrl(interval = 1): string {
+  const wsBase = API_BASE.replace(/^http/, "ws");
+  const q = new URLSearchParams();
+  q.set("interval", String(interval));
+  if (API_KEY) q.set("api_key", API_KEY);
+  return `${wsBase}/ws/quotes?${q.toString()}`;
+}
+
+export interface QuotesMessage {
+  ts?: number;
+  quotes?: Record<string, number>;
+  error?: string;
+  warn?: string;
+}
+
 // Today's date in YYYY-MM-DD (local).
 export function todayStr(): string {
   const d = new Date();

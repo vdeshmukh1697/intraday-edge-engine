@@ -3,12 +3,14 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { InfoTip } from "@/components/InfoTip";
-import { getWatchlist, type WatchlistResponse } from "@/lib/api";
+import { Sparkline } from "@/components/Sparkline";
+import { getWatchlist, quotesWsUrl, type QuotesMessage, type WatchlistResponse } from "@/lib/api";
 
 const inr = (n: number) =>
   `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 const cls = (n: number) => (n > 0 ? "pos" : n < 0 ? "neg" : "");
 const REFRESH_MS = 15000;
+const SPARK_POINTS = 40; // rolling LTP buffer length per symbol for the sparkline
 
 export default function WatchlistPage() {
   const [data, setData] = useState<WatchlistResponse | null>(null);
@@ -16,6 +18,10 @@ export default function WatchlistPage() {
   const [loading, setLoading] = useState(true);
   const [auto, setAuto] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  // Live quotes (WebSocket): latest LTP per symbol + a rolling buffer for the sparkline.
+  const [quotes, setQuotes] = useState<Record<string, number>>({});
+  const [buffers, setBuffers] = useState<Record<string, number[]>>({});
+  const [live, setLive] = useState(false);
 
   const load = useCallback((spinner = true) => {
     if (spinner) setLoading(true);
@@ -35,6 +41,62 @@ export default function WatchlistPage() {
     const id = setInterval(() => load(false), REFRESH_MS);
     return () => clearInterval(id);
   }, [auto, load]);
+
+  // Live LTP stream over WebSocket — updates every ~1s; auto-reconnects on drop.
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let stopped = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const connect = () => {
+      try {
+        ws = new WebSocket(quotesWsUrl(1));
+      } catch {
+        return;
+      }
+      ws.onopen = () => setLive(true);
+      ws.onmessage = (ev) => {
+        let msg: QuotesMessage;
+        try {
+          msg = JSON.parse(ev.data);
+        } catch {
+          return;
+        }
+        if (!msg.quotes) return;
+        const q = msg.quotes;
+        setQuotes((prev) => ({ ...prev, ...q }));
+        setBuffers((prev) => {
+          const next = { ...prev };
+          for (const [sym, px] of Object.entries(q)) {
+            const arr = (next[sym] || []).concat(px);
+            next[sym] = arr.length > SPARK_POINTS ? arr.slice(-SPARK_POINTS) : arr;
+          }
+          return next;
+        });
+      };
+      ws.onclose = () => {
+        setLive(false);
+        if (!stopped) retry = setTimeout(connect, 3000);
+      };
+      ws.onerror = () => {
+        try {
+          ws?.close();
+        } catch {
+          /* ignore */
+        }
+      };
+    };
+    connect();
+    return () => {
+      stopped = true;
+      if (retry) clearTimeout(retry);
+      try {
+        ws?.close();
+      } catch {
+        /* ignore */
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   if (error)
     return <div className="card">Could not load the watchlist: {error}</div>;
@@ -64,6 +126,12 @@ export default function WatchlistPage() {
         <Stat label="Open now" value={String(data.open_now)} />
         <Stat label="Traded today" value={String(data.traded_today)} />
         <Stat label="Session date" value={data.date} />
+        <span
+          className={`tag small ${live ? "pos" : ""}`}
+          title="Live LTP stream (WebSocket). Ticks during market hours; holds last price when closed."
+        >
+          {live ? "● LIVE" : "○ offline"}
+        </span>
         <span className="live-spacer" />
         {lastRefresh && (
           <span className="muted small">refreshed {lastRefresh.toLocaleTimeString("en-IN")}</span>
@@ -81,6 +149,8 @@ export default function WatchlistPage() {
           <thead>
             <tr>
               <th>Symbol</th>
+              <th className="num">Live ₹<InfoTip full="Live price" def="Last traded price, streamed ~1s from the Dhan feed. Ticks during market hours; holds the last traded price when the market is closed." /></th>
+              <th>Trend<InfoTip full="Intraday trend" def="Sparkline of the recent live prices this session (rolling ~40 samples). Green = up over the window, red = down." /></th>
               <th>Sector / note<InfoTip term="sector" /></th>
               <th>Status<InfoTip term="direction" /></th>
               <th className="num">Entry ₹<InfoTip term="entry" /></th>
@@ -94,10 +164,23 @@ export default function WatchlistPage() {
           <tbody>
             {rows.map((r) => {
               const op = r.open_position;
+              const ltp = quotes[r.symbol];
+              const buf = buffers[r.symbol];
+              const prev = buf && buf.length >= 2 ? buf[buf.length - 2] : undefined;
+              const tickCls =
+                ltp != null && prev != null
+                  ? ltp > prev ? "pos" : ltp < prev ? "neg" : ""
+                  : "";
               return (
                 <tr key={r.symbol} className={op ? "active-row" : ""}>
                   <td className="mono">
                     <Link href={`/stock/${encodeURIComponent(r.symbol)}`}>{r.symbol}</Link>
+                  </td>
+                  <td className={`num mono ${tickCls}`}>
+                    {ltp != null ? ltp.toFixed(2) : "—"}
+                  </td>
+                  <td>
+                    <Sparkline points={buffers[r.symbol] || []} />
                   </td>
                   <td className="muted">{r.sector || "—"}</td>
                   <td>
