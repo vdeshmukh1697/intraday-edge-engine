@@ -63,3 +63,21 @@ them on only after a few more clean sessions confirm the watchlist patterns, the
   SUZLON, ZENTEC, OLAELEC, …). Applied via `config.resolve_live_watchlist` in the live feed only; an empty
   allowlist safely falls back to the full list. **Review the allowlist before enabling** (pre-register it).
 - NOT changed: stops, time-stop, targets (the analysis shows these are fine — changing them only adds cost).
+
+## 3-session gap analysis (2026-06-29 after close, 63 trades, adversarial workflow) — CORRECTS #3
+A winner-vs-loser gap analysis across all 3 sessions (incl. today) answers "why do the same rules win on
+some trades and lose on others?": **no at-entry feature separates future winners from losers.** Every
+feature has AUC ≈ 0.5 (confidence 0.60, RSI 0.37, ADX 0.44, R:R 0.44, stop% 0.50, rules-fired 0.58),
+none significant, none survives multiple-testing; the *same stock* wins and loses under identical rules
+(9/18 multi-trade names did both; GMRAIRPORT lost a long AND a short); and "won" is mechanically just
+"hit TARGET before STOP" — a post-entry path event, unpredictable from the entry signal. The win/loss
+split is irreducible noise around a cost-driven small loss; the whole 3-session loss reduces to ONE cell
+(06-25 longs entered 10-12, n=14, −4.86% = 93% of total) — strip it and it's −0.38% / 37% WR (break-even).
+
+**Correction to improvement #3 (universe gate): NOT justified on this evidence.** The large-vs-smid gap is
+noise — permutation p=0.26/0.78, 74% of the smid loss is just 3 tickers (PPLPHARMA/GMRAIRPORT/SWIGGY), it
+sign-flips across the two sessions, and HONASA (smid) was the best name (+3.9%). A large-only gate would be
+overfit to 3 names + one session — **leave `live_universe.restrict_to_allowlist` OFF.** Time-of-day and
+LONG-vs-SHORT splits were likewise killed as one-session artifacts. **Only the frequency cap (#1) remains
+justified** (it attacks the robust ~8bps cost leak + correlated bursts). Need ~30 sessions before any
+separator claim. (Workflow: `paper-gap-analysis`; dataset exported to scratchpad/gap_dataset.json.)
