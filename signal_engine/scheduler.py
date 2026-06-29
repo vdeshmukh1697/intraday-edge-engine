@@ -159,6 +159,52 @@ def premarket_job(cfg: AppConfig) -> None:
         _log.error("premarket_job failed: %s", exc)
 
 
+def healthcheck_job(cfg: Optional[AppConfig] = None) -> None:
+    """Pre-open self-check (~08:45 IST): confirm the Dhan token + live feed are healthy BEFORE the
+    09:15 session, self-heal the token via TOTP if needed, and alert the morning status. Turns a
+    silent broken setup into an actionable Telegram ping so the day isn't lost unnoticed."""
+    from datetime import datetime
+
+    cal = NSECalendar()
+    if not cal.is_trading_day(_today()):
+        return
+    refresh_runtime_env()
+    cfg = load_config()
+    from signal_engine.factory import build_alerter
+
+    alerter = build_alerter(cfg)
+    try:
+        if cfg.env.data_source != "dhan":
+            alerter.send(f"⚠️ Pre-open {_today()}: SE_DATA_SOURCE is {cfg.env.data_source!r}, not "
+                         f"'dhan' — live session will be skipped.", level="signal")
+            return
+        from signal_engine.brokers.dhan import token_expiry
+        from signal_engine.factory import build_broker
+
+        exp = token_expiry(cfg.env.dhan_access_token or "")
+        if not (exp and exp > datetime.utcnow()):
+            # Self-heal: try a fresh TOTP mint right now, then re-read.
+            try:
+                renew_token_job(cfg)
+                refresh_runtime_env()
+                cfg = load_config()
+                exp = token_expiry(cfg.env.dhan_access_token or "")
+            except Exception:  # noqa: BLE001
+                pass
+        if not (exp and exp > datetime.utcnow()):
+            alerter.send(f"⚠️ Pre-open {_today()}: Dhan token invalid and TOTP re-mint FAILED — fix "
+                         f"before 09:15 (check DHAN_TOTP_SECRET/PIN).", level="signal")
+            return
+        broker = build_broker(cfg, day=_today())
+        q = broker.quote(cfg.settings.watchlist[:3])
+        alerter.send(f"✅ Pre-open OK {_today()}: token valid (exp {exp.strftime('%H:%M UTC')}), live "
+                     f"feed returning {len(q)}/3 quotes. Live session fires 09:15.", level="signal")
+        _log.info("healthcheck_job: token valid, feed %d/3 quotes", len(q))
+    except Exception as exc:  # noqa: BLE001
+        alerter.send(f"⚠️ Pre-open {_today()}: health check FAILED — {str(exc)[:160]}", level="signal")
+        _log.error("healthcheck_job failed: %s", exc)
+
+
 def scan_job(cfg: AppConfig, top_n: int = 10, limit: Optional[int] = None) -> None:
     """Full-NSE-universe scan on real Yahoo bars (EOD) -> alert top picks."""
     cal = NSECalendar()
@@ -249,6 +295,9 @@ def build_scheduler(cfg: AppConfig):
     sched.add_job(premarket_job, CronTrigger(hour=8, minute=30, timezone=IST),
                   args=[cfg], id="premarket", replace_existing=True,
                   misfire_grace_time=1800, coalesce=True)
+    # Pre-open self-check + Telegram alert (token/feed health, self-heals token) before the 09:15 open.
+    sched.add_job(healthcheck_job, CronTrigger(day_of_week="mon-fri", hour=8, minute=45, timezone=IST),
+                  id="healthcheck", replace_existing=True, misfire_grace_time=1800, coalesce=True)
     # Live intraday feed: blocks one worker for the whole session. Generous misfire grace +
     # coalesce so a slightly late start (e.g. scheduler restart) still launches the session.
     sched.add_job(live_job, CronTrigger(day_of_week="mon-fri", hour=9, minute=15, timezone=IST),
