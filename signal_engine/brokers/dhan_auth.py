@@ -29,6 +29,56 @@ CONSENT_GENERATE_URL = "https://auth.dhan.co/app/generate-consent"
 CONSENT_LOGIN_URL = "https://auth.dhan.co/login/consentApp-login"
 CONSENT_CONSUME_URL = "https://auth.dhan.co/app/consumeApp-consent"
 
+# DIRECT token generation via TOTP — the fully-automated, no-browser path. When TOTP is enabled
+# on the Dhan account, this mints a fresh ~24h access token from (dhanClientId + PIN + current
+# TOTP code), so a daily job can keep the engine logged in forever with ZERO manual OTP.
+GENERATE_TOKEN_URL = "https://auth.dhan.co/app/generateAccessToken"
+
+
+def _totp_now(secret_b32: str, digits: int = 6, period: int = 30,
+              for_time: Optional[int] = None) -> str:
+    """Current TOTP (RFC 6238, SHA-1) from a base32 secret — stdlib only, no extra dependency.
+
+    ``secret_b32`` is the seed shown when you set up TOTP on Dhan (the authenticator "manual entry"
+    key). Spaces are ignored and base32 padding is fixed automatically. ``for_time`` overrides the
+    clock for testing.
+    """
+    import base64
+    import hashlib
+    import hmac
+    import struct
+    import time
+
+    s = secret_b32.strip().replace(" ", "").upper()
+    s += "=" * ((8 - len(s) % 8) % 8)  # restore base32 padding
+    key = base64.b32decode(s)
+    counter = int((for_time if for_time is not None else time.time()) // period)
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+    return str(code % (10 ** digits)).zfill(digits)
+
+
+def generate_token_via_totp(client_id: str, pin: str, totp_secret: str,
+                            http_post: Optional[Callable] = None) -> str:
+    """Mint a fresh access token via the direct TOTP endpoint (no browser, no manual OTP).
+
+    POST ``generateAccessToken?dhanClientId&pin&totp`` (TOTP computed from ``totp_secret``). This
+    is the permanent-login path: a daily/8-hourly job calls this and the engine never needs a
+    manual OTP. Requires TOTP to be enabled in the Dhan API settings.
+    """
+    if not (client_id and pin and totp_secret):
+        raise RuntimeError("generate_token_via_totp needs client_id + pin + totp_secret")
+    totp = _totp_now(totp_secret)
+    url = f"{GENERATE_TOKEN_URL}?dhanClientId={client_id}&pin={pin}&totp={totp}"
+    post = http_post or _empty_post
+    status, resp = post(url, None, {})
+    tok = _extract_token(resp)
+    if not tok:
+        raise RuntimeError(f"generateAccessToken (TOTP) failed (HTTP {status}): {resp}")
+    log.info("Dhan token minted via TOTP auto-login (HTTP %s)", status)
+    return tok
+
 
 def generate_consent(client_id: str, api_key: str, api_secret: str,
                      http_post: Optional[Callable] = None) -> str:

@@ -6,9 +6,11 @@ import pytest
 
 from signal_engine.brokers.dhan_auth import (
     _extract_token,
+    _totp_now,
     consent_login_url,
     consume_consent,
     generate_consent,
+    generate_token_via_totp,
     renew_token,
     update_env_token,
 )
@@ -20,6 +22,34 @@ def test_extract_token_handles_wrapper_shapes():
     assert _extract_token({"data": {"accessToken": "CCC"}}) == "CCC"
     assert _extract_token({"nope": 1}) is None
     assert _extract_token("err") is None
+
+
+def test_totp_matches_rfc6238_vectors():
+    # RFC 6238 SHA-1 vectors: secret = base32 of ASCII "12345678901234567890".
+    sec = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+    assert _totp_now(sec, for_time=59) == "287082"
+    assert _totp_now(sec, for_time=1111111109) == "081804"
+    # spaces + lowercase + missing padding are tolerated (as pasted from Dhan's setup screen).
+    assert _totp_now("gezd gnbv gy3t qojq gezd gnbv gy3t qojq", for_time=59) == "287082"
+
+
+def test_generate_token_via_totp_shapes_request_and_extracts_token():
+    seen = {}
+
+    def mock_post(url, _body, _headers):
+        seen["url"] = url
+        return 200, {"accessToken": "FRESH_TOTP_TOKEN"}
+
+    sec = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+    tok = generate_token_via_totp("CID42", "9999", sec, http_post=mock_post)
+    assert tok == "FRESH_TOTP_TOKEN"
+    assert "generateAccessToken" in seen["url"]
+    assert all(p in seen["url"] for p in ("dhanClientId=CID42", "pin=9999", "totp="))
+
+
+def test_generate_token_via_totp_requires_all_fields():
+    with pytest.raises(RuntimeError):
+        generate_token_via_totp("", "9999", "SECRET")
 
 
 def test_renew_token_returns_fresh_token():

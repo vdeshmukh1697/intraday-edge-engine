@@ -67,15 +67,26 @@ def renew_token_job(cfg: Optional[AppConfig] = None) -> None:
     if cfg.env.data_source != "dhan":
         return
     try:
-        from signal_engine.brokers.dhan_auth import renew_token, update_env_token
+        from signal_engine.brokers.dhan_auth import (
+            generate_token_via_totp, renew_token, update_env_token,
+        )
 
-        new = renew_token(cfg.env.dhan_client_id, cfg.env.dhan_access_token)
+        totp_secret, pin = os.getenv("DHAN_TOTP_SECRET"), os.getenv("DHAN_PIN")
+        if totp_secret and pin and cfg.env.dhan_client_id:
+            # PERMANENT path: mint a brand-new token via TOTP (no browser, no manual OTP). Works
+            # even from a fully-expired state, so the engine self-heals after any downtime.
+            new = generate_token_via_totp(cfg.env.dhan_client_id, pin, totp_secret)
+            via = "TOTP auto-login"
+        else:
+            # Fallback: RenewToken (extends an ACTIVE token; works only for Dhan-Web tokens).
+            new = renew_token(cfg.env.dhan_client_id, cfg.env.dhan_access_token)
+            via = "RenewToken"
         update_env_token(new)
         os.environ["DHAN_ACCESS_TOKEN"] = new  # so load_config() in later jobs sees it
-        _log.info("Dhan token renewed + persisted (.env + env)")
+        _log.info("Dhan token refreshed via %s + persisted (.env + env)", via)
     except Exception as exc:  # noqa: BLE001
-        _log.error("renew_token_job failed (regenerate token in the Dhan portal if expired): %s",
-                   exc)
+        _log.error("renew_token_job failed (set DHAN_TOTP_SECRET + DHAN_PIN for auto-login, or "
+                   "regenerate the token if expired): %s", exc)
 
 
 def live_job(cfg: Optional[AppConfig] = None) -> None:
@@ -218,10 +229,16 @@ def build_scheduler(cfg: AppConfig):
     from apscheduler.triggers.cron import CronTrigger
 
     sched = BlockingScheduler(timezone=IST)
-    # Token renewal first thing (before any Dhan job needs it). Daily incl. weekends so the
-    # token never lapses over a long weekend.
-    sched.add_job(renew_token_job, CronTrigger(hour=6, minute=0, timezone=IST),
-                  id="renew_token", replace_existing=True)
+    # Token renewal MULTIPLE times/day (every ~8h, incl. weekends) so the chain is effectively
+    # PERMANENT: each RenewToken mints a fresh ~24h token, so as long as ANY one of these runs in
+    # a 24h window the token never lapses and no manual OTP is ever needed. Three times/day means
+    # the laptop would have to be off for >~24h continuously to break the chain. Misfire grace +
+    # coalesce so a slightly-late wake still renews. (RenewToken only works on a CONSENT-minted
+    # token — the dashboard "Reconnect Dhan" OTP — NOT a token pasted from the Dhan web portal.)
+    for _h in (6, 14, 22):
+        sched.add_job(renew_token_job, CronTrigger(hour=_h, minute=0, timezone=IST),
+                      id=f"renew_token_{_h}", replace_existing=True,
+                      misfire_grace_time=3600, coalesce=True)
     # Morning data gather: pull the prior session's bars for the whole NSE universe so the
     # leaderboard/ML use yesterday's complete data before the 08:30 briefing (and today's open).
     sched.add_job(archive_job, CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone=IST),
@@ -246,6 +263,13 @@ def build_scheduler(cfg: AppConfig):
 
 def start(cfg: AppConfig = None) -> None:  # pragma: no cover - blocking loop
     cfg = cfg or load_config()
+    # Renew immediately on startup so a (re)start refreshes the token chain right away — the
+    # engine is never left running on a token that's about to lapse just because it booted between
+    # the scheduled renew times. Best-effort: a failure here never blocks the scheduler.
+    try:
+        renew_token_job(cfg)
+    except Exception as exc:  # noqa: BLE001
+        _log.error("startup token renew failed (non-fatal): %s", exc)
     sched = build_scheduler(cfg)
     _log.info("scheduler starting: jobs=%s", [j.id for j in sched.get_jobs()])
     sched.start()

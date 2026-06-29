@@ -453,22 +453,38 @@ def cmd_live(args) -> int:
 
 
 def cmd_renew_token(args) -> int:
-    """Rotate the Dhan 24h access token (RenewToken) and persist it to .env."""
+    """Refresh the Dhan 24h access token and persist it to .env.
+
+    Prefers the TOTP auto-login (DHAN_TOTP_SECRET + DHAN_PIN) — the permanent, no-browser path that
+    works even from a fully-expired state. Falls back to RenewToken (active Dhan-Web tokens only).
+    """
+    import os
+
     cfg = load_config()
-    if not (cfg.env.dhan_client_id and cfg.env.dhan_access_token):
-        print("No Dhan client_id/token in .env to renew.")
+    if not cfg.env.dhan_client_id:
+        print("No DHAN_CLIENT_ID in .env.")
         return 2
     from signal_engine.brokers.dhan import token_expiry
-    from signal_engine.brokers.dhan_auth import renew_token, update_env_token
+    from signal_engine.brokers.dhan_auth import (
+        generate_token_via_totp, renew_token, update_env_token,
+    )
 
+    totp_secret, pin = os.getenv("DHAN_TOTP_SECRET"), os.getenv("DHAN_PIN")
+    via = "TOTP auto-login" if (totp_secret and pin) else "RenewToken"
     try:
-        new = renew_token(cfg.env.dhan_client_id, cfg.env.dhan_access_token)
+        if totp_secret and pin:
+            new = generate_token_via_totp(cfg.env.dhan_client_id, pin, totp_secret)
+        elif cfg.env.dhan_access_token:
+            new = renew_token(cfg.env.dhan_client_id, cfg.env.dhan_access_token)
+        else:
+            print("Set DHAN_TOTP_SECRET + DHAN_PIN (enable TOTP in Dhan API settings) for "
+                  "permanent auto-login, or paste an active token to RenewToken.")
+            return 2
     except Exception as exc:  # noqa: BLE001
-        print(f"Renew failed: {exc}\n(If the token already expired, regenerate it once in "
-              f"the Dhan portal — RenewToken only works on an active token.)")
+        print(f"Token refresh failed ({via}): {exc}")
         return 1
     update_env_token(new)
-    print(f"Token renewed and written to .env (previous saved to .env.bak). "
+    print(f"Token refreshed via {via} and written to .env (previous saved to .env.bak). "
           f"New expiry (UTC): {token_expiry(new)}")
     return 0
 

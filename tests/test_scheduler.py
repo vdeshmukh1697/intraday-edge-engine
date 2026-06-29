@@ -7,7 +7,8 @@ from signal_engine.scheduler import build_scheduler
 def test_scheduler_registers_all_jobs():
     sched = build_scheduler(load_config())
     job_ids = {j.id for j in sched.get_jobs()}
-    assert job_ids == {"renew_token", "archive_morning", "premarket", "live", "scan", "archive"}
+    assert job_ids == {"renew_token_6", "renew_token_14", "renew_token_22",
+                       "archive_morning", "premarket", "live", "scan", "archive"}
     sched.shutdown(wait=False) if sched.running else None
 
 
