@@ -1,21 +1,19 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import {
   getChart,
-  chartWsUrl,
   todayStr,
   getPaperTrades,
   getOpenPositions,
   type ChartResponse,
-  type WsMessage,
-  type LiveBar,
   type PaperTrade,
   type OpenPosition,
 } from "@/lib/api";
-import CandleChart, { type CandleChartHandle } from "@/components/CandleChart";
+import CandleChart from "@/components/CandleChart";
+import LiveChart from "@/components/LiveChart";
 import { InfoTip } from "@/components/InfoTip";
 
 const inr = (n: number) =>
@@ -37,11 +35,6 @@ export default function StockPage() {
   // Paper-trade history + current open position for THIS symbol.
   const [trades, setTrades] = useState<PaperTrade[]>([]);
   const [openPos, setOpenPos] = useState<OpenPosition | null>(null);
-
-  const [live, setLive] = useState(false);
-  const [liveMsg, setLiveMsg] = useState<string>("");
-  const wsRef = useRef<WebSocket | null>(null);
-  const chartHandleRef = useRef<CandleChartHandle | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -78,60 +71,13 @@ export default function StockPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol]);
 
-  const stopLive = useCallback(() => {
-    if (wsRef.current) {
-      wsRef.current.onclose = null;
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-    setLive(false);
-  }, []);
-
-  const startLive = useCallback(() => {
-    if (wsRef.current) return;
-    try {
-      const ws = new WebSocket(chartWsUrl(symbol, date, 0.2));
-      wsRef.current = ws;
-      setLive(true);
-      setLiveMsg("Connecting…");
-
-      ws.onopen = () => setLiveMsg("Streaming");
-      ws.onmessage = (ev) => {
-        let msg: WsMessage;
-        try {
-          msg = JSON.parse(ev.data) as WsMessage;
-        } catch {
-          return;
-        }
-        if ("done" in msg && msg.done) {
-          setLiveMsg("Stream complete");
-          stopLive();
-          return;
-        }
-        // It's a bar — append smoothly via series.update.
-        chartHandleRef.current?.updateBar(msg as LiveBar);
-      };
-      ws.onerror = () => setLiveMsg("Connection error");
-      ws.onclose = () => {
-        wsRef.current = null;
-        setLive(false);
-      };
-    } catch (e) {
-      setLiveMsg(e instanceof Error ? e.message : "Failed to open stream");
-      setLive(false);
-    }
-  }, [symbol, date, stopLive]);
-
-  // Tear down the socket on unmount.
-  useEffect(() => stopLive, [stopLive]);
-
   return (
     <div>
       <div className="page-head">
         <div>
           <h1>{symbol}</h1>
           <div className="subtle">
-            Intraday candles with VWAP / EMA overlays
+            Live price (streaming) · historical candles with VWAP / EMA below
           </div>
         </div>
         <Link href="/" className="nav-link">
@@ -139,11 +85,14 @@ export default function StockPage() {
         </Link>
       </div>
 
+      {/* Always-on live graph — auto-streams this symbol's price. */}
+      <LiveChart symbol={symbol} />
+
+      <h3 style={{ marginTop: 20 }}>Historical session</h3>
       <form
         className="controls"
         onSubmit={(e) => {
           e.preventDefault();
-          stopLive();
           load();
         }}
       >
@@ -158,24 +107,6 @@ export default function StockPage() {
         <button type="submit" disabled={loading}>
           {loading ? "Loading…" : "Load"}
         </button>
-        {!live ? (
-          <button
-            type="button"
-            className="secondary"
-            onClick={startLive}
-            disabled={!data || loading}
-          >
-            Go live
-          </button>
-        ) : (
-          <button type="button" className="secondary" onClick={stopLive}>
-            Stop
-          </button>
-        )}
-        <span className={`live-status${live ? " on" : ""}`}>
-          <span className="dot" />
-          {live ? liveMsg || "Streaming" : liveMsg || "Idle"}
-        </span>
       </form>
 
       {error && <div className="notice error">Failed to load: {error}</div>}
@@ -202,9 +133,6 @@ export default function StockPage() {
           vwap={data.overlays.vwap}
           emaFast={data.overlays.ema_fast}
           emaSlow={data.overlays.ema_slow}
-          onReady={(h) => {
-            chartHandleRef.current = h;
-          }}
         />
       ) : (
         !loading &&

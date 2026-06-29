@@ -431,11 +431,13 @@ export function chartWsUrl(
   return `${wsBase}/ws/chart/${encodeURIComponent(symbol)}?${q.toString()}`;
 }
 
-// Live watchlist quotes stream: the backend pushes {ts, quotes:{SYMBOL: ltp}} every `interval`s.
-export function quotesWsUrl(interval = 1): string {
+// Live quotes stream: the backend pushes {ts, quotes:{SYMBOL: ltp}} every `interval`s — the whole
+// watchlist by default, or just `symbols` when given (used by the per-stock live chart).
+export function quotesWsUrl(interval = 1, symbols?: string[]): string {
   const wsBase = API_BASE.replace(/^http/, "ws");
   const q = new URLSearchParams();
   q.set("interval", String(interval));
+  if (symbols && symbols.length) q.set("symbols", symbols.join(","));
   if (API_KEY) q.set("api_key", API_KEY);
   return `${wsBase}/ws/quotes?${q.toString()}`;
 }

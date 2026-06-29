@@ -568,8 +568,8 @@ def create_app() -> FastAPI:
             return
 
     @app.websocket("/ws/quotes")
-    async def ws_quotes(ws: WebSocket, interval: float = 1.0):
-        """Stream live LTP for the whole watchlist, pushing every ``interval`` seconds.
+    async def ws_quotes(ws: WebSocket, interval: float = 1.0, symbols: str = None):
+        """Stream live LTP for the watchlist (or a specific ``symbols`` CSV), every ``interval`` s.
 
         Backs the dashboard's live-price + sparkline watchlist. Uses the Dhan REST LTP batch
         (``broker.quote``) on a background thread so the event loop never blocks. During market
@@ -597,12 +597,15 @@ def create_app() -> FastAPI:
             await ws.send_json({"error": f"broker init failed: {str(exc)[:200]}"})
             await ws.close()
             return
-        symbols = resolve_live_watchlist(live_cfg)
+        if symbols:
+            syms = [s.strip().upper() for s in symbols.split(",") if s.strip()][:100]
+        else:
+            syms = resolve_live_watchlist(live_cfg)
         interval = max(0.5, min(float(interval), 5.0))  # clamp to a sane 0.5–5s cadence
         try:
             while True:
                 try:
-                    quotes = await asyncio.to_thread(broker.quote, symbols)
+                    quotes = await asyncio.to_thread(broker.quote, syms)
                     await ws.send_json({
                         "ts": int(_dt.now().timestamp()),
                         "quotes": {s: round(t.ltp, 2) for s, t in quotes.items() if t.ltp},
