@@ -723,3 +723,13 @@ tbody tr:hover {
 .tod-bar.pos { background: var(--green); } .tod-bar.neg { background: var(--red); }
 .tod-val { font-size: 12px; text-align: right; }
 @media (max-width: 800px) { .cards { grid-template-columns: repeat(2, 1fr); } .grid2 { grid-template-columns: 1fr; } }
+
+/* Broker-style account summary header */
+.account-summary { background: linear-gradient(180deg, var(--bg-elev-2), var(--bg-elev)); border: 1px solid var(--border); }
+.account-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.account-value { font-size: 34px; font-weight: 800; letter-spacing: -0.5px; margin: 2px 0; }
+.account-roc { text-align: right; }
+.account-roc .metric-value { font-size: 26px; }
+.account-grid { margin-top: 0; }
+.sym-link { color: var(--accent); text-decoration: none; font-weight: 600; }
+.sym-link:hover { text-decoration: underline; }

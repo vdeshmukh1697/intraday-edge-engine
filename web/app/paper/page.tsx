@@ -17,7 +17,11 @@ import {
 
 const inr = (n: number) =>
   `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+// Signed money for P&L figures: "+₹1,234" / "-₹1,234".
+const inrSigned = (n: number) =>
+  `${n >= 0 ? "+" : "-"}₹${Math.abs(n).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 const pct = (n: number) => `${n.toFixed(2)}%`;
+const pctSigned = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
 const cls = (n: number) => (n > 0 ? "pos" : n < 0 ? "neg" : "");
 
 const REFRESH_MS = 15000; // auto-refresh so trades appear without a manual reload
@@ -74,16 +78,18 @@ export default function PaperTradingPage() {
   return (
     <div className="paper">
       <div className="page-head">
-        <h1>Paper Trading</h1>
+        <h1>Paper Trading Account</h1>
         <p className="muted">
-          Recorded simulated trades & performance over time. Decision-support only — no live
-          orders. Absolute P&amp;L assumes a fixed {inr(report.notional_per_trade)} notional per
-          trade (the tool is capital-agnostic).
+          A simulated broker account: {inr(report.account_capital)} capital, {inr(report.notional_per_trade)}{" "}
+          deployed per trade. Decision-support only — no live orders are ever placed.
         </p>
       </div>
 
       <LiveBar status={status} lastRefresh={lastRefresh} auto={auto}
         onToggle={() => setAuto((a) => !a)} onRefresh={() => load(true)} loading={loading} />
+
+      {/* Broker-style account summary: capital, account value, realized/unrealized/total P&L, ROC. */}
+      <AccountSummary report={report} open={open} />
 
       {/* Open positions — live entries currently in the market (the piece that was missing). */}
       <OpenPositions positions={open} notional={report.notional_per_trade} />
@@ -157,6 +163,48 @@ export default function PaperTradingPage() {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+// Broker-statement-style account header: the money figures a real account page shows.
+function AccountSummary({ report, open }: { report: PaperReport; open: OpenPosition[] }) {
+  const s = report.summary;
+  const cap = report.account_capital || 0;
+  const notional = report.notional_per_trade || 0;
+  const realized = s.total_pnl_abs;                                   // closed-trade net P&L
+  const unrealized = open.reduce((a, p) => a + (p.unrealized_pnl_abs || 0), 0);
+  const total = realized + unrealized;
+  const invested = open.length * notional;                           // cost basis of open positions
+  const acctValue = cap + total;                                     // capital marked to market
+  const pctOf = (n: number) => (cap > 0 ? (n / cap) * 100 : 0);
+  const ddPct = pctOf(-s.max_drawdown);
+
+  return (
+    <div className="card account-summary">
+      <div className="account-head">
+        <div>
+          <div className="metric-label">Account value</div>
+          <div className={`account-value ${cls(total)}`}>{inr(acctValue)}</div>
+          <div className="metric-sub">
+            {inr(cap)} capital{" "}
+            <span className={cls(total)}>{total >= 0 ? "▲" : "▼"} {inrSigned(total)} ({pctSigned(pctOf(total))})</span>
+          </div>
+        </div>
+        <div className="account-roc">
+          <div className="metric-label">Return on capital<InfoTip term="net_pnl" /></div>
+          <div className={`metric-value ${cls(total)}`}>{pctSigned(pctOf(total))}</div>
+        </div>
+      </div>
+      <div className="cards account-grid">
+        <Card label="Realized P&L" term="net_pnl" value={inrSigned(realized)} tone={cls(realized)} sub={`closed · ${pctSigned(pctOf(realized))}`} />
+        <Card label="Unrealized P&L" term="unrealized_pnl" value={inrSigned(unrealized)} tone={cls(unrealized)}
+          sub={open.length ? `${open.length} open · ${pctSigned(pctOf(unrealized))}` : "no open positions"} />
+        <Card label="Open exposure" value={inr(invested)} sub={`${open.length} position${open.length === 1 ? "" : "s"} · ${pct(pctOf(invested))} of capital`} />
+        <Card label="Capital deployed / trade" value={inr(notional)} sub="fixed notional per entry" />
+        <Card label="Win / loss" term="win_rate" value={`${s.wins}W / ${s.losses}L`} sub={`${s.win_rate.toFixed(1)}% win rate · ${s.n_trades} trades`} />
+        <Card label="Max drawdown" term="max_drawdown" value={inr(s.max_drawdown)} tone={s.max_drawdown > 0 ? "neg" : ""} sub={`${pct(ddPct)} of capital`} />
+      </div>
     </div>
   );
 }
@@ -321,7 +369,13 @@ function GroupTable({ title, titleTerm, rows, keyName }: { title: string; titleT
         <tbody>
           {rows.map((r, i) => (
             <tr key={i}>
-              <td>{r[keyName]}</td><td>{r.n_trades}</td><td>{r.win_rate.toFixed(0)}%</td>
+              <td>
+                {keyName === "symbol" && r.symbol ? (
+                  <Link href={`/stock/${encodeURIComponent(r.symbol)}`} className="sym-link">{r.symbol}</Link>
+                ) : (
+                  r[keyName]
+                )}
+              </td><td>{r.n_trades}</td><td>{r.win_rate.toFixed(0)}%</td>
               <td className={cls(r.total_pnl_abs)}>{inr(r.total_pnl_abs)}</td>
               <td>{r.profit_factor === null ? "∞" : r.profit_factor.toFixed(2)}</td>
             </tr>
@@ -374,7 +428,7 @@ function TradeTable({ trades }: { trades: PaperTrade[] }) {
           {sorted.map((t) => (
             <tr key={t.id}>
               <td className="mono">{(t.entry_ts || "").replace("T", " ").slice(0, 16)}</td>
-              <td>{t.symbol}</td>
+              <td><Link href={`/stock/${encodeURIComponent(t.symbol)}`} className="sym-link">{t.symbol}</Link></td>
               <td className={t.direction === "LONG" ? "pos" : "neg"}>{t.direction}</td>
               <td>{t.strategy}</td>
               <td>{t.confidence?.toFixed(0)}</td>
