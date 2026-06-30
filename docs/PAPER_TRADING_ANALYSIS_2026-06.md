@@ -81,3 +81,36 @@ overfit to 3 names + one session — **leave `live_universe.restrict_to_allowlis
 LONG-vs-SHORT splits were likewise killed as one-session artifacts. **Only the frequency cap (#1) remains
 justified** (it attacks the robust ~8bps cost leak + correlated bursts). Need ~30 sessions before any
 separator claim. (Workflow: `paper-gap-analysis`; dataset exported to scratchpad/gap_dataset.json.)
+
+## Session 4 fold (2026-06-30, 13 trades) — nothing changes; one-name day, gated changes still OFF
+Folded by the morning-verify task (as-of 14:35 IST; all 13 trades already closed, none after 11:46, so the
+session is effectively final — any 14:35–15:30 entries, if any, are a top-up for tomorrow's run to confirm).
+Dataset: `scratchpad/session_2026-06-30.json`. Strategy `vwap_ema_adx`, config-gated changes still DEFAULT OFF.
+
+**Headline:** 13 trades, **3 wins (23% WR)**, avgR −0.22, **net +1.88%** — but the entire gain is **one name,
+OLAELEC** (3/3 TARGET hits, +5.46% combined). **Strip OLAELEC → 0 wins / 10, −3.58%.** Same single-name
+dominance the prior sessions showed (06-25 = one cell was 93% of the *loss*; today one name is 100%+ of the
+*gain*). A coin that lands on OLAELEC. n=13, one session → noise, not edge.
+
+What the doc said to watch in "today's session" — every prior finding **reproduced**:
+- **Confidence non-predictive AND range-restricted — CONFIRMED (again).** All 13 entries are conf ≥0.85
+  (gates nothing). Worse, every conf=1.00 trade (ETERNAL, IRFC, AXISBANK, KAYNES, IDEA) **lost**; the only
+  winners were conf=0.90 (OLAELEC). Higher confidence did *not* predict wins — if anything inverted.
+- **Correlated same-minute bursts — CONFIRMED.** 09:42 fired **4 simultaneous entries** (3 LONG + 1 SHORT);
+  1 win, 3 losses. 4 of 13 entries in one minute = the non-independence the frequency cap (#1) targets. The
+  `max_entries_per_minute: 2` cap would have throttled exactly this — still the one justified fix.
+- **Universe gate (#3) still NOT justified — re-confirmed, harder.** OLAELEC is a smid/new-IPO name *on the
+  drop-list*, and it was today's **sole winner**. `restrict_to_allowlist: true` would have deleted the day's
+  entire positive contribution and left −3.58%. Leave it OFF.
+- **LONG vs SHORT:** LONG 33% WR/+1.51; SHORT 0/4/+0.37. Short 0% WR is n=4 noise (shorts still net-positive
+  via two positive TIME_STOPs). No signal.
+- **Fast-stop <10min:** 3 trades, +3.49 net, 2 wins — fast resolution was *good* today (OLAELEC targets in
+  2–3 min), not a leak. Consistent with "stops/holds are non-problems."
+- **Gross-vs-net 8.2bps tax:** can't reproduce this session — DB stores only `pnl_pct_net` (no gross column),
+  so the cost-spread check needs the plan-reason join used in the 3-session workflow. Prior finding stands;
+  not re-measured today.
+
+**Bottom line (4 sessions):** unchanged. No at-entry feature separates winners from losers; results are
+irreducible noise around a cost-driven small P&L, periodically masked or unmasked by one dominant name. The
+only justified, still-DEFAULT-OFF change is the **frequency cap (#1)**; the **universe gate (#3) stays OFF**
+(today's evidence argues against it outright). Still need ~30 sessions before any edge/no-edge call is final.

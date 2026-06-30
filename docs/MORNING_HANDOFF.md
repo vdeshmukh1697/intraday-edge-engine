@@ -1,8 +1,26 @@
-# Morning Handoff — live system ready for the open (written 2026-06-30, ~02:40 IST)
+# Morning Handoff — live system ready for the open (updated 2026-06-30, ~14:35 IST by morning-verify)
 
 > Self-contained context to continue in a fresh session with zero re-derivation. Repo:
 > `/Users/vikrantdeshmukh/Personal projects`. Branch: `feat/full-nse-realtime-pipeline`.
-> Python: `.venv/bin/python`. **Next session: 2026-06-30 (Tue) 09:15 IST.** Paper-only — no live orders.
+> Python: `.venv/bin/python`. **Next session: 2026-07-01 (Wed) 09:15 IST.** Paper-only — no live orders.
+
+## 🔄 2026-06-30 morning-verify run (end-of-day state) — all GREEN
+Verified mid-session at 14:35 IST (task fired in the afternoon, not at open):
+- launchd **tunnel + scheduler RUNNING**; API:8000 (pid 42436), scheduler (44664), caffeinate (44666) all UP.
+- **Dhan token VALID → 2026-07-01 08:30** (TOTP auto-login working). Tunnel `east-gaps-silver-participated`:
+  `/healthz` ok, `/api/auth/status` connected:true. WS `/ws/quotes` streaming (a 429 in testing was just the
+  verify colliding with the live feed — DH-904 throttle, transient, not a fault).
+- **Live paper session ran fine**: live_status heartbeat fresh (14:30, last bar 14:29), run_id ties to the
+  scheduler proc. **13 trades today, all closed**, none after 11:46.
+- **Battery alert SENT via Telegram** — Mac is on BATTERY (61%, ~20h). Fine for today; **must be plugged in
+  overnight** or tonight's 06:00 token-renew + tomorrow's 08:30/08:45/09:15 jobs miss. (User action; caffeinate
+  can't save a dead battery.) ⚠️ This is still THE one manual action.
+- **Session 4 folded** into `docs/PAPER_TRADING_ANALYSIS_2026-06.md` (dataset `scratchpad/session_2026-06-30.json`):
+  net +1.88% but **100% from one name (OLAELEC, 3/3 targets); strip it → 0/10, −3.58%.** Confidence still
+  non-predictive (every conf=1.00 trade lost), 09:42 fired a 4-entry burst (frequency-cap #1 still the only
+  justified fix), universe gate #3 re-confirmed UNjustified (OLAELEC is on the drop-list and was the sole
+  winner). Noise, not edge. Gated config changes remain DEFAULT OFF. **Tomorrow's run: confirm final trade
+  count (top-up if any 14:35–15:30 entries landed) — conclusion is robust regardless.**
 
 ## ✅ VERIFIED STATUS (end-to-end, just now) — everything green except battery
 - launchd agents **tunnel + scheduler RUNNING**; procs API:8000, cloudflared, scheduler, **caffeinate** all UP.
