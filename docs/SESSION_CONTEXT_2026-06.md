@@ -46,7 +46,27 @@ Detail: `docs/OPS_ENGINE_TUNNEL.md`; memory `dashboard-tunnel-keepalive`.
   `/ws/quotes` (WebSocket); auto-reconnect; falls back to 15s poll.
 - **Stock pages** `/stock/<SYM>`: always-on live price line graph (`/ws/quotes?symbols=`), auto-starts;
   removed the old synthetic "Go live" replay; historical candles remain below.
-- Backend: `signal_engine/api/app.py` `/ws/quotes` (Dhan REST LTP batch on a thread). Frontend in `web/`.
+- Backend: `signal_engine/api/app.py` `/ws/quotes` (now a **shared `_QuoteHub`** — one poller for all
+  connections; see below). Frontend in `web/`.
+
+### 4b. Dashboard latency + paper-page upgrade (2026-06-30) — measured & verified live
+Full report: `docs/LATENCY_FINDINGS_2026-06.md`.
+- **Latency root-cause + fix:** `/ws/quotes` polled Dhan REST per connection; Dhan's quote REST is
+  ~1 req/s so a 2nd concurrent consumer got 429'd and dropped ticks, and each connection had a ~3.4s
+  cold start (scrip master re-download). New **`_QuoteHub`**: one shared poll of the union of symbols,
+  warm cache for all connections. Measured before→after (live): 2nd consumer throttled 16/16 → **3
+  concurrent connections 0/30 throttled, ~0.12s first tick (was ~3.4s), 1 Dhan poll for N**. Paper
+  engine untouched (it uses the separate WS binary feed). Tunnel hop measured ~110–145ms (named-tunnel
+  is the recommended next ops upgrade; WS already amortizes it). Dhan-WS-feed swap deliberately NOT
+  done (would contend with the live paper feed).
+- **`/api/intraday/{symbol}`** (today's 1m line from the open; Dhan historical → Yahoo/archive
+  fallback; TTL-cached; reuses the hub broker) → the **stock live graph now seeds with the day's
+  history from 09:15, then streams live** (was blank-from-page-open). Strictly-monotonic stitch.
+- **Paper page is now a broker-account view:** account value, return on capital, realized +
+  unrealized P&L (₹ and %), open exposure, capital deployed/trade, win/loss, max drawdown — from
+  `/api/paper/analytics` (now exposes `account_capital`). **Stocks are clickable** → `/stock/<SYM>`.
+- Verified end-to-end in Chrome at market open: paper account value ₹96,654 (−3.35% ROC), OLAELEC
+  graph seeded from dhan then ticking ₹43.72, symbol links resolve.
 
 ## 5. Live paper-trading analysis (gap analysis)
 `docs/PAPER_TRADING_ANALYSIS_2026-06.md`; memory `live-strategy-paper-analysis`. Strategy `vwap_ema_adx` is
@@ -66,7 +86,9 @@ live_universe.restrict_to_allowlist). Need ~30 sessions before enabling anything
 `52e81ed` jump-drift spread · `5aa2fde` Deflated-Sharpe/multiple-testing · `b10ca50` launchd keep-alive ·
 `fb48f4b` paper analysis + gated freq/universe caps · `56c066c` caffeinate + premarket grace ·
 `d49136a` 3-session gap analysis (universe gate NOT justified) · `7952dd2` TOTP auto-login ·
-`466d399` live watchlist (WS) · `27a070a` stock live graph · `3a2b426` 08:45 healthcheck + morning handoff.
+`466d399` live watchlist (WS) · `27a070a` stock live graph · `3a2b426` 08:45 healthcheck + morning handoff ·
+`8b2d72b` shared quote hub (latency) + intraday seed + account_capital · `875343f` seed stock live graph ·
+`4d17cff` broker-account paper page + clickable stocks.
 
 ## 8. Where everything lives
 - Ops/today: `docs/MORNING_HANDOFF.md`, `docs/OPS_ENGINE_TUNNEL.md`.

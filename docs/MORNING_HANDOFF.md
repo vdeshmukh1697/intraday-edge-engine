@@ -22,6 +22,21 @@ Verified mid-session at 14:35 IST (task fired in the afternoon, not at open):
   winner). Noise, not edge. Gated config changes remain DEFAULT OFF. **Tomorrow's run: confirm final trade
   count (top-up if any 14:35–15:30 entries landed) — conclusion is robust regardless.**
 
+## 🚀 2026-06-30 dashboard + latency upgrade (afternoon, shipped + verified live) — see `docs/LATENCY_FINDINGS_2026-06.md`
+Four changes, committed (`8b2d72b`, `875343f`, `4d17cff`) and **deployed** (tunnel restarted → Vercel
+redeployed local `web/`). All verified in Chrome at market open; tsc + tests green. Paper-only, no order paths.
+- **Latency:** `/ws/quotes` was polling Dhan REST per connection (Dhan quote REST ≈1 req/s → a 2nd
+  consumer got 429'd + dropped ticks; ~3.4s cold start each). New shared **`_QuoteHub`** = one poll for
+  all connections. Before→after (live): 2nd consumer throttled 16/16 → **3 concurrent 0/30 throttled,
+  ~0.12s first tick, 1 Dhan poll for N**. Live paper engine untouched (separate WS binary feed).
+- **Stock live graph** now **seeds with today's intraday from the 09:15 open** (`/api/intraday/{symbol}`,
+  Dhan historical → Yahoo/archive fallback, TTL-cached), then streams live — was blank-from-page-open.
+- **Paper page = broker account**: account value, ROC, realized+unrealized P&L (₹+%), exposure, win/loss,
+  max drawdown (`/api/paper/analytics` now returns `account_capital`). **Stocks are clickable → /stock/<SYM>.**
+- NOTE the tunnel URL changed twice today (two restarts) — current is read dynamically (grep recipe below).
+  Recommended next ops upgrade: **named Cloudflare tunnel** (kills the ~110–145ms hop variance + per-restart
+  churn). Did NOT swap `/ws/quotes` to the Dhan WS binary feed (would contend with the live paper feed).
+
 ## ✅ VERIFIED STATUS (end-to-end, just now) — everything green except battery
 - launchd agents **tunnel + scheduler RUNNING**; procs API:8000, cloudflared, scheduler, **caffeinate** all UP.
 - **Dhan token VALID** (TOTP auto-login working — `DHAN_TOTP_SECRET` + `DHAN_PIN` set in `.env`, `SE_DATA_SOURCE=dhan`).
