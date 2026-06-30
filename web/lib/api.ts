@@ -264,6 +264,7 @@ export interface PaperReport {
   by_time_of_day: GroupRow[];
   auto_summary: string[];
   notional_per_trade: number;
+  account_capital: number;
 }
 
 export interface PaperFilter {
@@ -411,6 +412,21 @@ export function getChart(
   const qs = q.toString();
   return getJSON<ChartResponse>(
     `/api/chart/${encodeURIComponent(symbol)}${qs ? `?${qs}` : ""}`
+  );
+}
+
+// Today's intraday price line (epoch secs + close) from the 09:15 open to now — used to seed the
+// live chart so it shows the full day, then live /ws/quotes ticks extend it past the last bar.
+export interface IntradayResponse {
+  symbol: string;
+  points: LinePoint[];
+  source: string; // "dhan" | "yahoo" | "archive" | "none"
+  market_open: boolean;
+}
+
+export function getIntraday(symbol: string): Promise<IntradayResponse> {
+  return getJSON<IntradayResponse>(
+    `/api/intraday/${encodeURIComponent(symbol)}`
   );
 }
 
