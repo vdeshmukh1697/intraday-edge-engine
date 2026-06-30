@@ -16,9 +16,12 @@ import os
 import threading
 from datetime import date, datetime, time
 
+import pytz
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
+
+_IST = pytz.timezone("Asia/Kolkata")
 
 from signal_engine.api.serializers import (
     backtest_to_json,
@@ -180,9 +183,111 @@ def _parse_date(s: str = None) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date() if s else date(2025, 6, 23)
 
 
+class _QuoteHub:
+    """One shared Dhan-REST LTP poller for ALL ``/ws/quotes`` connections (latency + rate-limit fix).
+
+    BEFORE: every WebSocket connection built its own broker (≈3.4 s cold start — the scrip master is
+    re-downloaded each ``build_broker``) and polled Dhan independently. Dhan's quote REST is ≈1 req/s,
+    so a *second* concurrent connection (watchlist + a stock chart, or two tabs) blew past the quota
+    and got DH-904/429'd — the dashboard then skipped that update, so the live price stalled for
+    several seconds. Measured: a lone connection streams cleanly at ~1.1 s; a second consumer was
+    throttled on 16/16 polls.
+
+    AFTER: a single background task polls the UNION of every connection's symbols once per
+    ``POLL_INTERVAL`` and all connections read from the warm cache. N connections → 1 Dhan poll,
+    instant first tick (cache already warm), zero self-collision. The broker is built once and shared
+    (its HTTP layer is stateless ``urllib`` per call, so the poll loop and the intraday endpoint can
+    use it concurrently). Read-only — never places orders.
+    """
+
+    POLL_INTERVAL = 1.0          # Dhan quote REST is ≈1 req/s; one poller stays comfortably under it.
+
+    def __init__(self, cfg):
+        self._cfg = cfg
+        self._subs: dict = {}        # conn_id -> set[str]  (empty set = wants the full watchlist)
+        self._cache: dict = {}       # symbol -> ltp (latest)
+        self._ts: int = 0            # epoch secs of the last successful poll
+        self._last_error = None
+        self._broker = None
+        self._broker_token = None
+        self._watchlist: list = []
+        self._task = None
+        self._next_id = 0
+        self._broker_lock = threading.Lock()
+
+    # --- shared broker (reused by the poll loop AND /api/intraday) ----------
+    def broker(self):
+        """Thread-safe shared DhanBroker, rebuilt only when the (TOTP-rotated) token changes.
+
+        Sync + lock-guarded so the async poll loop (via ``to_thread``) and the intraday request
+        handler (threadpool) build the scrip master at most once between token rotations."""
+        from signal_engine.config import load_config as _load
+        from signal_engine.config import refresh_runtime_env, resolve_live_watchlist
+        from signal_engine.factory import build_broker
+
+        refresh_runtime_env()                       # pick up the freshest token from .env
+        tok = os.getenv("DHAN_ACCESS_TOKEN")
+        with self._broker_lock:
+            if self._broker is None or tok != self._broker_token:
+                live_cfg = _load()
+                self._watchlist = resolve_live_watchlist(live_cfg)
+                self._broker = build_broker(live_cfg, datetime.now(_IST).date())
+                self._broker_token = tok
+            return self._broker
+
+    # --- subscription registry ---------------------------------------------
+    def subscribe(self, symbols) -> int:
+        cid = self._next_id
+        self._next_id += 1
+        self._subs[cid] = set(symbols or [])        # empty set ⇒ full watchlist
+        if self._task is None or self._task.done():
+            self._task = asyncio.ensure_future(self._run())
+        return cid
+
+    def unsubscribe(self, cid) -> None:
+        self._subs.pop(cid, None)
+
+    def _union(self):
+        want_all = any(not s for s in self._subs.values())
+        u = set(self._watchlist) if want_all else set()
+        for s in self._subs.values():
+            u.update(s)
+        return sorted(u)[:100]                       # Dhan caps a batch; the watchlist is ~40
+
+    def slice(self, symbols):
+        if symbols:
+            return {s: self._cache[s] for s in symbols if s in self._cache}
+        return dict(self._cache)
+
+    # --- the single poll loop ----------------------------------------------
+    async def _run(self) -> None:
+        backoff = 0.0
+        while self._subs:
+            try:
+                broker = await asyncio.to_thread(self.broker)   # builds _watchlist on first call
+                syms = self._union()
+                if syms:
+                    quotes = await asyncio.to_thread(broker.quote, syms)
+                    self._cache.update({s: round(t.ltp, 2) for s, t in quotes.items() if t.ltp})
+                    self._ts = int(datetime.now().timestamp())
+                    self._last_error = None
+                backoff = 0.0
+            except Exception as exc:  # noqa: BLE001 - one bad poll must not kill the shared loop
+                msg = str(exc)
+                if "DH-904" in msg or "429" in msg or "Rate_Limit" in msg:
+                    self._last_error = "Dhan rate limit (DH-904)"
+                    backoff = min(backoff + 0.5, 3.0)
+                else:
+                    self._last_error = msg[:200]
+                    backoff = min(backoff + 1.0, 5.0)
+            await asyncio.sleep(self.POLL_INTERVAL + backoff)
+        self._task = None
+
+
 def create_app() -> FastAPI:
     cfg = load_config()
     cal = NSECalendar()
+    quote_hub = _QuoteHub(cfg)   # one shared LTP poller for every /ws/quotes connection
     app = FastAPI(title="Intraday Signal Engine API", version="0.1.0",
                   description="Read-only signal/decision-support API. No order placement.")
 
@@ -385,6 +490,69 @@ def create_app() -> FastAPI:
         df = generate_session(symbol, d, seed=seed, regime="trend_up")
         return chart_to_json(symbol, df, dict(cfg.settings.strategy.params))
 
+    _intraday_cache: dict = {}     # symbol -> (fetched_epoch, payload); short TTL (see below)
+    _INTRADAY_TTL = 45.0           # seconds — keeps repeated page loads off the shared Dhan quota
+
+    @app.get("/api/intraday/{symbol}", dependencies=[Depends(_require_token)])
+    async def intraday(symbol: str):
+        """TODAY's 1-minute price line (epoch secs + close) from the 09:15 open to now — used to
+        SEED the live price chart so it shows the whole day, not just from when the page opened.
+
+        Real-time source order: Dhan intraday (``broker.historical`` 1m, exact + live) → Yahoo 1d/1m
+        (free, ~15 min delayed) → the archived latest session (last resort, may be a prior day).
+        TTL-cached per symbol; the live ``/ws/quotes`` ticks extend it past the last bar on the
+        client. Returns ``{symbol, points:[{time,value}], source, market_open}``."""
+        import time as _t
+
+        sym = symbol.upper()
+        now = _t.time()
+        hit = _intraday_cache.get(sym)
+        if hit and now - hit[0] < _INTRADAY_TTL:
+            return hit[1]
+
+        points: list = []
+        source = "none"
+        if cfg.env.data_source == "dhan":
+            try:
+                today = datetime.now(_IST)
+                start = _IST.localize(datetime.combine(today.date(), time(9, 15)))
+                broker = await asyncio.to_thread(quote_hub.broker)   # shared; no scrip re-download
+                bars = await asyncio.to_thread(broker.historical, sym, "1m", start, today)
+                points = [{"time": int(b.ts.timestamp()), "value": round(float(b.close), 2)}
+                          for b in bars if b.ts.date() == today.date()]
+                if points:
+                    source = "dhan"
+            except Exception:  # noqa: BLE001 - fall through to Yahoo/archive on any error
+                points = []
+        if not points and cfg.env.data_source != "mock":
+            try:
+                from signal_engine.data.yahoo_batch import fetch_intraday
+                df = await asyncio.to_thread(
+                    lambda: fetch_intraday([sym], interval="1m", period="1d").get(sym))
+                if df is not None and not df.empty:
+                    points = [{"time": int(pd_ts.timestamp()), "value": round(float(c), 2)}
+                              for pd_ts, c in df["close"].items()]
+                    source = "yahoo"
+            except Exception:  # noqa: BLE001
+                points = []
+        if not points and cfg.env.data_source != "mock":
+            try:
+                from signal_engine.storage.bars import ParquetBarStore
+                df = ParquetBarStore(cfg.env.parquet_dir).load_latest_session(sym)
+                if df is not None and not df.empty:
+                    points = [{"time": int(pd_ts.timestamp()), "value": round(float(c), 2)}
+                              for pd_ts, c in df["close"].items()]
+                    source = "archive"
+            except Exception:  # noqa: BLE001
+                points = []
+
+        now_ist = datetime.now(_IST)
+        market_open = (cal.is_trading_day(now_ist.date())
+                       and time(9, 15) <= now_ist.time() <= time(15, 30))
+        payload = {"symbol": sym, "points": points, "source": source, "market_open": market_open}
+        _intraday_cache[sym] = (now, payload)
+        return payload
+
     # --- Paper-trading tracker & analytics ---------------------------------
     def _paper_enriched(start, end, symbol, strategy):
         """Load filtered paper trades from the DB and enrich with absolute P&L + charges."""
@@ -414,6 +582,7 @@ def create_app() -> FastAPI:
         enriched, notional = _paper_enriched(start, end, symbol, strategy)
         report = pa.full_report(enriched)
         report["notional_per_trade"] = notional
+        report["account_capital"] = float(cfg.risk.risk.account_capital)
         return report
 
     def _open_positions_view():
@@ -571,52 +740,42 @@ def create_app() -> FastAPI:
     async def ws_quotes(ws: WebSocket, interval: float = 1.0, symbols: str = None):
         """Stream live LTP for the watchlist (or a specific ``symbols`` CSV), every ``interval`` s.
 
-        Backs the dashboard's live-price + sparkline watchlist. Uses the Dhan REST LTP batch
-        (``broker.quote``) on a background thread so the event loop never blocks. During market
-        hours these tick; outside hours they hold the last traded price (so the UI isn't empty).
-        Needs SE_DATA_SOURCE=dhan + a valid token (refreshed from .env per connection).
+        Backs the dashboard's live-price + sparkline watchlist and the per-stock live chart. All
+        connections are fed from a SHARED in-process poller (:class:`_QuoteHub`) — one Dhan REST
+        poll covers the union of every connection's symbols, so opening N charts/tabs no longer
+        multiplies Dhan load or trips its ~1 req/s rate limit (the old per-connection polling did).
+        During market hours these tick; outside hours they hold the last traded price (so the UI
+        isn't empty). Needs SE_DATA_SOURCE=dhan + a valid token (refreshed from .env by the hub).
         """
         await ws.accept()
         if cfg.env.data_source != "dhan":
             await ws.send_json({"error": f"live quotes need SE_DATA_SOURCE=dhan (is {cfg.env.data_source!r})"})
             await ws.close()
             return
-        from datetime import datetime as _dt
-
-        import pytz
-
-        from signal_engine.config import load_config as _load, refresh_runtime_env, resolve_live_watchlist
-        from signal_engine.factory import build_broker
-
-        refresh_runtime_env()           # pick up the freshest (TOTP-renewed) token from .env
-        live_cfg = _load()
-        try:
-            broker = await asyncio.to_thread(
-                build_broker, live_cfg, _dt.now(pytz.timezone("Asia/Kolkata")).date())
-        except Exception as exc:  # noqa: BLE001
-            await ws.send_json({"error": f"broker init failed: {str(exc)[:200]}"})
-            await ws.close()
-            return
         if symbols:
             syms = [s.strip().upper() for s in symbols.split(",") if s.strip()][:100]
         else:
-            syms = resolve_live_watchlist(live_cfg)
-        interval = max(0.5, min(float(interval), 5.0))  # clamp to a sane 0.5–5s cadence
+            syms = []                                   # empty ⇒ full watchlist (resolved by the hub)
+        interval = max(0.5, min(float(interval), 5.0))  # clamp the PUSH cadence to a sane 0.5–5s
+        cid = quote_hub.subscribe(syms)
         try:
+            # Snappy first paint: wait up to ~3s for the shared cache to warm for these symbols
+            # (on a cold process the very first poll has to build the broker + scrip master).
+            for _ in range(30):
+                if quote_hub.slice(syms):
+                    break
+                await asyncio.sleep(0.1)
             while True:
-                try:
-                    quotes = await asyncio.to_thread(broker.quote, syms)
-                    await ws.send_json({
-                        "ts": int(_dt.now().timestamp()),
-                        "quotes": {s: round(t.ltp, 2) for s, t in quotes.items() if t.ltp},
-                    })
-                except WebSocketDisconnect:
-                    return
-                except Exception as exc:  # noqa: BLE001 - one bad poll shouldn't kill the stream
-                    await ws.send_json({"warn": str(exc)[:200]})
+                data = quote_hub.slice(syms)
+                payload = {"ts": quote_hub._ts or int(datetime.now().timestamp()), "quotes": data}
+                if not data and quote_hub._last_error:
+                    payload["warn"] = quote_hub._last_error
+                await ws.send_json(payload)
                 await asyncio.sleep(interval)
         except WebSocketDisconnect:
             return
+        finally:
+            quote_hub.unsubscribe(cid)
 
     @app.on_event("startup")
     def _prewarm_leaderboard() -> None:
