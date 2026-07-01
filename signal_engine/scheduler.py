@@ -21,6 +21,7 @@ the scheduler. Live order placement is never scheduled (decision-support only).
 from __future__ import annotations
 
 import os
+import time as _time
 from datetime import date
 from typing import Optional
 
@@ -76,7 +77,18 @@ def renew_token_job(cfg: Optional[AppConfig] = None) -> None:
         if totp_secret and pin and cfg.env.dhan_client_id:
             # PERMANENT path: mint a brand-new token via TOTP (no browser, no manual OTP). Works
             # even from a fully-expired state, so the engine self-heals after any downtime.
-            new = generate_token_via_totp(cfg.env.dhan_client_id, pin, totp_secret)
+            # Dhan intermittently rejects a code with "Invalid TOTP" (window-edge/reuse — seen
+            # 2/2 on scheduler startups 2026-07-02 while a mint minutes later succeeded), so on
+            # that specific rejection wait out the 30s TOTP window and try the next code once.
+            try:
+                new = generate_token_via_totp(cfg.env.dhan_client_id, pin, totp_secret)
+            except Exception as first_exc:  # noqa: BLE001
+                if "Invalid TOTP" not in str(first_exc):
+                    raise
+                _log.warning("TOTP mint rejected (%s) — retrying with the next TOTP window",
+                             first_exc)
+                _time.sleep(35)
+                new = generate_token_via_totp(cfg.env.dhan_client_id, pin, totp_secret)
             via = "TOTP auto-login"
         else:
             # Fallback: RenewToken (extends an ACTIVE token; works only for Dhan-Web tokens).

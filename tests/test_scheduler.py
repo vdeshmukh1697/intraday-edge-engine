@@ -23,3 +23,43 @@ def test_jobs_skip_non_trading_day(monkeypatch):
     s.premarket_job(load_config())
     s.scan_job(load_config())
     s.archive_job(load_config())
+
+
+def test_renew_token_retries_next_totp_window(monkeypatch):
+    """A transient 'Invalid TOTP' rejection must retry once with the next 30s window's code
+    (seen 2/2 on 2026-07-02 scheduler startups); any other failure must not retry."""
+    import signal_engine.scheduler as s
+    from signal_engine.brokers import dhan_auth
+
+    monkeypatch.setenv("SE_DATA_SOURCE", "dhan")
+    monkeypatch.setenv("DHAN_CLIENT_ID", "cid")
+    monkeypatch.setenv("DHAN_TOTP_SECRET", "JBSWY3DPEHPK3PXP")
+    monkeypatch.setenv("DHAN_PIN", "1234")
+
+    calls = {"mint": 0, "slept": []}
+    monkeypatch.setattr(s._time, "sleep", lambda secs: calls["slept"].append(secs))
+
+    def flaky_mint(client_id, pin, secret):
+        calls["mint"] += 1
+        if calls["mint"] == 1:
+            raise RuntimeError("generateAccessToken (TOTP) failed (HTTP 200): "
+                               "{'message': 'Invalid TOTP', 'status': 'error'}")
+        return "fresh-token"
+
+    saved = {}
+    monkeypatch.setattr(dhan_auth, "generate_token_via_totp", flaky_mint)
+    monkeypatch.setattr(dhan_auth, "update_env_token", lambda tok: saved.update(tok=tok))
+
+    s.renew_token_job()
+    assert calls["mint"] == 2                 # failed once, retried once
+    assert calls["slept"] == [35]             # waited out the TOTP window
+    assert saved["tok"] == "fresh-token"      # the retry's token was persisted
+
+    # Non-TOTP failures must NOT retry (single attempt, error logged, no raise).
+    calls["mint"] = 0
+    def hard_fail(client_id, pin, secret):
+        calls["mint"] += 1
+        raise RuntimeError("network down")
+    monkeypatch.setattr(dhan_auth, "generate_token_via_totp", hard_fail)
+    s.renew_token_job()
+    assert calls["mint"] == 1
