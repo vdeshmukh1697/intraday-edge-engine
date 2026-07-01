@@ -59,3 +59,49 @@ TTL-cached (45 s), so it doesn't reintroduce REST-quota pressure.
 - Concurrent-connection proof: `scratchpad/concurrent_ws.py` (3 parallel `/ws/quotes`, reports
   first-tick + warn ratio). Run during market hours.
 - Tunnel vs local: `curl -w '%{time_total}'` on `/healthz` locally and via the tunnel URL.
+
+## 2026-07-02 follow-up audit
+
+**Measurement caveat: market CLOSED** (probed ≈04:00–04:30 IST). `/ws/quotes` holds the last traded
+price, so WS numbers verify the hub/push path, NOT market-hours Dhan throttling (that was proven
+2026-06-30). Probes: `scratchpad/probe_rest_2026-07-02.sh`, `scratchpad/probe_ws_2026-07-02.py`.
+
+### Current state (before this pass)
+| Hop | Measured | Notes |
+|---|---|---|
+| Local API compute (p50 of 8) | `/healthz` 2 ms · `/api/live/status` 3 ms · `/api/watchlist` 12 ms · `/api/intraday/RELIANCE` 11 ms · `/api/paper/analytics` 18 ms · `/api/paper/trades` 24 ms | still not the bottleneck |
+| **`/api/premarket`** | **2.3–3.6 s per call, EVERY call** | re-fetches Yahoo cues + RSS news per request; slowest page by far |
+| Tunnel hop, warm connection | ~75–120 ms steady, jitter spikes to ~340 ms | fresh-`curl` totals of ~1.15 s are ~1.03 s DoH DNS bootstrap (probe artifact — browsers cache DNS); TLS-to-TTFB delta ≈ 86 ms |
+| Tunnel compression | CF edge **already gzips** REST responses (observed `content-encoding: gzip` via tunnel, none locally) | server-side GZipMiddleware would be redundant |
+| `/ws/quotes` local | open 27 ms · first tick 129 ms (40 quotes) · cadence 1.00 s clean | hub fix from 06-30 holding |
+| `/ws/quotes` tunnel | first tick 710 ms incl. DNS+TLS+upgrade (paid once) · cadence ~0.96 s | fine |
+| Vercel dashboard | warm TTFB 35–44 ms · page HTML ~6 KB · watchlist route JS = **148 KB gzipped** (9 chunks) | healthy; nothing to fix |
+| AuthGate (frontend) | blanks the whole app until `/api/auth/status` returns → serialized ~90–120 ms warm / ~1 s cold **before any content or data fetch, on every page load** | structural waterfall |
+
+### Fixed (working tree, uncommitted; verified on a separate uvicorn @8010)
+| Change | Before | After |
+|---|---|---|
+| `/api/premarket` TTL cache (300 s, keyed by full param set, bounded 32 entries) — `signal_engine/api/app.py` | 2.3–3.6 s every call | **~1.5 ms** on hit (first call per param set still pays compute) |
+| AuthGate optimistic render — `web/components/AuthGate.tsx` | blank screen + all page fetches serialized behind the auth round-trip (~120 ms warm, ~1 s cold) | app renders immediately; gate still appears if the token is actually expired |
+
+Tests: `tests/test_api.py` 20/20 pass; `web` `tsc --noEmit` clean.
+
+### Rejected (measured first)
+- **GZipMiddleware / payload trimming** — CF edge already compresses the tunnel path; payloads are
+  ≤43 KB and the hop is RTT-bound, not bandwidth-bound. Zero win.
+- **uvicorn keep-alive / worker tuning** — cloudflared→uvicorn is localhost (sub-ms reconnect);
+  browser→CF keep-alive is CF-managed. ⚠️ **Never set `--workers >1`**: the in-process `_QuoteHub`
+  and leaderboard caches assume one process — N workers = N Dhan pollers = the 429 bug back.
+- **Micro-TTL caches on `/api/watchlist` / `/api/paper/*` / `/api/live/status`** — saves 3–24 ms
+  against a ~120 ms tunnel RTT (≤20 %) and adds staleness to live paper views. Low ROI.
+- **next.config.js changes** — nothing harmful present; Vercel compresses; bundles are small.
+
+### Remaining, ranked by user impact
+1. **Named Cloudflare tunnel** (unchanged from 06-30): removes hop variance (~120 ms steady,
+   ~340 ms jitter spikes, ~1 s cold TLS) and per-restart URL churn. Manual `cloudflared tunnel login`
+   — no cert at `~/.cloudflared/cert.pem`, so still skipped.
+2. **`/api/backtest` is broken/very slow**: the RUNNING (stale) process 500s on it (old
+   `send_alert` ImportError — already fixed in source; clears at the next coordinated restart).
+   On current code it runs a **full 10-day synthetic backtest per request, uncached (>60 s)**.
+   Needs a cache or precompute before the backtest page is usable; not a "safe quick fix", so left.
+3. **15 s REST polls** — each poll costs one warm-connection tunnel RTT (~90–120 ms); fine.

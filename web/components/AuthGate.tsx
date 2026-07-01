@@ -44,7 +44,13 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
       </>
     );
   }
-  if (!status) return null; // brief: status in flight
+  // Status still in flight: render the app optimistically instead of a blank screen.
+  // The status probe crosses the Cloudflare tunnel (~120 ms warm, ~1 s on a cold
+  // connection) and blanking here serialized EVERY page's first paint — and all of its
+  // data fetches — behind that round-trip. If the token turns out to be expired, the
+  // gate simply appears a beat later (the stale-token case is rare; the common case is
+  // connected, which used to pay the delay for nothing).
+  if (!status) return <>{children}</>;
 
   if (status.auth_required && !status.connected) {
     return (

@@ -419,6 +419,11 @@ def create_app() -> FastAPI:
                        with_news=news, with_ml=ml)
         return leaderboard_to_json(res, d)
 
+    _premarket_cache: dict = {}    # (date, seed, top, universe) -> (fetched_epoch, payload)
+    _PREMARKET_TTL = 300.0         # seconds — the real path re-fetches Yahoo cues + RSS news per
+                                   # call (measured 2.3–3.6 s); a pre-open briefing doesn't change
+                                   # meaningfully inside 5 min, so serve the warm copy instead.
+
     @app.get("/api/premarket", dependencies=[Depends(_require_token)])
     def premarket(date_str: str = Query(default=None, alias="date"), seed: int = 42,
                   top: int = Query(default=40, ge=1, le=200),
@@ -427,9 +432,16 @@ def create_app() -> FastAPI:
         (not just the trading watchlist) and shows the top `top` by conviction. With a real data
         source it uses real Yahoo global cues + real RSS news + real prior-session momentum from
         the archive; falls back to the synthetic path (and the watchlist) when the archive is
-        empty or SE_DATA_SOURCE=mock."""
+        empty or SE_DATA_SOURCE=mock. TTL-cached per full param set (see _PREMARKET_TTL)."""
+        import time as _t
+
         from signal_engine.factory import build_cues_provider, build_news_provider
         from signal_engine.premarket.briefing import build_briefing
+
+        ckey = (date_str, seed, top, universe)
+        hit = _premarket_cache.get(ckey)
+        if hit and _t.time() - hit[0] < _PREMARKET_TTL:
+            return hit[1]
 
         d = _parse_date(date_str)
         symbols = None
@@ -456,6 +468,9 @@ def create_app() -> FastAPI:
         payload = premarket_to_json(briefing)
         payload["meta"] = {**meta, "scored": len(symbols) if symbols else len(cfg.settings.watchlist),
                            "shown": len(payload["picks"])}
+        if len(_premarket_cache) >= 32:      # bound the cache (params are user-controlled)
+            _premarket_cache.pop(min(_premarket_cache, key=lambda k: _premarket_cache[k][0]))
+        _premarket_cache[ckey] = (_t.time(), payload)
         return payload
 
     @app.get("/api/backtest", dependencies=[Depends(_require_token)])
