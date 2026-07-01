@@ -90,8 +90,10 @@ def log_prediction(db_path: str, *, message: str, level: str = "info",
 def fetch_predictions(conn: sqlite3.Connection, *, limit: int = 200,
                       kind: Optional[str] = None, symbol: Optional[str] = None,
                       since_id: Optional[int] = None) -> List[dict]:
-    """Newest-first page of the predictions log (``since_id`` for cheap live polling)."""
-    conn.execute(PREDICTIONS_DDL)  # table may predate any alert on a fresh DB
+    """Newest-first page of the predictions log (``since_id`` for cheap live polling).
+
+    Read-only by design: no DDL here (a CREATE on every dashboard poll would make each
+    read take the write path). A DB with no predictions table yet just returns []."""
     clauses, args = ["1=1"], []
     if kind:
         clauses.append("kind = ?")
@@ -105,8 +107,14 @@ def fetch_predictions(conn: sqlite3.Connection, *, limit: int = 200,
     args.append(max(1, min(int(limit), 1000)))
     sql = (f"SELECT * FROM predictions WHERE {' AND '.join(clauses)} "
            f"ORDER BY id DESC LIMIT ?")
+    try:
+        rows = list(conn.execute(sql, args))
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return []
+        raise
     out = []
-    for r in conn.execute(sql, args):
+    for r in rows:
         row = dict(r)
         for key in ("reasons", "extra"):
             if row.get(key):

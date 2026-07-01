@@ -56,6 +56,16 @@ class SignalRepository:
 
     def init_db(self) -> None:
         cur = self.conn.cursor()
+        # WAL: readers never block writers (and vice versa). The dashboard API polls this DB
+        # (predictions/status/positions every few seconds) while the live engine writes every
+        # bar — under the default DELETE journal a read could make the engine's commit lose a
+        # busy-timeout race and drop a trade row. WAL is persistent (database-level), local-disk
+        # only (true here), and safe across our multi-process readers/writers.
+        try:
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA synchronous=NORMAL")  # durable enough with WAL; much faster
+        except sqlite3.OperationalError:
+            pass  # e.g. read-only mounts in odd test setups — never fatal
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS trade_plans (

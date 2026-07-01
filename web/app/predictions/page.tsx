@@ -71,10 +71,19 @@ export default function PredictionsPage() {
         .then((d) => {
           setLastPoll(new Date());
           if (!d.predictions.length) return;
-          setRows((prev) =>
-            [...d.predictions, ...prev].slice(0, PAGE_SIZE)
+          maxIdRef.current = Math.max(
+            maxIdRef.current,
+            ...d.predictions.map((p) => p.id)
           );
-          maxIdRef.current = Math.max(maxIdRef.current, d.predictions[0].id);
+          // Merge dedup-by-id: dev remounts (StrictMode/Fast Refresh) and reconnect
+          // races can deliver rows we already hold — never render a duplicate.
+          setRows((prev) => {
+            const incoming = new Set(d.predictions.map((p) => p.id));
+            return [
+              ...d.predictions,
+              ...prev.filter((p) => !incoming.has(p.id)),
+            ].slice(0, PAGE_SIZE);
+          });
         })
         .catch(() => { /* transient poll failure — next tick retries */ });
     }, POLL_MS);
@@ -183,7 +192,16 @@ export default function PredictionsPage() {
                       : "—"}
                   </td>
                   <td className="muted small">{r.strategy ?? "—"}</td>
-                  <td className="muted small" style={{ maxWidth: 360, whiteSpace: "normal" }} title={r.message}>
+                  <td
+                    className="muted small"
+                    style={{
+                      maxWidth: 360,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                    title={r.message}
+                  >
                     {r.message}
                   </td>
                 </tr>
