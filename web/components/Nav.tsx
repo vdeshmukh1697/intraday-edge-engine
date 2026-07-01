@@ -8,6 +8,7 @@ const LINKS = [
   { href: "/watchlist", label: "Watchlist" },
   { href: "/premarket", label: "Pre-market" },
   { href: "/paper", label: "Paper Trading" },
+  { href: "/predictions", label: "Predictions" },
   { href: "/backtest", label: "Backtest" },
 ];
 

@@ -16,19 +16,32 @@ from signal_engine.config import AppConfig
 
 
 def build_alerter(cfg: AppConfig) -> Alerter:
+    inner: Alerter
     if cfg.env.alerter == "telegram":
         from signal_engine.alerts.telegram import TelegramAlerter
 
-        return TelegramAlerter(cfg.env.telegram_bot_token, cfg.env.telegram_chat_id)
-    if cfg.env.alerter == "whatsapp":
+        inner = TelegramAlerter(cfg.env.telegram_bot_token, cfg.env.telegram_chat_id)
+    elif cfg.env.alerter == "whatsapp":
         from signal_engine.alerts.whatsapp import WhatsAppAlerter
 
-        return WhatsAppAlerter(cfg.env.whatsapp_phone_id, cfg.env.whatsapp_token, cfg.env.whatsapp_to)
-    if cfg.env.alerter == "callmebot":
+        inner = WhatsAppAlerter(cfg.env.whatsapp_phone_id, cfg.env.whatsapp_token,
+                                cfg.env.whatsapp_to)
+    elif cfg.env.alerter == "callmebot":
         from signal_engine.alerts.callmebot import CallMeBotAlerter
 
-        return CallMeBotAlerter(cfg.env.callmebot_phone, cfg.env.callmebot_apikey)
-    return ConsoleAlerter()
+        inner = CallMeBotAlerter(cfg.env.callmebot_phone, cfg.env.callmebot_apikey)
+    else:
+        # Console stays unwrapped so tests/dev runs don't write rows into the real DB;
+        # SE_PREDICTIONS_LOG=1 opts it in (useful when smoke-testing the log locally).
+        import os
+
+        if os.getenv("SE_PREDICTIONS_LOG") != "1":
+            return ConsoleAlerter()
+        inner = ConsoleAlerter()
+    from signal_engine.alerts.recording import RecordingAlerter
+    from signal_engine.storage.repository import _path_from_url
+
+    return RecordingAlerter(inner, db_path=_path_from_url(cfg.env.db_url))
 
 
 def build_broker(

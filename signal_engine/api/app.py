@@ -623,6 +623,23 @@ def create_app() -> FastAPI:
         return {"notional_per_trade": notional, "count": len(positions),
                 "positions": positions}
 
+    @app.get("/api/predictions", dependencies=[Depends(_require_token)])
+    def predictions(limit: int = Query(default=200, ge=1, le=1000),
+                    kind: str = Query(default=None), symbol: str = Query(default=None),
+                    since_id: int = Query(default=None)):
+        """The predictions log: every alert pushed to Telegram, newest first, with its
+        structured parameters (entry/stop/target/confidence/sizing/exit P&L). ``since_id``
+        lets the dashboard poll cheaply — pass the max id it has and merge the delta."""
+        from signal_engine.storage.repository import SignalRepository
+
+        repo = SignalRepository(cfg.env.db_url)
+        try:
+            rows = repo.fetch_predictions(limit=limit, kind=kind, symbol=symbol,
+                                          since_id=since_id)
+        finally:
+            repo.close()
+        return {"count": len(rows), "predictions": rows}
+
     @app.get("/api/live/status", dependencies=[Depends(_require_token)])
     def live_status():
         """Liveness beacon for the dashboard: when the live loop last processed a bar, how many

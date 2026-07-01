@@ -63,4 +63,8 @@ def test_factory_builds_whatsapp(monkeypatch):
     from signal_engine.factory import build_alerter
 
     alerter = build_alerter(load_config())
-    assert isinstance(alerter, WhatsAppAlerter)
+    # Real outbound channels are wrapped so every send is mirrored to the predictions log.
+    from signal_engine.alerts.recording import RecordingAlerter
+
+    assert isinstance(alerter, RecordingAlerter)
+    assert isinstance(alerter.inner, WhatsAppAlerter)

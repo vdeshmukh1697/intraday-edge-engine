@@ -266,7 +266,9 @@ def cmd_health(args) -> int:
     if alert:
         from signal_engine.factory import build_alerter
 
-        build_alerter(cfg).send(alert, level="alert")
+        from signal_engine.alerts import send_alert
+
+        send_alert(build_alerter(cfg), alert, level="alert", meta={"kind": "health"})
         print(f"\n⚠️  DEGRADATION ALERT FIRED: {alert}")
     else:
         print(f"\n✓ Health above threshold ({args.threshold}); no alert.")
@@ -333,7 +335,14 @@ def cmd_premarket(args) -> int:
                f"{o.risk_tone.value}. Top pick: "
                + (f"{top.symbol} {top.bias.value} ({top.setup}, conf {top.confidence:.0f})"
                   if top else "none"))
-        build_alerter(cfg).send(msg, level="signal")
+        from signal_engine.alerts import send_alert
+
+        meta = {"kind": "premarket", "gap_bias": o.gap_bias.value,
+                "expected_gap_pct": o.expected_gap_pct, "risk_tone": o.risk_tone.value}
+        if top:
+            meta.update({"symbol": top.symbol, "direction": top.bias.value,
+                         "strategy": top.setup, "confidence": top.confidence})
+        send_alert(build_alerter(cfg), msg, level="signal", meta=meta)
         print("\n(briefing sent via alerter)")
     print("\n" + _DISCLAIMER)
     return 0

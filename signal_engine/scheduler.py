@@ -26,6 +26,7 @@ from typing import Optional
 
 import pytz
 
+from signal_engine.alerts import send_alert
 from signal_engine.config import AppConfig, load_config, refresh_runtime_env, resolve_live_watchlist
 from signal_engine.market.calendar import NSECalendar
 from signal_engine.obs.logging_setup import get_logger
@@ -153,7 +154,12 @@ def premarket_job(cfg: AppConfig) -> None:
                f"{o.risk_tone.value}. Top: "
                + (f"{top.symbol} {top.bias.value} ({top.setup}, conf {top.confidence:.0f})"
                   if top else "none"))
-        build_alerter(cfg).send(msg, level="signal")
+        meta = {"kind": "premarket", "gap_bias": o.gap_bias.value,
+                "expected_gap_pct": o.expected_gap_pct, "risk_tone": o.risk_tone.value}
+        if top:
+            meta.update({"symbol": top.symbol, "direction": top.bias.value,
+                         "strategy": top.setup, "confidence": top.confidence})
+        send_alert(build_alerter(cfg), msg, level="signal", meta=meta)
         _log.info("premarket briefing sent: %s", msg)
     except Exception as exc:  # noqa: BLE001
         _log.error("premarket_job failed: %s", exc)
@@ -175,8 +181,9 @@ def healthcheck_job(cfg: Optional[AppConfig] = None) -> None:
     alerter = build_alerter(cfg)
     try:
         if cfg.env.data_source != "dhan":
-            alerter.send(f"⚠️ Pre-open {_today()}: SE_DATA_SOURCE is {cfg.env.data_source!r}, not "
-                         f"'dhan' — live session will be skipped.", level="signal")
+            send_alert(alerter, f"⚠️ Pre-open {_today()}: SE_DATA_SOURCE is "
+                       f"{cfg.env.data_source!r}, not 'dhan' — live session will be skipped.",
+                       level="signal", meta={"kind": "health"})
             return
         from signal_engine.brokers.dhan import token_expiry
         from signal_engine.factory import build_broker
@@ -192,16 +199,19 @@ def healthcheck_job(cfg: Optional[AppConfig] = None) -> None:
             except Exception:  # noqa: BLE001
                 pass
         if not (exp and exp > datetime.utcnow()):
-            alerter.send(f"⚠️ Pre-open {_today()}: Dhan token invalid and TOTP re-mint FAILED — fix "
-                         f"before 09:15 (check DHAN_TOTP_SECRET/PIN).", level="signal")
+            send_alert(alerter, f"⚠️ Pre-open {_today()}: Dhan token invalid and TOTP re-mint "
+                       f"FAILED — fix before 09:15 (check DHAN_TOTP_SECRET/PIN).",
+                       level="signal", meta={"kind": "health"})
             return
         broker = build_broker(cfg, day=_today())
         q = broker.quote(cfg.settings.watchlist[:3])
-        alerter.send(f"✅ Pre-open OK {_today()}: token valid (exp {exp.strftime('%H:%M UTC')}), live "
-                     f"feed returning {len(q)}/3 quotes. Live session fires 09:15.", level="signal")
+        send_alert(alerter, f"✅ Pre-open OK {_today()}: token valid (exp "
+                   f"{exp.strftime('%H:%M UTC')}), live feed returning {len(q)}/3 quotes. "
+                   f"Live session fires 09:15.", level="signal", meta={"kind": "health"})
         _log.info("healthcheck_job: token valid, feed %d/3 quotes", len(q))
     except Exception as exc:  # noqa: BLE001
-        alerter.send(f"⚠️ Pre-open {_today()}: health check FAILED — {str(exc)[:160]}", level="signal")
+        send_alert(alerter, f"⚠️ Pre-open {_today()}: health check FAILED — {str(exc)[:160]}",
+                   level="signal", meta={"kind": "health"})
         _log.error("healthcheck_job failed: %s", exc)
 
 
@@ -218,16 +228,27 @@ def scan_job(cfg: AppConfig, top_n: int = 10, limit: Optional[int] = None) -> No
         res = run_real_scan(cfg, uni, _today(), top_n=top_n)
         alerter = build_alerter(cfg)
         if not res.leaderboard:
-            alerter.send(f"Scan {_today()}: no setups passed filters today.", level="info")
+            send_alert(alerter, f"Scan {_today()}: no setups passed filters today.",
+                       level="info", meta={"kind": "scan"})
         else:
-            alerter.send(f"📊 Best intraday setups {_today()} "
-                         f"(scanned {res.universe_size} NSE names):", level="signal")
+            send_alert(alerter, f"📊 Best intraday setups {_today()} "
+                       f"(scanned {res.universe_size} NSE names):", level="signal",
+                       meta={"kind": "scan", "universe_size": res.universe_size})
             for e in res.leaderboard[:top_n]:
                 p = e.plan
-                alerter.send(f"{p.symbol} {p.direction.value} entry~{p.entry:.2f} "
-                             f"SL -{p.stop_pct:.2f}% T1 +{p.target_pcts[0]:.2f}% "
-                             f"R:R {p.risk_reward:.1f} conf {p.confidence:.0f}",
-                             level="signal")
+                send_alert(alerter,
+                           f"{p.symbol} {p.direction.value} entry~{p.entry:.2f} "
+                           f"SL -{p.stop_pct:.2f}% T1 +{p.target_pcts[0]:.2f}% "
+                           f"R:R {p.risk_reward:.1f} conf {p.confidence:.0f}",
+                           level="signal",
+                           meta={"kind": "scan", "symbol": p.symbol,
+                                 "direction": p.direction.value, "strategy": p.strategy,
+                                 "entry": p.entry, "stop_loss": p.stop_loss,
+                                 "stop_pct": p.stop_pct,
+                                 "target": p.t1 if p.targets else None,
+                                 "target_pct": p.target_pcts[0] if p.target_pcts else None,
+                                 "risk_reward": p.risk_reward, "confidence": p.confidence,
+                                 "reasons": p.reasons})
         _log.info("scan job surfaced %d picks from %d names", len(res.leaderboard), res.universe_size)
     except Exception as exc:  # noqa: BLE001
         _log.error("scan_job failed: %s", exc)

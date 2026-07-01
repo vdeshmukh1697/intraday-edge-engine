@@ -340,6 +340,56 @@ export function getLiveStatus(): Promise<LiveStatus> {
   return getJSON<LiveStatus>("/api/live/status");
 }
 
+// --- Predictions log (every alert pushed to Telegram, with parameters) -----
+
+export interface Prediction {
+  id: number;
+  ts: string;
+  kind: string; // entry|exit|halt|premarket|scan|health|advice|error|other
+  level: string;
+  symbol: string | null;
+  direction: string | null;
+  strategy: string | null;
+  entry: number | null;
+  stop_loss: number | null;
+  stop_pct: number | null;
+  target: number | null;
+  target_pct: number | null;
+  risk_reward: number | null;
+  expected_move_pct: number | null;
+  confidence: number | null;
+  qty: number | null;
+  rupee_risk: number | null;
+  pnl_pct_net: number | null;
+  r_multiple: number | null;
+  exit_reason: string | null;
+  reasons: string[] | null;
+  extra: Record<string, unknown> | null;
+  message: string;
+  delivered: number;
+  run_id: string | null;
+}
+
+export interface PredictionsResponse {
+  count: number;
+  predictions: Prediction[];
+}
+
+export function getPredictions(params: {
+  limit?: number;
+  kind?: string;
+  symbol?: string;
+  since_id?: number;
+} = {}): Promise<PredictionsResponse> {
+  const q = new URLSearchParams();
+  if (params.limit) q.set("limit", String(params.limit));
+  if (params.kind) q.set("kind", params.kind);
+  if (params.symbol) q.set("symbol", params.symbol);
+  if (params.since_id != null) q.set("since_id", String(params.since_id));
+  const qs = q.toString();
+  return getJSON<PredictionsResponse>(`/api/predictions${qs ? `?${qs}` : ""}`);
+}
+
 // --- Watchlist (the live paper-trading universe) ---------------------------
 
 export interface WatchlistRow {

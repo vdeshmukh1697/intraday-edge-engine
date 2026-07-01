@@ -20,6 +20,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 import pytz
 
+from signal_engine.alerts import send_alert
 from signal_engine.alerts.base import Alerter
 from signal_engine.brokers.base import BrokerAdapter
 from signal_engine.config import AppConfig
@@ -185,9 +186,9 @@ class EngineRunner:
         self._last_heartbeat_min = None
         self._last_status_min = None  # throttle the per-minute live_status DB upsert
 
-    def _alert(self, msg: str, level: str) -> None:
+    def _alert(self, msg: str, level: str, meta: Optional[dict] = None) -> None:
         if not self._suppress_alerts:
-            self.alerter.send(msg, level=level)
+            send_alert(self.alerter, msg, level=level, meta=meta)
 
     # -- feed callback ------------------------------------------------------
     def on_tick(self, tick) -> None:
@@ -200,7 +201,7 @@ class EngineRunner:
             try:
                 msg = self.advisor.on_price(tick.symbol, float(tick.ltp))
                 if msg:
-                    self._alert(msg, "signal")
+                    self._alert(msg, "signal", meta={"kind": "advice", "symbol": tick.symbol})
             except Exception:  # noqa: BLE001 - price probe must never break the feed
                 pass
         agg = self._aggs.get(tick.symbol)
@@ -214,7 +215,8 @@ class EngineRunner:
             except Exception as exc:  # noqa: BLE001 - deliberate catch-all at the boundary
                 self._errors += 1
                 self.log.error("on_closed_bar failed for %s @ %s: %s", bar.symbol, bar.ts, exc)
-                self.alerter.send(f"engine error on {bar.symbol}: {exc}", level="warning")
+                send_alert(self.alerter, f"engine error on {bar.symbol}: {exc}",
+                           level="warning", meta={"kind": "error", "symbol": bar.symbol})
 
     # -- core per-bar logic -------------------------------------------------
     def on_closed_bar(self, bar: Bar) -> None:
@@ -317,7 +319,7 @@ class EngineRunner:
         if self.advisor is not None:
             msg = self.advisor.update(bar.symbol, plan, actionable=actionable)
             if msg:
-                self._alert(msg, "signal")
+                self._alert(msg, "signal", meta={"kind": "advice", "symbol": bar.symbol})
 
         # 4) Collect a NEW candidate only if the plan is valid and all execution gates pass.
         #    Actual opening is deferred to the ranked top-N flush when the minute advances.
@@ -468,7 +470,20 @@ class EngineRunner:
             self.log.info("ENTRY %s %s @~%.2f SL %.2f T1 %.2f conf %.0f",
                           plan.symbol, plan.direction.value, plan.entry, plan.stop_loss,
                           plan.t1, plan.confidence)
-        self._alert(self._format_alert(plan), level="signal")
+        self._alert(self._format_alert(plan), level="signal", meta=self._plan_meta(plan))
+
+    def _plan_meta(self, plan: TradePlan) -> dict:
+        """Structured parameters for the predictions log — everything the alert text says."""
+        size = size_plan(plan, self.cfg.risk.risk)
+        return {
+            "kind": "entry", "symbol": plan.symbol, "direction": plan.direction.value,
+            "strategy": plan.strategy, "entry": plan.entry, "stop_loss": plan.stop_loss,
+            "stop_pct": plan.stop_pct, "target": plan.t1 if plan.targets else None,
+            "target_pct": plan.target_pcts[0] if plan.target_pcts else None,
+            "risk_reward": plan.risk_reward, "expected_move_pct": plan.expected_move_pct,
+            "confidence": plan.confidence, "qty": size["qty"],
+            "rupee_risk": size["rupee_risk"], "reasons": plan.reasons,
+        }
 
     def _format_alert(self, plan: TradePlan) -> str:
         """D4 alert content: expected move, key level (T1), R:R, reasons, and position qty.
@@ -537,6 +552,12 @@ class EngineRunner:
                 f"{pos.symbol} CLOSED {pos.exit_reason.value} "
                 f"net {pos.pnl_pct_net:+.2f}% R {pos.r_multiple:+.2f}",
                 level="info",
+                meta={"kind": "exit", "symbol": pos.symbol,
+                      "direction": pos.direction.value, "strategy": pos.plan.strategy,
+                      "entry": pos.entry_fill, "confidence": pos.plan.confidence,
+                      "exit_reason": pos.exit_reason.value,
+                      "pnl_pct_net": pos.pnl_pct_net, "r_multiple": pos.r_multiple,
+                      "exit_fill": pos.exit_fill, "hold_minutes": pos.hold_minutes},
             )
             if self.breaker.halted and not was_halted:
                 self.log.warning("session breaker tripped: %s — halting NEW entries",
@@ -545,6 +566,8 @@ class EngineRunner:
                     f"⛔ session halt — no new entries: {self.breaker.halt_reason} "
                     f"(session {self.breaker.realized_pnl_pct:+.2f}%)",
                     level="warning",
+                    meta={"kind": "halt", "reason": self.breaker.halt_reason,
+                          "session_pnl_pct": self.breaker.realized_pnl_pct},
                 )
 
     # -- entrypoints --------------------------------------------------------

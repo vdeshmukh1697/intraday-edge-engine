@@ -106,6 +106,12 @@ class SignalRepository:
             )
             """
         )
+        # Predictions log: every alert pushed to the user (Telegram), with its structured
+        # parameters — written by RecordingAlerter, read by GET /api/predictions. Created
+        # here too so a fresh DB serves the dashboard before the first alert fires.
+        from signal_engine.storage.predictions_log import PREDICTIONS_DDL
+
+        cur.execute(PREDICTIONS_DDL)
         # Forward-compatible migration: add columns that predate this schema. ALTER TABLE ...
         # ADD COLUMN is safe on an existing populated DB (existing rows get NULL).
         existing = {r["name"] for r in cur.execute("PRAGMA table_info(paper_trades)")}
@@ -227,6 +233,15 @@ class SignalRepository:
     def fetch_live_status(self) -> Optional[dict]:
         row = self.conn.execute("SELECT * FROM live_status WHERE id = 1").fetchone()
         return dict(row) if row else None
+
+    def fetch_predictions(self, *, limit: int = 200, kind: Optional[str] = None,
+                          symbol: Optional[str] = None,
+                          since_id: Optional[int] = None) -> List[dict]:
+        """Newest-first page of the predictions (alert) log; see predictions_log.py."""
+        from signal_engine.storage.predictions_log import fetch_predictions
+
+        return fetch_predictions(self.conn, limit=limit, kind=kind, symbol=symbol,
+                                 since_id=since_id)
 
     def fetch_plans(self) -> List[dict]:
         return [dict(r) for r in self.conn.execute("SELECT * FROM trade_plans ORDER BY ts")]
