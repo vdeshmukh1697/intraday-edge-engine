@@ -325,3 +325,56 @@ def test_token_auth_enforced(monkeypatch):
     assert ok.status_code == 200
     # unauthenticated public endpoints still work
     assert c.get("/healthz").status_code == 200
+
+
+def test_watchlist_quotes_shape_and_volume(monkeypatch, tmp_path):
+    """The ~2s snapshot serves ltp + cumulative volume per watchlist symbol from the store the
+    live loop warms, with a source tag and staleness flag."""
+    from signal_engine.config import load_config
+    from signal_engine.storage.repository import SignalRepository
+
+    db = f"sqlite:///{tmp_path / 'quotes.sqlite3'}"
+    monkeypatch.delenv("SE_API_TOKEN", raising=False)
+    monkeypatch.setenv("SE_DATA_SOURCE", "mock")
+    monkeypatch.setenv("SE_DB_URL", db)
+
+    syms = list(load_config().settings.watchlist)
+    repo = SignalRepository(db)
+    repo.upsert_latest_ticks([{"symbol": syms[0], "ltp": 1234.5, "volume": 987654}])
+    repo.close()
+
+    client = TestClient(create_app())
+    r = client.get("/api/watchlist/quotes")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["source"] == "SYNTHETIC"  # SE_DATA_SOURCE=mock
+    assert isinstance(body["stale"], bool)
+    assert body["count"] == len(syms)
+    rows = {x["symbol"]: x for x in body["symbols"]}
+    seeded = rows[syms[0]]
+    assert seeded["ltp"] == 1234.5
+    assert seeded["volume"] == 987654
+
+
+def test_watchlist_quotes_empty_store_never_blank(monkeypatch, tmp_path):
+    """With no ticks yet, every symbol is still present (falls back to archived close / null),
+    so the tab never blanks — it just reports stale."""
+    db = f"sqlite:///{tmp_path / 'empty.sqlite3'}"
+    monkeypatch.delenv("SE_API_TOKEN", raising=False)
+    monkeypatch.setenv("SE_DATA_SOURCE", "mock")
+    monkeypatch.setenv("SE_DB_URL", db)
+
+    client = TestClient(create_app())
+    body = client.get("/api/watchlist/quotes").json()
+    assert body["count"] > 0
+    assert len(body["symbols"]) == body["count"]
+    assert all({"ltp", "volume", "stale", "change_pct"} <= set(s) for s in body["symbols"])
+
+
+def test_watchlist_quotes_requires_token(monkeypatch):
+    monkeypatch.setenv("SE_API_TOKEN", "secret123")
+    monkeypatch.setenv("SE_DATA_SOURCE", "mock")
+    client = TestClient(create_app())
+    assert client.get("/api/watchlist/quotes").status_code == 401
+    ok = client.get("/api/watchlist/quotes", headers={"X-API-Key": "secret123"})
+    assert ok.status_code == 200
