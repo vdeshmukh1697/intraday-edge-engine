@@ -304,3 +304,54 @@ def test_gate_before_advisor_suppresses_phantom_new_alert():
     msg = runner.advisor.update("NEWSYM", plan, actionable=actionable)
     assert msg is None  # no fresh-looking NEW alert for a symbol we can't enter
     assert all("NEW" not in m for _lvl, m in runner.alerter.msgs)
+
+
+def test_on_tick_flushes_latest_ticks_with_volume():
+    """Live loop warms the latest_ticks store: on_tick buffers ltp+volume per symbol and the
+    first flush writes it (best-effort, live-only). The API reads this back for the watchlist."""
+    import datetime as _dt
+
+    import pytz
+
+    from signal_engine.domain.models import Tick
+    from signal_engine.storage.repository import SignalRepository
+
+    cfg = load_config()
+    broker = MockBroker(day=date(2025, 6, 23), seed=1, regime_map=_REGIMES)
+    strategy = create_strategy(cfg.settings.strategy.active, cfg.settings.strategy.params)
+    session = MarketSession(cfg.settings.market, NSECalendar())
+    repo = SignalRepository("sqlite:///:memory:")
+    runner = EngineRunner(cfg, broker, strategy, session,
+                          ConsoleAlerter(stream=io.StringIO()), repo=repo)
+    runner.enforce_freshness = True  # snapshot flush is live-only
+
+    now = _dt.datetime.now(pytz.timezone("Asia/Kolkata"))
+    runner.on_tick(Tick(symbol="RELIANCE", ts=now, ltp=2900.0, volume=12345))
+    rows = {r["symbol"]: r for r in repo.fetch_latest_ticks()}
+    assert rows["RELIANCE"]["ltp"] == 2900.0
+    assert rows["RELIANCE"]["volume"] == 12345  # cumulative volume persisted for the API
+    repo.close()
+
+
+def test_latest_ticks_flush_is_noop_without_live_freshness():
+    """Replay/backtest (enforce_freshness False) must NOT touch the DB, so they stay
+    deterministic and DB-free."""
+    import datetime as _dt
+
+    import pytz
+
+    from signal_engine.domain.models import Tick
+    from signal_engine.storage.repository import SignalRepository
+
+    cfg = load_config()
+    broker = MockBroker(day=date(2025, 6, 23), seed=1, regime_map=_REGIMES)
+    strategy = create_strategy(cfg.settings.strategy.active, cfg.settings.strategy.params)
+    session = MarketSession(cfg.settings.market, NSECalendar())
+    repo = SignalRepository("sqlite:///:memory:")
+    runner = EngineRunner(cfg, broker, strategy, session,
+                          ConsoleAlerter(stream=io.StringIO()), repo=repo)
+    # enforce_freshness stays False (default)
+    now = _dt.datetime.now(pytz.timezone("Asia/Kolkata"))
+    runner.on_tick(Tick(symbol="RELIANCE", ts=now, ltp=2900.0, volume=999))
+    assert repo.fetch_latest_ticks() == []
+    repo.close()
