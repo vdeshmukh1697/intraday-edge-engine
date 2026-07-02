@@ -92,8 +92,11 @@ def chart_to_json(symbol: str, df: pd.DataFrame, params: Dict) -> dict:
     ema_slow_line: List[dict] = []
     for i, (ts, row) in enumerate(df.iterrows()):
         t = _epoch(ts)
-        candles.append({"time": t, "open": float(row["open"]), "high": float(row["high"]),
-                        "low": float(row["low"]), "close": float(row["close"])})
+        candle = {"time": t, "open": float(row["open"]), "high": float(row["high"]),
+                  "low": float(row["low"]), "close": float(row["close"])}
+        if "volume" in row:
+            candle["volume"] = int(row["volume"])
+        candles.append(candle)
         if vwap.iloc[i] == vwap.iloc[i]:
             vwap_line.append({"time": t, "value": round(float(vwap.iloc[i]), 2)})
         if ema_fast.iloc[i] == ema_fast.iloc[i]:

@@ -3,12 +3,28 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { InfoTip } from "@/components/InfoTip";
-import { getWatchlist, type WatchlistResponse } from "@/lib/api";
+import {
+  getWatchlist,
+  getWatchlistQuotes,
+  type WatchlistResponse,
+  type WatchlistQuote,
+} from "@/lib/api";
 
 const inr = (n: number) =>
   `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 const cls = (n: number) => (n > 0 ? "pos" : n < 0 ? "neg" : "");
-const REFRESH_MS = 15000;
+// Compact Indian-style traded-volume: 1.2Cr / 3.4L / 5.6K.
+const compactVol = (n: number | null | undefined) => {
+  if (n == null) return "—";
+  if (n >= 1e7) return `${(n / 1e7).toFixed(2)}Cr`;
+  if (n >= 1e5) return `${(n / 1e5).toFixed(2)}L`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
+  return String(n);
+};
+const REFRESH_MS = 15000; // watchlist metadata (sector, trades, open positions) — slow poll
+const QUOTES_MS = 2000; // live price + volume — fast poll, meets the <=2s target
+
+type QuoteMeta = { source: string; stale: boolean; market_state: string };
 
 export default function WatchlistPage() {
   const [data, setData] = useState<WatchlistResponse | null>(null);
@@ -16,6 +32,10 @@ export default function WatchlistPage() {
   const [loading, setLoading] = useState(true);
   const [auto, setAuto] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  // Live quotes live in their OWN state map keyed by symbol, merged at render time — never merged
+  // into `data`, so the fast 2s tick can't reshuffle row order (order is driven by `data` only).
+  const [quotes, setQuotes] = useState<Record<string, WatchlistQuote>>({});
+  const [qmeta, setQmeta] = useState<QuoteMeta | null>(null);
 
   const load = useCallback((spinner = true) => {
     if (spinner) setLoading(true);
@@ -29,12 +49,26 @@ export default function WatchlistPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  const loadQuotes = useCallback(() => {
+    getWatchlistQuotes()
+      .then((q) => {
+        const map: Record<string, WatchlistQuote> = {};
+        for (const s of q.symbols) map[s.symbol] = s;
+        setQuotes(map);
+        setQmeta({ source: q.source, stale: q.stale, market_state: q.market_state });
+      })
+      .catch(() => {
+        /* quotes are best-effort; the metadata table still renders without them */
+      });
+  }, []);
+
+  useEffect(() => { load(); loadQuotes(); }, [load, loadQuotes]);
   useEffect(() => {
     if (!auto) return;
-    const id = setInterval(() => load(false), REFRESH_MS);
-    return () => clearInterval(id);
-  }, [auto, load]);
+    const slow = setInterval(() => load(false), REFRESH_MS);
+    const fast = setInterval(loadQuotes, QUOTES_MS);
+    return () => { clearInterval(slow); clearInterval(fast); };
+  }, [auto, load, loadQuotes]);
 
   if (error)
     return <div className="card">Could not load the watchlist: {error}</div>;
@@ -65,6 +99,15 @@ export default function WatchlistPage() {
         <Stat label="Traded today" value={String(data.traded_today)} />
         <Stat label="Session date" value={data.date} />
         <span className="live-spacer" />
+        {qmeta && (
+          <span className={`tag small ${qmeta.source === "LIVE" && !qmeta.stale ? "pos" : ""}`}>
+            {qmeta.stale
+              ? (qmeta.market_state === "OPEN" || qmeta.market_state === "SQUARE_OFF"
+                  ? "FEED STALE"
+                  : "MARKET CLOSED")
+              : qmeta.source}
+          </span>
+        )}
         {lastRefresh && (
           <span className="muted small">refreshed {lastRefresh.toLocaleTimeString("en-IN")}</span>
         )}
@@ -81,6 +124,8 @@ export default function WatchlistPage() {
           <thead>
             <tr>
               <th>Symbol</th>
+              <th className="num">Live ₹<InfoTip full="Live price" def="Last traded price from the live feed, refreshed ~2s. Change % is versus the prior session close. Dimmed when the market is closed or the feed is stale." /></th>
+              <th className="num">Volume<InfoTip full="Traded volume" def="Cumulative shares traded today on this name, straight from the live feed." /></th>
               <th>Sector / note<InfoTip term="sector" /></th>
               <th>Status<InfoTip term="direction" /></th>
               <th className="num">Entry ₹<InfoTip term="entry" /></th>
@@ -94,11 +139,26 @@ export default function WatchlistPage() {
           <tbody>
             {rows.map((r) => {
               const op = r.open_position;
+              const q = quotes[r.symbol];
+              const chg = q?.change_pct;
               return (
                 <tr key={r.symbol} className={op ? "active-row" : ""}>
                   <td className="mono">
                     <Link href={`/stock/${encodeURIComponent(r.symbol)}`}>{r.symbol}</Link>
                   </td>
+                  <td className={`num ${q && !q.stale ? cls(chg ?? 0) : ""}`}>
+                    {q?.ltp != null ? (
+                      <span className={q.stale ? "muted" : ""}>
+                        {q.ltp.toFixed(2)}
+                        {chg != null && (
+                          <span className="small"> ({chg >= 0 ? "+" : ""}{chg.toFixed(2)}%)</span>
+                        )}
+                      </span>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                  <td className="num muted">{compactVol(q?.volume)}</td>
                   <td className="muted">{r.sector || "—"}</td>
                   <td>
                     {op ? (

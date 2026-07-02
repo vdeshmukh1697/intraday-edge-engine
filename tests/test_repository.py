@@ -116,3 +116,40 @@ def test_migration_safe_on_preexisting_db_without_run_id(tmp_path):
     tagged = [r for r in repo.fetch_plans() if r["symbol"] == "RELIANCE"]
     assert tagged[0]["run_id"] == "RUN-NEW"
     repo.close()
+
+
+def test_latest_ticks_upsert_and_fetch():
+    """Latest-tick snapshot round-trips (one row per symbol, latest wins) and carries volume."""
+    repo = SignalRepository("sqlite:///:memory:", run_id="RUN-1")
+    repo.upsert_latest_ticks([
+        {"symbol": "RELIANCE", "ltp": 2900.0, "volume": 1000, "tick_ts": "2026-07-02T09:30:00+05:30"},
+        {"symbol": "TCS", "ltp": 3800.0, "volume": 500, "tick_ts": "2026-07-02T09:30:00+05:30"},
+    ])
+    # A later tick for RELIANCE replaces the prior row (PRIMARY KEY on symbol).
+    repo.upsert_latest_ticks([
+        {"symbol": "RELIANCE", "ltp": 2915.5, "volume": 1800, "tick_ts": "2026-07-02T09:31:00+05:30"},
+    ])
+    by_sym = {r["symbol"]: r for r in repo.fetch_latest_ticks()}
+    assert set(by_sym) == {"RELIANCE", "TCS"}
+    assert by_sym["RELIANCE"]["ltp"] == 2915.5
+    assert by_sym["RELIANCE"]["volume"] == 1800  # cumulative day volume advanced
+    assert by_sym["RELIANCE"]["run_id"] == "RUN-1"
+    # Symbol filter returns only the requested names.
+    only = repo.fetch_latest_ticks(["TCS"])
+    assert len(only) == 1 and only[0]["symbol"] == "TCS"
+    repo.upsert_latest_ticks([])  # empty batch is a no-op, not an error
+    assert len(repo.fetch_latest_ticks()) == 2
+    repo.close()
+
+
+def test_latest_ticks_table_added_on_preexisting_db(tmp_path):
+    """A DB created before latest_ticks existed gains the table on reopen (CREATE IF NOT EXISTS)."""
+    db_path = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE trade_plans (id INTEGER PRIMARY KEY, symbol TEXT)")
+    conn.commit()
+    conn.close()
+    repo = SignalRepository(f"sqlite:///{db_path}")
+    repo.upsert_latest_ticks([{"symbol": "INFY", "ltp": 1500.0, "volume": 42}])
+    assert repo.fetch_latest_ticks()[0]["symbol"] == "INFY"
+    repo.close()

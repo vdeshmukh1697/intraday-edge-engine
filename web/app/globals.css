@@ -403,6 +403,19 @@ td:last-child .infotip-pop::after { left: auto; right: 18px; }
   padding: 12px 16px;
   margin-bottom: 18px;
 }
+/* Live price/volume header on the per-symbol detail page. */
+.quote-strip {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 4px 0 14px;
+}
+.quote-ltp { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.quote-change { font-size: 15px; font-variant-numeric: tabular-nums; }
+.quote-change.pos { color: var(--green); }
+.quote-change.neg { color: var(--red); }
+.quote-vol { font-size: 13px; }
 .stat {
   display: flex;
   flex-direction: column;

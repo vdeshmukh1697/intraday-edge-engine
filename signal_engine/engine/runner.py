@@ -183,6 +183,12 @@ class EngineRunner:
         self._heartbeat_every_min = 5
         self._last_heartbeat_min = None
         self._last_status_min = None  # throttle the per-minute live_status DB upsert
+        # Latest-tick snapshot buffer for the read-only API's watchlist price/volume feed. Filled
+        # per tick on the live path, flushed to the DB on a ~1s throttle (bounds write rate on a
+        # busy 40-symbol feed). symbol -> (ltp, cumulative_volume, tick_ts_iso).
+        self._latest_ticks: Dict[str, tuple] = {}
+        self._last_tick_flush = None
+        self._tick_flush_every_s = 1.0
 
     def _alert(self, msg: str, level: str) -> None:
         if not self._suppress_alerts:
@@ -194,6 +200,14 @@ class EngineRunner:
         # open ts is always ~60s behind 'now' when it closes, so marking freshness off bar.ts made
         # the staleness guard suppress every live entry. Mark on each received tick instead.
         self.freshness.mark(self.freshness.clock.now())
+        # Warm the latest-tick snapshot the read-only API serves for the watchlist (live only, so
+        # replay/backtest stay DB-free + deterministic). Buffered here, flushed ~1/s below.
+        if self.repo is not None and self.enforce_freshness and tick.ltp:
+            self._latest_ticks[tick.symbol] = (
+                float(tick.ltp), int(getattr(tick, "volume", 0) or 0),
+                tick.ts.isoformat() if getattr(tick, "ts", None) else None,
+            )
+            self._maybe_flush_latest_ticks()
         # Intra-bar (sub-second) re-rating: flag when price runs most of the way to the target.
         if self.advisor is not None and tick.ltp:
             try:
@@ -214,6 +228,26 @@ class EngineRunner:
                 self._errors += 1
                 self.log.error("on_closed_bar failed for %s @ %s: %s", bar.symbol, bar.ts, exc)
                 self.alerter.send(f"engine error on {bar.symbol}: {exc}", level="warning")
+
+    def _maybe_flush_latest_ticks(self, force: bool = False) -> None:
+        """Flush buffered latest ticks to the DB at most ~once/sec. Only symbols that ticked
+        since the last flush are written; the upsert keeps prior rows for quiet names. Best-effort
+        — a DB hiccup must never break the feed."""
+        if not self._latest_ticks or self.repo is None:
+            return
+        now = self.freshness.clock.now()
+        if not force and self._last_tick_flush is not None and (
+            (now - self._last_tick_flush).total_seconds() < self._tick_flush_every_s
+        ):
+            return
+        rows = [{"symbol": s, "ltp": v[0], "volume": v[1], "tick_ts": v[2]}
+                for s, v in self._latest_ticks.items()]
+        try:
+            self.repo.upsert_latest_ticks(rows)
+            self._latest_ticks.clear()
+            self._last_tick_flush = now
+        except Exception:  # noqa: BLE001 - snapshot flush must never break the feed
+            pass
 
     # -- core per-bar logic -------------------------------------------------
     def on_closed_bar(self, bar: Bar) -> None:

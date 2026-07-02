@@ -106,6 +106,19 @@ class SignalRepository:
             )
             """
         )
+        # Latest live tick per watched symbol: the live loop upserts LTP + cumulative day volume
+        # here (throttled to ~1/s), so the read-only API can serve a fresh price/volume snapshot
+        # for the whole watchlist without opening a second market-data connection. One row per
+        # symbol; ``tick_ts`` is the tick's own IST time, ``updated_ts`` when we wrote the row.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS latest_ticks (
+                symbol TEXT PRIMARY KEY,
+                ltp REAL, volume INTEGER,
+                tick_ts TEXT, updated_ts TEXT, run_id TEXT
+            )
+            """
+        )
         # Forward-compatible migration: add columns that predate this schema. ALTER TABLE ...
         # ADD COLUMN is safe on an existing populated DB (existing rows get NULL).
         existing = {r["name"] for r in cur.execute("PRAGMA table_info(paper_trades)")}
@@ -227,6 +240,36 @@ class SignalRepository:
     def fetch_live_status(self) -> Optional[dict]:
         row = self.conn.execute("SELECT * FROM live_status WHERE id = 1").fetchone()
         return dict(row) if row else None
+
+    def upsert_latest_ticks(self, rows: List[dict], run_id: Optional[str] = None) -> None:
+        """Batch-upsert the latest tick per symbol (one row each). ``rows`` items carry
+        ``symbol``, ``ltp``, ``volume`` (cumulative day volume), and optional ``tick_ts`` (ISO).
+        Called by the live loop on a ~1s throttle; the read-only API reads it back for the
+        watchlist price/volume snapshot. No-op on an empty list."""
+        if not rows:
+            return
+        now = _now_iso()
+        params = [
+            (r["symbol"], r.get("ltp"), r.get("volume"), r.get("tick_ts"), now,
+             run_id or self.run_id)
+            for r in rows
+        ]
+        self.conn.executemany(
+            """INSERT OR REPLACE INTO latest_ticks
+               (symbol, ltp, volume, tick_ts, updated_ts, run_id)
+               VALUES (?,?,?,?,?,?)""",
+            params,
+        )
+        self.conn.commit()
+
+    def fetch_latest_ticks(self, symbols: Optional[List[str]] = None) -> List[dict]:
+        """Latest tick rows, optionally filtered to ``symbols`` (order not guaranteed —
+        callers key by symbol)."""
+        if symbols:
+            placeholders = ",".join("?" for _ in symbols)
+            sql = f"SELECT * FROM latest_ticks WHERE symbol IN ({placeholders})"
+            return [dict(r) for r in self.conn.execute(sql, list(symbols))]
+        return [dict(r) for r in self.conn.execute("SELECT * FROM latest_ticks")]
 
     def fetch_plans(self) -> List[dict]:
         return [dict(r) for r in self.conn.execute("SELECT * FROM trade_plans ORDER BY ts")]

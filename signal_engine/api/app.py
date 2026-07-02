@@ -29,6 +29,7 @@ from signal_engine.api.serializers import (
 from signal_engine.config import load_config
 from signal_engine.data.synthetic import bars_to_ticks, generate_session
 from signal_engine.market.calendar import NSECalendar
+from signal_engine.market.session import MarketSession
 
 _DISCLAIMER = (
     "Decision-support only. Not investment advice. No live orders are placed. "
@@ -167,6 +168,37 @@ def _watchlist_sectors() -> dict:
             m = pat.search(line)
             if m:
                 out[m.group(1)] = m.group(2)
+    return out
+
+
+_PREV_CLOSE_CACHE: dict = {}
+
+
+def _prev_closes(cfg, symbols) -> dict:
+    """Prior-session close per symbol from the Parquet archive, for the watchlist's change %.
+    Cached per (archive dir, IST date) — prev close changes once a day, so the ~2s quotes poll
+    must not re-read 40 Parquet files every time. Returns {symbol: close} (missing names omitted).
+    During a live session today's bars aren't archived yet, so the latest archived session IS the
+    prior day — the correct reference for intraday change."""
+    import pytz
+
+    from signal_engine.storage.bars import ParquetBarStore
+
+    today = datetime.now(pytz.timezone("Asia/Kolkata")).date().isoformat()
+    ckey = (cfg.env.parquet_dir, today)
+    cached = _PREV_CLOSE_CACHE.get(ckey)
+    if cached is not None:
+        return cached
+    store = ParquetBarStore(cfg.env.parquet_dir)
+    out: dict = {}
+    for sym in symbols:
+        try:
+            df = store.load_latest_session(sym)
+            if df is not None and not df.empty:
+                out[sym] = float(df["close"].iloc[-1])
+        except Exception:  # noqa: BLE001 - a missing/corrupt archive must not break quotes
+            continue
+    _PREV_CLOSE_CACHE[ckey] = out
     return out
 
 
@@ -535,6 +567,79 @@ def create_app() -> FastAPI:
             "date": today,
             "traded_today": sum(1 for r in rows if r["trades_today"] > 0),
             "open_now": len(open_by_sym),
+            "symbols": rows,
+        }
+
+    @app.get("/api/watchlist/quotes", dependencies=[Depends(_require_token)])
+    def watchlist_quotes():
+        """Fast live price + traded-volume snapshot for every watchlist symbol, for the
+        dashboard's ~2s poll. Served from the ``latest_ticks`` table the live loop keeps warm
+        (LTP + cumulative day volume from the same Dhan feed that paper-trades) — NOT a second
+        market-data connection. ``change_pct`` is vs the prior archived session close.
+
+        ``source`` reflects SE_DATA_SOURCE (LIVE=dhan/angelone, DELAYED=yahoo, SYNTHETIC=mock).
+        ``stale`` is true when the market is closed or the feed hasn't updated in >180s — the UI
+        shows the last known values dimmed rather than blanking. Decision-support only."""
+        import pytz
+
+        from signal_engine.domain.enums import MarketState
+        from signal_engine.storage.repository import SignalRepository
+
+        syms = list(cfg.settings.watchlist)
+        now = datetime.now(pytz.timezone("Asia/Kolkata"))
+        state = MarketSession(cfg.settings.market, cal).state_at(now)
+        market_live = state in (MarketState.OPEN, MarketState.SQUARE_OFF)
+
+        source_map = {"dhan": "LIVE", "angelone": "LIVE", "yahoo_nse": "DELAYED", "mock": "SYNTHETIC"}
+        source = source_map.get(os.getenv("SE_DATA_SOURCE", "mock"), "SYNTHETIC")
+
+        # Latest tick per symbol from the shared store + feed liveness beacon.
+        ticks: dict = {}
+        feed_stale = True
+        repo = SignalRepository(cfg.env.db_url)
+        try:
+            ticks = {r["symbol"]: r for r in repo.fetch_latest_ticks(syms)}
+            st = repo.fetch_live_status()
+            if st and st.get("updated_ts"):
+                try:
+                    age = (now - datetime.fromisoformat(st["updated_ts"])).total_seconds()
+                    feed_stale = age > 180
+                except (ValueError, TypeError):
+                    feed_stale = True
+        except Exception:  # noqa: BLE001 - never let a DB hiccup blank the tab
+            pass
+        finally:
+            repo.close()
+
+        prev = _prev_closes(cfg, syms)  # prior-session close per symbol (day-cached)
+        overall_stale = feed_stale or not market_live
+
+        rows = []
+        for s in syms:
+            t = ticks.get(s)
+            pc = prev.get(s)
+            ltp = t.get("ltp") if t else None
+            # Fall back to the archived last close so the tab is never blank pre-open / feed-down.
+            if ltp is None:
+                ltp = pc
+            change_abs = round(ltp - pc, 2) if (ltp is not None and pc) else None
+            change_pct = round((ltp / pc - 1.0) * 100.0, 2) if (ltp is not None and pc) else None
+            rows.append({
+                "symbol": s,
+                "ltp": round(ltp, 2) if ltp is not None else None,
+                "volume": int(t["volume"]) if (t and t.get("volume") is not None) else None,
+                "prev_close": round(pc, 2) if pc is not None else None,
+                "change_abs": change_abs,
+                "change_pct": change_pct,
+                "tick_ts": t.get("tick_ts") if t else None,
+                "stale": overall_stale or t is None,
+            })
+        return {
+            "source": source,
+            "market_state": state.value if hasattr(state, "value") else str(state),
+            "ts": now.isoformat(),
+            "count": len(syms),
+            "stale": overall_stale,
             "symbols": rows,
         }
 
