@@ -5,6 +5,7 @@ import type {
   IChartApi,
   ISeriesApi,
   CandlestickData,
+  HistogramData,
   LineData,
   UTCTimestamp,
 } from "lightweight-charts";
@@ -33,6 +34,7 @@ export default function CandleChart({
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
 
   // Keep the latest onReady without re-creating the chart.
   const onReadyRef = useRef(onReady);
@@ -80,6 +82,18 @@ export default function CandleChart({
       });
       candleSeriesRef.current = candleSeries;
 
+      // Traded-volume histogram, pinned to the bottom ~18% on its own overlay price scale so it
+      // never distorts the candle axis. Bars are tinted by candle direction.
+      const volumeSeries = chart.addHistogramSeries({
+        priceFormat: { type: "volume" },
+        priceScaleId: "vol",
+        color: "#2a3140",
+      });
+      chart.priceScale("vol").applyOptions({
+        scaleMargins: { top: 0.82, bottom: 0 },
+      });
+      volumeSeriesRef.current = volumeSeries;
+
       const vwapSeries = chart.addLineSeries({
         color: "#d29922",
         lineWidth: 2,
@@ -110,6 +124,17 @@ export default function CandleChart({
           })
         )
       );
+      volumeSeries.setData(
+        candles
+          .filter((c) => c.volume != null)
+          .map(
+            (c): HistogramData => ({
+              time: c.time as UTCTimestamp,
+              value: c.volume as number,
+              color: c.close >= c.open ? "rgba(63,185,80,0.45)" : "rgba(248,81,73,0.45)",
+            })
+          )
+      );
       const toLine = (pts: LinePoint[]): LineData[] =>
         pts.map((p) => ({ time: p.time as UTCTimestamp, value: p.value }));
       vwapSeries.setData(toLine(vwap));
@@ -135,6 +160,13 @@ export default function CandleChart({
             low: bar.low,
             close: bar.close,
           });
+          if (bar.volume != null) {
+            volumeSeriesRef.current?.update({
+              time: bar.time as UTCTimestamp,
+              value: bar.volume,
+              color: bar.close >= bar.open ? "rgba(63,185,80,0.45)" : "rgba(248,81,73,0.45)",
+            });
+          }
         },
       });
     })();
@@ -145,6 +177,7 @@ export default function CandleChart({
       chart?.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
+      volumeSeriesRef.current = null;
     };
     // Re-create only when the static dataset identity changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps

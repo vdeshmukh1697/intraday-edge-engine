@@ -124,6 +124,7 @@ export interface Candle {
   high: number;
   low: number;
   close: number;
+  volume?: number; // present for real archived/live bars; absent on older payloads
 }
 
 export interface LinePoint {
@@ -360,6 +361,32 @@ export interface WatchlistResponse {
 
 export function getWatchlist(): Promise<WatchlistResponse> {
   return getJSON<WatchlistResponse>("/api/watchlist");
+}
+
+// Live price + traded-volume snapshot (the ~2s poll). Served from the WS-fed latest-tick store,
+// not a second market-data connection. `stale` = market closed or feed down (show values dimmed).
+export interface WatchlistQuote {
+  symbol: string;
+  ltp: number | null;
+  volume: number | null; // cumulative day volume
+  prev_close: number | null;
+  change_abs: number | null;
+  change_pct: number | null;
+  tick_ts: string | null;
+  stale: boolean;
+}
+
+export interface WatchlistQuotesResponse {
+  source: "LIVE" | "DELAYED" | "SYNTHETIC";
+  market_state: string; // OPEN | PRE_OPEN | SQUARE_OFF | CLOSED
+  ts: string;
+  count: number;
+  stale: boolean;
+  symbols: WatchlistQuote[];
+}
+
+export function getWatchlistQuotes(): Promise<WatchlistQuotesResponse> {
+  return getJSON<WatchlistQuotesResponse>("/api/watchlist/quotes");
 }
 
 export function getLeaderboard(

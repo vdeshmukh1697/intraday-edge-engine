@@ -9,11 +9,13 @@ import {
   todayStr,
   getPaperTrades,
   getOpenPositions,
+  getWatchlistQuotes,
   type ChartResponse,
   type WsMessage,
   type LiveBar,
   type PaperTrade,
   type OpenPosition,
+  type WatchlistQuote,
 } from "@/lib/api";
 import CandleChart, { type CandleChartHandle } from "@/components/CandleChart";
 import { InfoTip } from "@/components/InfoTip";
@@ -21,6 +23,13 @@ import { InfoTip } from "@/components/InfoTip";
 const inr = (n: number) =>
   `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 const clsOf = (n: number) => (n > 0 ? "pos" : n < 0 ? "neg" : "");
+const compactVol = (n: number | null | undefined) => {
+  if (n == null) return "—";
+  if (n >= 1e7) return `${(n / 1e7).toFixed(2)}Cr`;
+  if (n >= 1e5) return `${(n / 1e5).toFixed(2)}L`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
+  return String(n);
+};
 
 export default function StockPage() {
   const params = useParams<{ symbol: string }>();
@@ -42,6 +51,9 @@ export default function StockPage() {
   const [liveMsg, setLiveMsg] = useState<string>("");
   const wsRef = useRef<WebSocket | null>(null);
   const chartHandleRef = useRef<CandleChartHandle | null>(null);
+
+  // Live price + traded-volume for this symbol, from the shared ~2s snapshot.
+  const [quote, setQuote] = useState<WatchlistQuote | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -76,6 +88,23 @@ export default function StockPage() {
     const id = setInterval(loadHistory, 15000); // keep history/open-position fresh
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol]);
+
+  // Live price/volume header — same ~2s snapshot the watchlist uses, filtered to this symbol.
+  useEffect(() => {
+    let cancelled = false;
+    const pull = () =>
+      getWatchlistQuotes()
+        .then((q) => {
+          if (cancelled) return;
+          setQuote(q.symbols.find((s) => s.symbol === symbol) || null);
+        })
+        .catch(() => {
+          /* best-effort; the chart still renders */
+        });
+    pull();
+    const id = setInterval(pull, 2000);
+    return () => { cancelled = true; clearInterval(id); };
   }, [symbol]);
 
   const stopLive = useCallback(() => {
@@ -138,6 +167,28 @@ export default function StockPage() {
           ← Leaderboard
         </Link>
       </div>
+
+      {quote && (
+        <div className="quote-strip">
+          <span className="quote-ltp">
+            {quote.ltp != null ? `₹${quote.ltp.toFixed(2)}` : "—"}
+          </span>
+          {quote.change_pct != null && (
+            <span className={`quote-change ${quote.stale ? "" : clsOf(quote.change_pct)}`}>
+              {quote.change_abs != null
+                ? `${quote.change_abs >= 0 ? "+" : ""}${quote.change_abs.toFixed(2)} `
+                : ""}
+              ({quote.change_pct >= 0 ? "+" : ""}{quote.change_pct.toFixed(2)}%)
+            </span>
+          )}
+          <span className="quote-vol muted">
+            Vol {compactVol(quote.volume)}
+          </span>
+          <span className={`tag small ${quote.stale ? "" : "pos"}`}>
+            {quote.stale ? "delayed / closed" : "live"}
+          </span>
+        </div>
+      )}
 
       <form
         className="controls"
