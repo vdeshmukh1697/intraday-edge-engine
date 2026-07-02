@@ -63,3 +63,65 @@ def test_renew_token_retries_next_totp_window(monkeypatch):
     monkeypatch.setattr(dhan_auth, "generate_token_via_totp", hard_fail)
     s.renew_token_job()
     assert calls["mint"] == 1
+
+
+def test_healthcheck_treats_rate_limit_probe_as_transient(monkeypatch):
+    """A DH-904/429 on the 3-symbol quote probe is NOT a failed health check: the token check
+    already passed and the probe merely collided with the API's _QuoteHub 1s REST polling
+    (seen 2026-07-02 08:45). Retry once after ~3s; if still throttled, alert ✅-with-note.
+    Any other quote failure must still alert FAILED."""
+    from datetime import date, datetime, timedelta
+
+    import signal_engine.brokers.dhan as dhan
+    import signal_engine.factory as factory
+    import signal_engine.scheduler as s
+
+    monkeypatch.setenv("SE_DATA_SOURCE", "dhan")
+    monkeypatch.setattr(s, "_today", lambda: date(2026, 7, 2))  # trading day
+    monkeypatch.setattr(s, "refresh_runtime_env", lambda: set())
+    monkeypatch.setattr(dhan, "token_expiry",
+                        lambda tok: datetime.utcnow() + timedelta(hours=12))
+    monkeypatch.setattr(factory, "build_alerter", lambda cfg: object())
+
+    calls = {"quote": 0, "slept": []}
+    alerts = []
+    monkeypatch.setattr(s, "send_alert",
+                        lambda alerter, msg, **kw: alerts.append(msg))
+    monkeypatch.setattr(s._time, "sleep", lambda secs: calls["slept"].append(secs))
+
+    class ThrottledBroker:
+        def __init__(self, fail_times):
+            self.fail_times = fail_times
+
+        def quote(self, symbols):
+            calls["quote"] += 1
+            if calls["quote"] <= self.fail_times:
+                raise dhan.DhanRateLimitError("Dhan rate limit hit (DH-904 / HTTP 429).")
+            return {sym: 100.0 for sym in symbols}
+
+    # 1) Throttled once, retry succeeds -> normal ✅ with live quote count.
+    monkeypatch.setattr(factory, "build_broker", lambda cfg, day: ThrottledBroker(1))
+    s.healthcheck_job()
+    assert calls["quote"] == 2 and calls["slept"] == [3]
+    assert alerts[-1].startswith("✅") and "3/3 quotes" in alerts[-1]
+
+    # 2) Throttled twice -> ✅-with-note (token valid, probe throttled), never FAILED.
+    calls["quote"], calls["slept"] = 0, []
+    monkeypatch.setattr(factory, "build_broker", lambda cfg, day: ThrottledBroker(2))
+    s.healthcheck_job()
+    assert calls["quote"] == 2 and calls["slept"] == [3]
+    assert alerts[-1].startswith("✅") and "throttled" in alerts[-1]
+    assert "FAILED" not in alerts[-1]
+
+    # 3) A non-rate-limit quote failure must still alert FAILED (no retry).
+    calls["quote"], calls["slept"] = 0, []
+
+    class BrokenBroker:
+        def quote(self, symbols):
+            calls["quote"] += 1
+            raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(factory, "build_broker", lambda cfg, day: BrokenBroker())
+    s.healthcheck_job()
+    assert calls["quote"] == 1 and calls["slept"] == []
+    assert "FAILED" in alerts[-1]

@@ -197,7 +197,7 @@ def healthcheck_job(cfg: Optional[AppConfig] = None) -> None:
                        f"{cfg.env.data_source!r}, not 'dhan' — live session will be skipped.",
                        level="signal", meta={"kind": "health"})
             return
-        from signal_engine.brokers.dhan import token_expiry
+        from signal_engine.brokers.dhan import DhanRateLimitError, token_expiry
         from signal_engine.factory import build_broker
 
         exp = token_expiry(cfg.env.dhan_access_token or "")
@@ -216,7 +216,25 @@ def healthcheck_job(cfg: Optional[AppConfig] = None) -> None:
                        level="signal", meta={"kind": "health"})
             return
         broker = build_broker(cfg, day=_today())
-        q = broker.quote(cfg.settings.watchlist[:3])
+        # DH-904/429 here is transient: the probe shares Dhan's per-second REST budget with the
+        # API's _QuoteHub 1s polling (collided 2026-07-02 08:45). The token check above already
+        # passed and the 09:15 session uses the separate WS feed, so a throttled probe is NOT a
+        # failed health check — retry once, then report OK-with-note instead of FAILED.
+        try:
+            q = broker.quote(cfg.settings.watchlist[:3])
+        except DhanRateLimitError:
+            _time.sleep(3)
+            try:
+                q = broker.quote(cfg.settings.watchlist[:3])
+            except DhanRateLimitError:
+                send_alert(alerter, f"✅ Pre-open OK {_today()}: token valid (exp "
+                           f"{exp.strftime('%H:%M UTC')}); quote probe throttled (DH-904 rate "
+                           f"limit — REST budget shared with dashboard polling), feed assumed "
+                           f"healthy. Live session fires 09:15.",
+                           level="signal", meta={"kind": "health"})
+                _log.warning("healthcheck_job: token valid, quote probe rate-limited twice "
+                             "(DH-904) — reported OK-with-note")
+                return
         send_alert(alerter, f"✅ Pre-open OK {_today()}: token valid (exp "
                    f"{exp.strftime('%H:%M UTC')}), live feed returning {len(q)}/3 quotes. "
                    f"Live session fires 09:15.", level="signal", meta={"kind": "health"})
