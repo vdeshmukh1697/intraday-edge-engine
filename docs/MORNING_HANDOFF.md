@@ -1,8 +1,59 @@
-# Morning Handoff — live system ready for the open (updated 2026-07-02, ~05:00 IST by overnight session)
+# Morning Handoff — live system ready for the open (updated 2026-07-03, ~07:00 IST by overnight session)
 
 > Self-contained context to continue in a fresh session with zero re-derivation. Repo:
 > `/Users/vikrantdeshmukh/Personal projects`. Branch: `feat/full-nse-realtime-pipeline`.
-> Python: `.venv/bin/python`. **Session today: 2026-07-02 (Thu) 09:15 IST.** Paper-only — no live orders.
+> Python: `.venv/bin/python`. **Session today: 2026-07-03 (Fri) 09:15 IST.** Paper-only — no live orders.
+
+## 🟢 2026-07-03 overnight session — ₹1,00,000 PAPER PORTFOLIO MANAGER (the night's feature)
+Working prompt: `docs/PROMPT_2026-07-03_PORTFOLIO_MANAGER.md`. Built by a multi-agent workflow +
+hand-finished (the fan-out hit the 5:30am usage-limit mid-run; core ledger/reasons/web landed, the
+runner+API wiring + tests + a found bug were completed directly after the limit reset). All committed
+on the branch (3 feat commits d76acdf, 6a5c2fc, adc63d5) + the earlier DH-904 fix 7a9d657.
+
+**What the user now has:** ONE persistent ₹1,00,000 paper book the whole platform shares.
+- **PortfolioLedger** (`signal_engine/portfolio/ledger.py`): entries block the fill notional as cash
+  (margin model — LONG and SHORT alike, NO leverage), exits credit it back + realized ₹ net of the REAL
+  modeled charges (`CostModel.charges`). Equity == cash + Σ open(notional+unrealized). `rebuild()`
+  re-derives cash from the tables so a restart can never double-spend (runs after warm-start).
+- **Money-aware live engine**: `_surface` sizes each entry against the book's LIVE equity (compounds),
+  caps by free cash reserved at the adverse-slipped fill price (a bug caught in testing: reserving at the
+  plan price let two ~50% positions breach no-leverage once slippage lifted the fill). Unaffordable setups
+  → a `skip` alert (plain reason), not a phantom entry. Entry/exit/halt alerts carry qty, ₹ notional,
+  % of book, the book's new value, and a plain-English `Why:` line.
+- **Layman reasons everywhere** (`signal_engine/alerts/plain.py`): strategy/premarket/scan/halt codes →
+  one or two jargon-free sentences, Indian-format rupees (₹1,00,000). Premarket (08:30) + scan (15:45)
+  predictions are sized against the book (read-only) and phrased as suggestions.
+- **NEW `/portfolio` dashboard page** (first in nav) + `GET /api/portfolio` & `/api/portfolio/equity`:
+  total value / cash / invested / today's & overall P&L cards, equity curve, live open-positions table,
+  today's closed trades each with its plain "why", per-strategy table. `/predictions` shows the Why line +
+  a `skip` chip; `/paper` prefers real ₹ with a `modeled` badge on legacy rows.
+- Honesty unchanged: paper money, no edge implied (vwap_ema_adx still a gross coin-flip), confidence never
+  called win-rate, no live orders ever.
+
+### ✅ VERIFIED (2026-07-03 ~07:00 IST)
+- **Full pytest suite GREEN** (incl. 60+ new portfolio/plain/runner/api tests); `tsc --noEmit` + `next
+  build` GREEN (`/portfolio` route compiled). Web `PortfolioResponse` type matches the API field-for-field.
+- **Scheduler RESTARTED (06:38) on the new code** — all 9 jobs registered; so 08:30 premarket (plain
+  reason), 08:45 healthcheck (DH-904 fix — below), 09:15 live (ledger engine) all use tonight's work.
+- **Dhan token VALID to 2026-07-04 00:30 UTC** (fresh TOTP mint at 06:38) — covers the whole 09:15–15:30
+  session, zero mid-session renewals. `/api/auth/status` connected:true.
+- **API live**: `/api/portfolio` serves a fresh ₹1,00,000 book locally AND through the tunnel; all prior
+  trades are legacy (pre-ledger, pnl_inr NULL) so correctly excluded — the book starts fresh today and
+  accrues real ₹ trades from the 09:15 session on.
+- **Tunnel `bios-minor-helped-zen.trycloudflare.com`** serves `/healthz` 200 (occasional quick-tunnel
+  latency is pre-existing — named tunnel remains the ops upgrade). **Vercel `/portfolio` returns 200**
+  (brand-new route → new deploy is live; built from the main checkout with NEXT_PUBLIC_API_BASE repointed).
+- Also shipped earlier tonight: **DH-904/429 on the 08:45 healthcheck quote probe is now treated as
+  transient** (retry once, else ✅-with-note) instead of the false "health check FAILED" it sent 07-02.
+
+### ⚠️ ONE MORNING SPOT-CHECK (everything else is autonomous)
+Open **https://web-beta-beige-60.vercel.app/portfolio** and confirm the ₹1,00,000 money cards render and
+data loads. If the tables stay blank (tunnel rotated/flaky), the one-liner fix is
+`launchctl kickstart -k gui/$(id -u)/com.vikrant.signal-engine-tunnel` (repoints Vercel + redeploys).
+Keep the laptop plugged in. Known pre-existing: `/api/backtest` can 500 on cold recompute (>60s) — unrelated.
+
+---
+
 
 ## 🔄 2026-07-02 overnight session (03:26–05:00 IST) — what was done
 Working prompt: `docs/PROMPT_2026-07-02_PREDICTIONS_DASHBOARD.md`. All committed on the branch.
