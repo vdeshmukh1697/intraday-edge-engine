@@ -5,9 +5,14 @@ import type { IChartApi, LineData, UTCTimestamp } from "lightweight-charts";
 import type { DailyReturn } from "@/lib/api";
 
 interface Props {
-  equityCurve: number[];
+  equityCurve?: number[];
   // Used to derive timestamps for the x-axis when available.
   dailyReturns?: DailyReturn[];
+  // Pre-built {time,value} points (epoch seconds, strictly ascending) — takes
+  // precedence over equityCurve. Used by /portfolio for intraday snapshots.
+  points?: { time: number; value: number }[];
+  // Show HH:MM on the x-axis (intraday points); off for daily curves.
+  timeVisible?: boolean;
 }
 
 // Build {time,value} points for the equity curve. Prefer real dates from
@@ -32,7 +37,12 @@ function buildPoints(
   });
 }
 
-export default function EquityChart({ equityCurve, dailyReturns }: Props) {
+export default function EquityChart({
+  equityCurve,
+  dailyReturns,
+  points,
+  timeVisible = false,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -58,7 +68,7 @@ export default function EquityChart({ equityCurve, dailyReturns }: Props) {
         rightPriceScale: { borderColor: "#2a3140" },
         timeScale: {
           borderColor: "#2a3140",
-          timeVisible: false,
+          timeVisible,
           secondsVisible: false,
         },
         autoSize: true,
@@ -71,7 +81,11 @@ export default function EquityChart({ equityCurve, dailyReturns }: Props) {
         lineWidth: 2,
         priceLineVisible: false,
       });
-      series.setData(buildPoints(equityCurve, dailyReturns));
+      const data: LineData[] =
+        points && points.length
+          ? points.map((p) => ({ time: p.time as UTCTimestamp, value: p.value }))
+          : buildPoints(equityCurve ?? [], dailyReturns);
+      series.setData(data);
       chart.timeScale().fitContent();
 
       resizeObs = new ResizeObserver(() => {
@@ -87,7 +101,7 @@ export default function EquityChart({ equityCurve, dailyReturns }: Props) {
       resizeObs?.disconnect();
       chart?.remove();
     };
-  }, [equityCurve, dailyReturns]);
+  }, [equityCurve, dailyReturns, points, timeVisible]);
 
   return <div ref={containerRef} className="equity-box" />;
 }

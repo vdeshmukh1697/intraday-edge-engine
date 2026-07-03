@@ -581,7 +581,20 @@ def create_app() -> FastAPI:
         finally:
             repo.close()
         notional = float(cfg.risk.costs.reference_trade_value)
-        return pa.enrich_all(rows, notional, CostModel(cfg.risk.costs)), notional
+        enriched = pa.enrich_all(rows, notional, CostModel(cfg.risk.costs))
+        # PORTFOLIO §7: prefer the REAL ledger ₹ (pnl_inr / charges_inr / qty from the book) when a
+        # trade was sized by the portfolio; legacy rows (pnl_inr NULL) keep the modeled fixed-
+        # notional figures and are flagged ``modeled: true`` so the UI can badge them.
+        for e, row in zip(enriched, rows):
+            real = row.get("pnl_inr") is not None
+            e["modeled"] = not real
+            if real:
+                e["qty"] = int(row.get("qty") or e.get("qty") or 0)
+                e["net_pnl_abs"] = round(float(row["pnl_inr"]), 2)
+                e["costs_abs"] = round(float(row.get("charges_inr") or 0.0), 2)
+                e["notional"] = round(float(row.get("notional_entry")
+                                             or e.get("notional") or 0.0), 2)
+        return enriched, notional
 
     @app.get("/api/paper/trades", dependencies=[Depends(_require_token)])
     def paper_trades(start: str = Query(default=None), end: str = Query(default=None),
@@ -598,6 +611,10 @@ def create_app() -> FastAPI:
         report = pa.full_report(enriched)
         report["notional_per_trade"] = notional
         report["account_capital"] = float(cfg.risk.risk.account_capital)
+        # Which ₹ basis the aggregates rest on: 'ledger' once any real book-sized trade is present
+        # (its actual pnl_inr flows through), else the modeled fixed-notional 'modeled' basis.
+        report["basis"] = "ledger" if any(not e.get("modeled", True) for e in enriched) \
+            else "modeled"
         return report
 
     def _open_positions_view():
@@ -687,6 +704,121 @@ def create_app() -> FastAPI:
             "age_seconds": round(age) if age is not None else None,
             "stale": (age is not None and age > 180),
         }
+
+    # --- Portfolio manager (the ₹1,00,000 paper book, PORTFOLIO §7) ---------
+    def _portfolio_snapshot():
+        """Read-only ₹-book view: equity / cash / invested, live open positions, today's and
+        lifetime realized P&L, and a per-strategy breakdown — all derived from the DB. Never
+        writes and never calls a broker (the live engine's ledger is the only writer). A fresh DB
+        with no ``portfolio_state`` serves starting-capital defaults (HTTP 200, never 500)."""
+        from signal_engine.storage.repository import SignalRepository, _now_iso
+
+        start_default = float(getattr(cfg.risk.portfolio, "starting_capital", 100000.0))
+        repo = SignalRepository(cfg.env.db_url)
+        try:
+            state = repo.fetch_portfolio_state()
+            open_rows = repo.fetch_open_positions()
+            today = _now_iso()[:10]
+            realized_today = repo.sum_closed_pnl_inr(day=today)
+            closed = repo.fetch_trades()
+            curve = repo.fetch_equity_curve(days=30)
+        finally:
+            repo.close()
+
+        starting = float(state["starting_capital"]) if state and state.get("starting_capital") \
+            else start_default
+        cash = float(state["cash"]) if state and state.get("cash") is not None else starting
+        realized_total = float(state["realized_pnl_total"]) if state \
+            and state.get("realized_pnl_total") is not None else 0.0
+
+        positions, invested, unreal_total = [], 0.0, 0.0
+        per_strat = {}
+
+        def _strat(name):
+            return per_strat.setdefault(name or "?", {"strategy": name or "?", "trades": 0,
+                                                      "pnl_inr": 0.0, "invested_now": 0.0})
+
+        for r in open_rows:
+            qty = int(r.get("qty") or 0)
+            if qty <= 0:
+                continue  # unsized/legacy open row — not part of the ₹ book
+            notional = float(r.get("notional") or 0.0)
+            upnl_inr = r.get("unrealized_pnl_inr")
+            upnl_inr = float(upnl_inr) if upnl_inr is not None else 0.0
+            invested += notional
+            unreal_total += upnl_inr
+            _strat(r.get("strategy"))["invested_now"] += notional
+            positions.append({
+                "id": r["id"], "symbol": r["symbol"], "direction": r["direction"],
+                "strategy": r["strategy"], "qty": qty, "entry_fill": r["entry_fill"],
+                "last_price": r.get("last_price"), "notional": round(notional, 2),
+                "unrealized_pnl_inr": round(upnl_inr, 2),
+                "unrealized_pnl_pct": r.get("unrealized_pnl_pct"),
+                "stop_loss": r.get("stop_loss"), "target": r.get("target"),
+                "entry_ts": r.get("entry_ts"),
+            })
+
+        equity = cash + invested + unreal_total
+
+        t_trades = t_wins = 0
+        t_charges = 0.0
+        for tr in closed:
+            pnl = tr.get("pnl_inr")
+            if pnl is None:
+                continue  # legacy row — predates the book, excluded from ₹ sums
+            d = _strat(tr.get("strategy"))
+            d["trades"] += 1
+            d["pnl_inr"] += float(pnl)
+            if (tr.get("exit_ts") or "")[:10] == today:
+                t_trades += 1
+                t_charges += float(tr.get("charges_inr") or 0.0)
+                if float(pnl) > 0:
+                    t_wins += 1
+
+        # Today's return baseline = the last equity point dated before today (yesterday's close),
+        # else the starting capital on the book's very first day.
+        baseline = starting
+        for pt in curve:
+            if (pt.get("day") or "") < today:
+                baseline = float(pt["equity"])
+        return {
+            "starting_capital": round(starting, 2),
+            "equity": round(equity, 2), "cash": round(cash, 2),
+            "invested": round(invested, 2),
+            "unrealized_pnl_inr": round(unreal_total, 2),
+            "realized_pnl_today_inr": round(realized_today, 2),
+            "realized_pnl_total_inr": round(realized_total, 2),
+            "return_total_pct": round(100.0 * (equity - starting) / starting, 4) if starting else 0.0,
+            "return_today_pct": round(100.0 * (equity - baseline) / baseline, 4) if baseline else 0.0,
+            "open_positions": positions,
+            "today": {"trades": t_trades, "wins": t_wins,
+                      "pnl_inr": round(realized_today, 2), "charges_inr": round(t_charges, 2)},
+            "per_strategy": [
+                {"strategy": v["strategy"], "trades": v["trades"],
+                 "pnl_inr": round(v["pnl_inr"], 2), "invested_now": round(v["invested_now"], 2)}
+                for v in sorted(per_strat.values(), key=lambda x: -x["pnl_inr"])],
+            "updated_ts": state.get("updated_ts") if state else None,
+        }
+
+    @app.get("/api/portfolio", dependencies=[Depends(_require_token)])
+    def portfolio():
+        """The paper portfolio manager: the ₹1,00,000 book's live value, cash, holdings and P&L.
+        Simulated money on real prices with the real cost model — decision-support only."""
+        return _portfolio_snapshot()
+
+    @app.get("/api/portfolio/equity", dependencies=[Depends(_require_token)])
+    def portfolio_equity(days: int = Query(default=30, ge=1, le=365)):
+        """The book's equity curve — intraday 'mark' points + daily 'eod' points for `days` back."""
+        from signal_engine.storage.repository import SignalRepository
+
+        repo = SignalRepository(cfg.env.db_url)
+        try:
+            points = repo.fetch_equity_curve(days=days)
+        finally:
+            repo.close()
+        return {"count": len(points), "points": [
+            {"ts": p["ts"], "day": p["day"], "kind": p["kind"], "equity": p["equity"],
+             "cash": p["cash"], "invested": p["invested"]} for p in points]}
 
     @app.get("/api/watchlist", dependencies=[Depends(_require_token)])
     def watchlist():

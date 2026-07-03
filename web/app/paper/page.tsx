@@ -14,12 +14,9 @@ import {
   type OpenPosition,
   type LiveStatus,
 } from "@/lib/api";
+// Shared Indian-locale money helpers: "₹1,00,000" / signed "+₹612".
+import { inr, inrSigned } from "@/lib/format";
 
-const inr = (n: number) =>
-  `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
-// Signed money for P&L figures: "+₹1,234" / "-₹1,234".
-const inrSigned = (n: number) =>
-  `${n >= 0 ? "+" : "-"}₹${Math.abs(n).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 const pct = (n: number) => `${n.toFixed(2)}%`;
 const pctSigned = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
 const cls = (n: number) => (n > 0 ? "pos" : n < 0 ? "neg" : "");
@@ -425,22 +422,41 @@ function TradeTable({ trades }: { trades: PaperTrade[] }) {
           {head("costs_abs", "Costs")}{head("net_pnl_abs", "Net P&L")}{head("net_pnl_pct", "%")}
         </tr></thead>
         <tbody>
-          {sorted.map((t) => (
-            <tr key={t.id}>
-              <td className="mono">{(t.entry_ts || "").replace("T", " ").slice(0, 16)}</td>
-              <td><Link href={`/stock/${encodeURIComponent(t.symbol)}`} className="sym-link">{t.symbol}</Link></td>
-              <td className={t.direction === "LONG" ? "pos" : "neg"}>{t.direction}</td>
-              <td>{t.strategy}</td>
-              <td>{t.confidence?.toFixed(0)}</td>
-              <td className="mono">{t.entry_fill?.toFixed(2)}</td>
-              <td className="mono">{t.exit_fill?.toFixed(2)}</td>
-              <td className="mono">{t.qty}</td>
-              <td>{t.exit_reason}</td>
-              <td className="mono">{inr(t.costs_abs)}</td>
-              <td className={`mono ${cls(t.net_pnl_abs)}`}>{inr(t.net_pnl_abs)}</td>
-              <td className={cls(t.net_pnl_abs)}>{t.net_pnl_pct?.toFixed(2)}%</td>
-            </tr>
-          ))}
+          {sorted.map((t) => {
+            // Prefer the real ledger money (₹ columns written by the portfolio
+            // ledger); legacy rows fall back to the fixed-notional modeled
+            // figures and carry a "modeled" badge so the two never mix silently.
+            const real = t.pnl_inr != null;
+            const modeled = t.modeled ?? !real;
+            const costs = t.charges_inr ?? t.costs_abs;
+            const netPnl = t.pnl_inr ?? t.net_pnl_abs;
+            return (
+              <tr key={t.id}>
+                <td className="mono">{(t.entry_ts || "").replace("T", " ").slice(0, 16)}</td>
+                <td><Link href={`/stock/${encodeURIComponent(t.symbol)}`} className="sym-link">{t.symbol}</Link></td>
+                <td className={t.direction === "LONG" ? "pos" : "neg"}>{t.direction}</td>
+                <td>{t.strategy}</td>
+                <td>{t.confidence?.toFixed(0)}</td>
+                <td className="mono">{t.entry_fill?.toFixed(2)}</td>
+                <td className="mono">{t.exit_fill?.toFixed(2)}</td>
+                <td className="mono">{t.qty}</td>
+                <td>{t.exit_reason}</td>
+                <td className="mono">{inr(costs)}</td>
+                <td className={`mono ${cls(netPnl)}`}>
+                  {inr(netPnl)}
+                  {modeled && (
+                    <span
+                      className="tag small modeled"
+                      title="Recorded before the ₹1L ledger — ₹ figures modeled at a fixed reference notional."
+                    >
+                      modeled
+                    </span>
+                  )}
+                </td>
+                <td className={cls(netPnl)}>{t.net_pnl_pct?.toFixed(2)}%</td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

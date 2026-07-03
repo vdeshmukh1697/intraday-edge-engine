@@ -13,6 +13,7 @@ const KINDS = [
   { key: "", label: "All" },
   { key: "entry", label: "Entries" },
   { key: "exit", label: "Exits" },
+  { key: "skip", label: "Skips" },
   { key: "premarket", label: "Pre-market" },
   { key: "scan", label: "Scan" },
   { key: "health", label: "Health" },
@@ -22,6 +23,7 @@ const KINDS = [
 const KIND_CLS: Record<string, string> = {
   entry: "pos",
   exit: "",
+  skip: "",
   halt: "neg",
   error: "neg",
 };
@@ -103,8 +105,9 @@ export default function PredictionsPage() {
         <p className="muted">
           Every alert the engine pushes to Telegram, logged at send time with its full
           parameters — entries with entry/stop/target/confidence/sizing, exits with realized
-          P&amp;L, plus pre-market briefings, scan picks and health pings. Updates live
-          (~{POLL_MS / 1000}s). Paper-trading decision support only — no live orders.
+          P&amp;L, skips the book couldn&apos;t afford, plus pre-market briefings, scan picks and
+          health pings. Updates live (~{POLL_MS / 1000}s). Paper-trading decision support only —
+          no live orders.
         </p>
       </div>
 
@@ -192,17 +195,31 @@ export default function PredictionsPage() {
                       : "—"}
                   </td>
                   <td className="muted small">{r.strategy ?? "—"}</td>
-                  <td
-                    className="muted small"
-                    style={{
-                      maxWidth: 360,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                    title={r.message}
-                  >
-                    {r.message}
+                  <td className="muted small" style={{ maxWidth: 360 }}>
+                    <div
+                      style={{
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                      title={r.message}
+                    >
+                      {r.message}
+                    </div>
+                    {/* Plain-English reason, when the alert carried one. */}
+                    {r.reason_plain && (
+                      <div
+                        className="why-sub"
+                        style={{
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                        title={r.reason_plain}
+                      >
+                        Why: {r.reason_plain}
+                      </div>
+                    )}
                   </td>
                 </tr>
               );

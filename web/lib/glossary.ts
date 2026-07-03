@@ -86,6 +86,13 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
   calibration: { full: "Calibration (Brier)", def: "How well the stated confidence matches actual outcomes (lower Brier = better calibrated). High confidence that doesn't win flags overconfidence." },
   avg_hold: { full: "Average Hold", def: "Mean time a position stays open before exiting." },
 
+  // ---- Portfolio (the ₹1,00,000 paper book) ----
+  book_equity: { full: "Total Value (Equity)", def: "Cash plus the marked-to-market value of open positions — what the paper book is worth right now. Started at ₹1,00,000; all of it simulated." },
+  cash_free: { full: "Cash Available", def: "Money not locked in open positions, free to fund the next entry. Long and short entries both block their full notional — a no-leverage margin model." },
+  invested_now: { full: "Invested Now", def: "₹ blocked in open positions at their entry fills. It returns to cash (plus or minus net P&L) when the position closes." },
+  realized_today: { full: "Today's P&L", def: "Net ₹ made or lost on trades closed today, after real modeled charges (brokerage, taxes, slippage). Excludes still-open positions." },
+  modeled_row: { full: "Modeled Row", def: "A trade recorded before the ₹1L ledger existed: its ₹ figures are modeled at a fixed reference notional, not real book money. Newer trades show exact ledger arithmetic." },
+
   // ---- Feed / status ----
   feed_status: { full: "Feed Status", def: "Whether the live market-data feed is connected and processing bars. 'Live' with a recent timestamp = healthy; 'stale' = no update recently (market closed or feed down)." },
   notional: { full: "Reference Notional", def: "A fixed ₹ position value used to convert % returns into ₹ figures, since the tool is capital-agnostic (you choose your real size)." },

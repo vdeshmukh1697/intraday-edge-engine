@@ -226,6 +226,13 @@ export interface PaperTrade {
   net_pnl_abs: number;
   net_pnl_pct: number;
   tod: string;
+  // Real-ledger money (₹). NULL/absent on legacy rows recorded before the
+  // ₹1L portfolio ledger existed — those carry modeled=true and fall back to
+  // the fixed-notional modeled figures above.
+  pnl_inr?: number | null;
+  charges_inr?: number | null;
+  notional_entry?: number | null;
+  modeled?: boolean;
 }
 
 export interface PaperSummary {
@@ -340,6 +347,75 @@ export function getLiveStatus(): Promise<LiveStatus> {
   return getJSON<LiveStatus>("/api/live/status");
 }
 
+// --- Portfolio (the shared ₹1,00,000 paper book) -----------------------------
+
+export interface PortfolioOpenPosition {
+  symbol: string;
+  direction: Direction;
+  strategy: string | null;
+  qty: number | null;
+  entry_fill: number | null;
+  last_price: number | null;
+  notional: number | null;
+  unrealized_pnl_inr: number | null;
+  unrealized_pnl_pct: number | null;
+  stop_loss: number | null;
+  target: number | null;
+  entry_ts: string | null;
+}
+
+export interface PortfolioToday {
+  trades: number;
+  wins: number;
+  pnl_inr: number | null;
+  charges_inr: number | null;
+}
+
+export interface PortfolioStrategyRow {
+  strategy: string;
+  trades: number;
+  pnl_inr: number | null;
+  invested_now: number | null;
+}
+
+export interface PortfolioResponse {
+  starting_capital: number;
+  equity: number;
+  cash: number;
+  invested: number;
+  unrealized_pnl_inr: number | null;
+  realized_pnl_today_inr: number | null;
+  realized_pnl_total_inr: number | null;
+  return_total_pct: number | null;
+  return_today_pct: number | null;
+  open_positions: PortfolioOpenPosition[];
+  today: PortfolioToday;
+  per_strategy: PortfolioStrategyRow[];
+  updated_ts: string | null;
+}
+
+export function getPortfolio(): Promise<PortfolioResponse> {
+  return getJSON<PortfolioResponse>("/api/portfolio");
+}
+
+// One equity snapshot: intraday 'mark' rows during the session + one 'eod' per day.
+export interface PortfolioEquityPoint {
+  ts: string;
+  day: string;
+  kind: string; // 'mark' | 'eod'
+  equity: number;
+  cash: number | null;
+  invested: number | null;
+}
+
+export function getPortfolioEquity(
+  days = 30
+): Promise<{ points: PortfolioEquityPoint[] }> {
+  return getJSON<{ points: PortfolioEquityPoint[] }>(
+    `/api/portfolio/equity?days=${days}`
+  );
+}
+
 // --- Predictions log (every alert pushed to Telegram, with parameters) -----
 
 export interface Prediction {
@@ -368,6 +444,10 @@ export interface Prediction {
   message: string;
   delivered: number;
   run_id: string | null;
+  // Portfolio-era columns (NULL on rows logged before the ₹1L ledger).
+  reason_plain?: string | null;
+  portfolio_equity?: number | null;
+  notional?: number | null;
 }
 
 export interface PredictionsResponse {
