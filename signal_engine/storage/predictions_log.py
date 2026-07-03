@@ -23,13 +23,21 @@ _META_COLUMNS = (
     "symbol", "direction", "strategy", "entry", "stop_loss", "stop_pct",
     "target", "target_pct", "risk_reward", "expected_move_pct", "confidence",
     "qty", "rupee_risk", "pnl_pct_net", "r_multiple", "exit_reason",
+    "reason_plain", "portfolio_equity", "notional",
+)
+
+# Columns added after the table first shipped (PORTFOLIO §2). Fresh DBs get them via the DDL
+# below; pre-portfolio DBs get them via ALTER — in repository.init_db AND defensively inside
+# log_prediction (which opens its own connection and may hit a not-yet-migrated DB).
+_PORTFOLIO_COLUMNS = (
+    ("reason_plain", "TEXT"), ("portfolio_equity", "REAL"), ("notional", "REAL"),
 )
 
 PREDICTIONS_DDL = """
 CREATE TABLE IF NOT EXISTS predictions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT,               -- IST wall-clock, ISO
-    kind TEXT,             -- entry|exit|halt|premarket|scan|health|advice|error|other
+    kind TEXT,             -- entry|exit|skip|halt|premarket|scan|health|advice|error|other
     level TEXT,            -- info|signal|warning|alert
     symbol TEXT, direction TEXT, strategy TEXT,
     entry REAL, stop_loss REAL, stop_pct REAL,
@@ -41,7 +49,10 @@ CREATE TABLE IF NOT EXISTS predictions (
     extra TEXT,            -- JSON object: meta keys with no dedicated column
     message TEXT,          -- the exact alert text handed to the channel
     delivered INTEGER,     -- 1 = the channel send() returned without raising
-    run_id TEXT
+    run_id TEXT,
+    reason_plain TEXT,     -- layman's "why" for this alert (PORTFOLIO §5)
+    portfolio_equity REAL, -- ₹ book equity the sizing was computed against (paper)
+    notional REAL          -- ₹ deployed/suggested for this alert (paper)
 )
 """
 
@@ -57,29 +68,43 @@ def log_prediction(db_path: str, *, message: str, level: str = "info",
         kind = str(meta.pop("kind", "other"))
         reasons = meta.pop("reasons", None)
         cols = {k: meta.pop(k) for k in list(meta) if k in _META_COLUMNS}
+        insert_sql = """INSERT INTO predictions
+               (ts, kind, level, symbol, direction, strategy, entry, stop_loss, stop_pct,
+                target, target_pct, risk_reward, expected_move_pct, confidence,
+                qty, rupee_risk, pnl_pct_net, r_multiple, exit_reason,
+                reasons, extra, message, delivered, run_id,
+                reason_plain, portfolio_equity, notional)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+        params = (
+            _now_iso(), kind, level,
+            cols.get("symbol"), cols.get("direction"), cols.get("strategy"),
+            cols.get("entry"), cols.get("stop_loss"), cols.get("stop_pct"),
+            cols.get("target"), cols.get("target_pct"), cols.get("risk_reward"),
+            cols.get("expected_move_pct"), cols.get("confidence"),
+            cols.get("qty"), cols.get("rupee_risk"),
+            cols.get("pnl_pct_net"), cols.get("r_multiple"), cols.get("exit_reason"),
+            json.dumps(reasons) if reasons is not None else None,
+            json.dumps(meta) if meta else None,
+            message, int(delivered), run_id,
+            cols.get("reason_plain"), cols.get("portfolio_equity"), cols.get("notional"),
+        )
         conn = sqlite3.connect(db_path, timeout=5.0)
         try:
             conn.execute(PREDICTIONS_DDL)
-            conn.execute(
-                """INSERT INTO predictions
-                   (ts, kind, level, symbol, direction, strategy, entry, stop_loss, stop_pct,
-                    target, target_pct, risk_reward, expected_move_pct, confidence,
-                    qty, rupee_risk, pnl_pct_net, r_multiple, exit_reason,
-                    reasons, extra, message, delivered, run_id)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    _now_iso(), kind, level,
-                    cols.get("symbol"), cols.get("direction"), cols.get("strategy"),
-                    cols.get("entry"), cols.get("stop_loss"), cols.get("stop_pct"),
-                    cols.get("target"), cols.get("target_pct"), cols.get("risk_reward"),
-                    cols.get("expected_move_pct"), cols.get("confidence"),
-                    cols.get("qty"), cols.get("rupee_risk"),
-                    cols.get("pnl_pct_net"), cols.get("r_multiple"), cols.get("exit_reason"),
-                    json.dumps(reasons) if reasons is not None else None,
-                    json.dumps(meta) if meta else None,
-                    message, int(delivered), run_id,
-                ),
-            )
+            try:
+                conn.execute(insert_sql, params)
+            except sqlite3.OperationalError as exc:
+                # Defensive migration (PORTFOLIO §2): this writer opens its own connection, so
+                # it can hit a DB created before the portfolio columns existed (repository
+                # init_db hasn't run there yet). ALTER-add them and retry the insert ONCE.
+                if "no column" not in str(exc):
+                    raise
+                for col, decl in _PORTFOLIO_COLUMNS:
+                    try:
+                        conn.execute(f"ALTER TABLE predictions ADD COLUMN {col} {decl}")
+                    except sqlite3.OperationalError:
+                        pass  # e.g. duplicate column — another writer migrated first
+                conn.execute(insert_sql, params)
             conn.commit()
         finally:
             conn.close()

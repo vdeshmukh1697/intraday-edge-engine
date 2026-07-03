@@ -124,6 +124,12 @@ class PaperPosition:
     r_multiple: Optional[float] = None       # realized R (pnl / risk)
     hold_minutes: Optional[float] = None
     won: Optional[bool] = None               # reached T1 before stop?
+    # ₹-book fields (PORTFOLIO §4) — set by the ledger path only; 0/None means "capital-agnostic
+    # legacy position" so every pre-portfolio caller and test keeps working unchanged.
+    qty: int = 0                             # shares the paper book deployed (0 = unsized)
+    notional: Optional[float] = None         # ₹ blocked at entry (qty * entry_fill)
+    pnl_inr: Optional[float] = None          # realized ₹ P&L net of modeled charges
+    charges_inr: Optional[float] = None      # modeled round-trip charges (CostModel, ₹)
 
     @property
     def symbol(self) -> str:

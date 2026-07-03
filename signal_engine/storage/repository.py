@@ -42,6 +42,12 @@ def _path_from_url(db_url: str) -> str:
     return db_url
 
 
+def _round2(value: Optional[float]) -> Optional[float]:
+    """Round ₹ to 2dp at the persistence boundary (PORTFOLIO §3: internal math stays unrounded;
+    only what hits disk is paise-rounded). None passes through (legacy / not-applicable)."""
+    return None if value is None else round(float(value), 2)
+
+
 class SignalRepository:
     def __init__(self, db_url: str = "sqlite:///data/signal_engine.sqlite3",
                  run_id: Optional[str] = None):
@@ -116,6 +122,30 @@ class SignalRepository:
             )
             """
         )
+        # The one persistent ₹1,00,000 PAPER book (PORTFOLIO §2): a single row holding free cash
+        # + lifetime realized ₹. Written only by the live engine's PortfolioLedger (single-writer
+        # rule); the API and scheduler read it. All money here is paper — legibility, not edge.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS portfolio_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                starting_capital REAL, cash REAL,
+                realized_pnl_total REAL, updated_ts TEXT, run_id TEXT
+            )
+            """
+        )
+        # Equity time series for the dashboard's portfolio curve: intraday 'mark' snapshots on a
+        # cadence plus one 'eod' row after square-off (PORTFOLIO §2/§3 snapshot()).
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS portfolio_equity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT, day TEXT, kind TEXT,        -- kind: 'mark' (intraday) | 'eod'
+                equity REAL, cash REAL, invested REAL, unrealized_pnl REAL,
+                open_count INTEGER, run_id TEXT
+            )
+            """
+        )
         # Predictions log: every alert pushed to the user (Telegram), with its structured
         # parameters — written by RecordingAlerter, read by GET /api/predictions. Created
         # here too so a fresh DB serves the dashboard before the first alert fires.
@@ -133,6 +163,20 @@ class SignalRepository:
             cols = {r["name"] for r in cur.execute(f"PRAGMA table_info({table})")}
             if "run_id" not in cols:
                 cur.execute(f"ALTER TABLE {table} ADD COLUMN run_id TEXT")
+        # ₹-book columns (PORTFOLIO §2). Legacy rows keep NULL (they predate the ledger and are
+        # excluded from ₹ sums — the analytics fallback still models them at a fixed notional).
+        for table, new_cols in (
+            ("paper_trades", (("qty", "INTEGER"), ("notional_entry", "REAL"),
+                              ("charges_inr", "REAL"), ("pnl_inr", "REAL"))),
+            ("open_positions", (("qty", "INTEGER"), ("notional", "REAL"),
+                                ("unrealized_pnl_inr", "REAL"))),
+            ("predictions", (("reason_plain", "TEXT"), ("portfolio_equity", "REAL"),
+                             ("notional", "REAL"))),
+        ):
+            cols = {r["name"] for r in cur.execute(f"PRAGMA table_info({table})")}
+            for col, decl in new_cols:
+                if col not in cols:
+                    cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
         self.conn.commit()
 
     def save_plan(self, plan: TradePlan, run_id: Optional[str] = None) -> int:
@@ -159,12 +203,15 @@ class SignalRepository:
     def save_position(self, pos: PaperPosition, run_id: Optional[str] = None) -> None:
         cur = self.conn.cursor()
         target = pos.plan.t1 if pos.plan.targets else None
+        # ₹-book fields (PORTFOLIO §2) — getattr with defaults: the runner may pass legacy
+        # position objects that predate the ledger; those persist as 0/NULL ("unsized").
+        qty = int(getattr(pos, "qty", 0) or 0)
         cur.execute(
             """INSERT OR REPLACE INTO paper_trades
                (id, symbol, strategy, direction, entry_fill, entry_ts, exit_fill,
                 exit_ts, exit_reason, pnl_pct_net, r_multiple, hold_minutes, won, confidence,
-                stop_loss, target, run_id)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                stop_loss, target, qty, notional_entry, charges_inr, pnl_inr, run_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 pos.id, pos.symbol, pos.plan.strategy, pos.direction.value,
                 pos.entry_fill, pos.entry_ts.isoformat() if pos.entry_ts else None,
@@ -172,6 +219,8 @@ class SignalRepository:
                 pos.exit_reason.value, pos.pnl_pct_net, pos.r_multiple,
                 pos.hold_minutes, int(pos.won) if pos.won is not None else None,
                 pos.plan.confidence, pos.plan.stop_loss, target,
+                qty, _round2(getattr(pos, "notional", None)),
+                _round2(getattr(pos, "charges_inr", None)), _round2(getattr(pos, "pnl_inr", None)),
                 run_id or self.run_id,
             ),
         )
@@ -179,25 +228,36 @@ class SignalRepository:
 
     def save_open_position(self, pos: PaperPosition, last_price: Optional[float] = None,
                            unrealized_pnl_pct: Optional[float] = None,
+                           unrealized_pnl_inr: Optional[float] = None,
                            run_id: Optional[str] = None) -> None:
         """Upsert a currently-open position so the dashboard can show live entries + unrealized
         P&L. Called on entry and again each bar with a fresh mark; ``remove_open_position`` on
-        close. ``last_price``/``unrealized_pnl_pct`` are best-effort (None until first mark)."""
+        close. ``last_price``/``unrealized_pnl_pct`` are best-effort (None until first mark).
+
+        ₹-book fields (PORTFOLIO §2): ``qty``/``notional`` come off the position object (getattr —
+        legacy objects persist 0/NULL). ``unrealized_pnl_inr`` is derived from ``last_price`` when
+        the position is sized (sign * (last - entry_fill) * qty); pass it explicitly to override."""
         plan = pos.plan
         target = plan.t1 if plan.targets else None
         target_pct = plan.target_pcts[0] if plan.target_pcts else None
+        qty = int(getattr(pos, "qty", 0) or 0)
+        if unrealized_pnl_inr is None and qty > 0 and last_price is not None \
+                and pos.entry_fill is not None:
+            unrealized_pnl_inr = pos.direction.sign * (last_price - pos.entry_fill) * qty
         cur = self.conn.cursor()
         cur.execute(
             """INSERT OR REPLACE INTO open_positions
                (id, symbol, strategy, direction, entry_fill, entry_ts, stop_loss, stop_pct,
                 target, target_pct, confidence, expected_move_pct, risk_reward,
-                last_price, unrealized_pnl_pct, updated_ts, run_id)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                last_price, unrealized_pnl_pct, qty, notional, unrealized_pnl_inr,
+                updated_ts, run_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 pos.id, pos.symbol, plan.strategy, pos.direction.value,
                 pos.entry_fill, pos.entry_ts.isoformat() if pos.entry_ts else None,
                 plan.stop_loss, plan.stop_pct, target, target_pct, plan.confidence,
                 plan.expected_move_pct, plan.risk_reward, last_price, unrealized_pnl_pct,
+                qty, _round2(getattr(pos, "notional", None)), _round2(unrealized_pnl_inr),
                 _now_iso(), run_id or self.run_id,
             ),
         )
@@ -243,6 +303,65 @@ class SignalRepository:
     def fetch_live_status(self) -> Optional[dict]:
         row = self.conn.execute("SELECT * FROM live_status WHERE id = 1").fetchone()
         return dict(row) if row else None
+
+    # ------------------------------------------------------------------ #
+    # Portfolio book (PORTFOLIO §2/§3) — state row, equity curve, ₹ sums.
+    # Single-writer rule: only the live engine's PortfolioLedger calls the
+    # write half; the API/scheduler use the fetch half read-only.
+    # ------------------------------------------------------------------ #
+    def fetch_portfolio_state(self) -> Optional[dict]:
+        """The single paper-book row (cash, lifetime realized ₹), or None on a fresh DB."""
+        row = self.conn.execute("SELECT * FROM portfolio_state WHERE id = 1").fetchone()
+        return dict(row) if row else None
+
+    def save_portfolio_state(self, *, starting_capital: float, cash: float,
+                             realized_pnl_total: float,
+                             run_id: Optional[str] = None) -> None:
+        """Upsert the single paper-book row. ₹ rounded to 2dp at this boundary (PORTFOLIO §3)."""
+        self.conn.execute(
+            """INSERT OR REPLACE INTO portfolio_state
+               (id, starting_capital, cash, realized_pnl_total, updated_ts, run_id)
+               VALUES (1,?,?,?,?,?)""",
+            (_round2(starting_capital), _round2(cash), _round2(realized_pnl_total),
+             _now_iso(), run_id or self.run_id),
+        )
+        self.conn.commit()
+
+    def insert_equity_snapshot(self, *, kind: str, equity: float, cash: float,
+                               invested: float, unrealized_pnl: float, open_count: int,
+                               ts: Optional[str] = None, day: Optional[str] = None,
+                               run_id: Optional[str] = None) -> None:
+        """Append one point to the portfolio equity curve (kind: 'mark' intraday | 'eod')."""
+        ts = ts or _now_iso()
+        self.conn.execute(
+            """INSERT INTO portfolio_equity
+               (ts, day, kind, equity, cash, invested, unrealized_pnl, open_count, run_id)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (ts, day or ts[:10], kind, _round2(equity), _round2(cash), _round2(invested),
+             _round2(unrealized_pnl), int(open_count), run_id or self.run_id),
+        )
+        self.conn.commit()
+
+    def fetch_equity_curve(self, days: int = 30) -> List[dict]:
+        """Chronological equity snapshots for the last ``days`` days (inclusive of today)."""
+        import datetime as _dt
+
+        cutoff = (_dt.date.fromisoformat(_now_iso()[:10])
+                  - _dt.timedelta(days=max(0, int(days)))).isoformat()
+        return [dict(r) for r in self.conn.execute(
+            "SELECT * FROM portfolio_equity WHERE day >= ? ORDER BY id", (cutoff,))]
+
+    def sum_closed_pnl_inr(self, day: Optional[str] = None) -> float:
+        """Σ realized ₹ over ledger-sized closed trades (pnl_inr NOT NULL — legacy rows are
+        excluded, they predate the book). ``day`` (YYYY-MM-DD) filters by EXIT date."""
+        clauses, args = ["pnl_inr IS NOT NULL"], []
+        if day:
+            clauses.append("date(exit_ts) = ?")
+            args.append(day)
+        row = self.conn.execute(
+            f"SELECT COALESCE(SUM(pnl_inr), 0.0) FROM paper_trades WHERE {' AND '.join(clauses)}",
+            args).fetchone()
+        return float(row[0])
 
     def fetch_predictions(self, *, limit: int = 200, kind: Optional[str] = None,
                           symbol: Optional[str] = None,

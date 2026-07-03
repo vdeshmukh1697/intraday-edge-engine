@@ -99,3 +99,12 @@ liquidity:
   min_avg_daily_turnover_cr: 25.0   # crore rupees
   max_spread_pct: 0.10
   min_price: 20.0                   # penny-stock floor
+
+portfolio:
+  # The ONE persistent paper book shared by the whole platform (PORTFOLIO §1). PAPER money only:
+  # the ledger makes results legible in ₹; it does not imply edge or profitability. Live sizing
+  # compounds off the book's current equity; risk.account_capital above remains the fallback for
+  # ledger-less contexts (backtests / scan previews without a repo).
+  starting_capital: 100000.0    # ₹1,00,000 — the user's one-lakh paper book
+  allow_short: true             # intraday shorts allowed; notional blocked as margin (no leverage)
+  mark_snapshot_minutes: 5      # intraday equity snapshot cadence (portfolio_equity 'mark' rows)

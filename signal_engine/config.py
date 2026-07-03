@@ -107,6 +107,18 @@ class CostParams(BaseModel):
     slippage_scalar: float = 1.0          # multiplies slippage_pct in the breakeven/cost gate
 
 
+class PortfolioParams(BaseModel):
+    """The ONE persistent ₹1,00,000 paper book (PORTFOLIO §1). All money is PAPER.
+
+    ``starting_capital`` anchors the :class:`~signal_engine.portfolio.PortfolioLedger`; live
+    sizing compounds off the book's current equity. ``RiskParams.account_capital`` stays only
+    as the fallback when no ledger is available (backtests / scan previews without a repo)."""
+
+    starting_capital: float = 100000.0   # ₹1,00,000 — the user's one-lakh paper book
+    allow_short: bool = True             # intraday shorts allowed; notional blocked as margin
+    mark_snapshot_minutes: int = 5       # intraday equity snapshot cadence
+
+
 class AlertParams(BaseModel):
     min_realert_seconds: int = 180        # minimum gap before re-alerting the same setup
     entry_band_bps: int = 25              # re-alert hysteresis band (basis points)
@@ -129,6 +141,7 @@ class RiskConfig(BaseModel):
     alerts: AlertParams = Field(default_factory=AlertParams)
     slippage: SlippageParams = Field(default_factory=SlippageParams)
     liquidity: LiquidityParams = Field(default_factory=LiquidityParams)
+    portfolio: PortfolioParams = Field(default_factory=PortfolioParams)
 
 
 # --------------------------------------------------------------------------- #
