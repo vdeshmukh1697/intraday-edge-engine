@@ -47,6 +47,29 @@ def _today() -> date:
     return datetime.now(IST).date()
 
 
+def _portfolio_equity(cfg: AppConfig) -> float:
+    """Current ₹ paper-book equity for read-only sizing in predictions (PORTFOLIO §9).
+
+    Reads ``portfolio_state`` (the live engine's ledger is the only writer); falls back to the
+    configured starting capital on a fresh DB. Best-effort — never blocks an alert."""
+    start = float(getattr(cfg.risk.portfolio, "starting_capital", 100000.0))
+    try:
+        from signal_engine.storage.repository import SignalRepository
+
+        repo = SignalRepository(cfg.env.db_url)
+        try:
+            state = repo.fetch_portfolio_state()
+        finally:
+            repo.close()
+        if state and state.get("cash") is not None:
+            # equity ≈ cash + open notional; the state row tracks cash + lifetime realized. For a
+            # pre-open briefing there are no open intraday positions, so cash == equity here.
+            return float(state["cash"])
+    except Exception:  # noqa: BLE001
+        pass
+    return start
+
+
 def _nse_universe(cfg: AppConfig, limit: Optional[int] = None) -> NSEUniverseProvider:
     """Build (and cache for the day) the real full-NSE universe with liquidity metadata."""
     key = (_today(), limit)
@@ -156,18 +179,25 @@ def premarket_job(cfg: AppConfig) -> None:
     if not cal.is_trading_day(_today()):
         return
     try:
+        from signal_engine.alerts.plain import _inr, explain_premarket
         from signal_engine.factory import build_alerter, build_cues_provider
         from signal_engine.premarket.briefing import build_briefing
 
         b = build_briefing(cfg, day=_today(), cues_provider=build_cues_provider(cfg))
         o = b.index_outlook
         top = b.picks[0] if b.picks else None
+        equity = _portfolio_equity(cfg)  # current ₹ book value, for context (paper)
+        # Plain-English morning read (PORTFOLIO §5/§9): a heads-up sized against the paper book;
+        # money only actually moves when the live engine enters (the plain line says so).
+        plain = explain_premarket(o, top)
         msg = (f"Pre-market {b.day}: {o.gap_bias.value} ({o.expected_gap_pct:+.2f}%), "
                f"{o.risk_tone.value}. Top: "
                + (f"{top.symbol} {top.bias.value} ({top.setup}, conf {top.confidence:.0f})"
-                  if top else "none"))
+                  if top else "none")
+               + f" | paper book {_inr(equity)}\n{plain}")
         meta = {"kind": "premarket", "gap_bias": o.gap_bias.value,
-                "expected_gap_pct": o.expected_gap_pct, "risk_tone": o.risk_tone.value}
+                "expected_gap_pct": o.expected_gap_pct, "risk_tone": o.risk_tone.value,
+                "portfolio_equity": round(equity, 2), "reason_plain": plain}
         if top:
             meta.update({"symbol": top.symbol, "direction": top.bias.value,
                          "strategy": top.setup, "confidence": top.confidence})
@@ -251,25 +281,42 @@ def scan_job(cfg: AppConfig, top_n: int = 10, limit: Optional[int] = None) -> No
     if not cal.is_trading_day(_today()):
         return
     try:
+        from types import SimpleNamespace
+
+        from signal_engine.alerts.plain import _inr, explain_scan_pick
         from signal_engine.factory import build_alerter
+        from signal_engine.risk.sizing import size_plan
         from signal_engine.scan.real_harness import run_real_scan
 
         uni = _nse_universe(cfg, limit=limit)
         res = run_real_scan(cfg, uni, _today(), top_n=top_n)
         alerter = build_alerter(cfg)
+        equity = _portfolio_equity(cfg)  # size the suggestions against the paper book (read-only)
         if not res.leaderboard:
             send_alert(alerter, f"Scan {_today()}: no setups passed filters today.",
                        level="info", meta={"kind": "scan"})
         else:
             send_alert(alerter, f"📊 Best intraday setups {_today()} "
-                       f"(scanned {res.universe_size} NSE names):", level="signal",
-                       meta={"kind": "scan", "universe_size": res.universe_size})
+                       f"(scanned {res.universe_size} NSE names, sized vs paper book "
+                       f"{_inr(equity)}):", level="signal",
+                       meta={"kind": "scan", "universe_size": res.universe_size,
+                             "portfolio_equity": round(equity, 2)})
             for e in res.leaderboard[:top_n]:
                 p = e.plan
+                # Suggested paper size against the book (PORTFOLIO §9) — a SUGGESTION, the scan
+                # never spends the book's cash (the live engine does, intraday). Plain reason too.
+                size = size_plan(p, cfg.risk.risk, capital=equity)
+                qty = int(size.get("qty", 0))
+                notional = round(qty * float(p.entry or 0.0), 2)
+                plain = explain_scan_pick(SimpleNamespace(
+                    symbol=p.symbol, direction=p.direction, reasons=p.reasons, entry=p.entry,
+                    stop_loss=p.stop_loss, targets=p.targets, target=p.t1 if p.targets else None,
+                    qty=qty, notional=notional))
+                qty_txt = f" | ~{qty} sh (~{_inr(notional)})" if qty > 0 else ""
                 send_alert(alerter,
                            f"{p.symbol} {p.direction.value} entry~{p.entry:.2f} "
                            f"SL -{p.stop_pct:.2f}% T1 +{p.target_pcts[0]:.2f}% "
-                           f"R:R {p.risk_reward:.1f} conf {p.confidence:.0f}",
+                           f"R:R {p.risk_reward:.1f} conf {p.confidence:.0f}{qty_txt}\n{plain}",
                            level="signal",
                            meta={"kind": "scan", "symbol": p.symbol,
                                  "direction": p.direction.value, "strategy": p.strategy,
@@ -278,7 +325,9 @@ def scan_job(cfg: AppConfig, top_n: int = 10, limit: Optional[int] = None) -> No
                                  "target": p.t1 if p.targets else None,
                                  "target_pct": p.target_pcts[0] if p.target_pcts else None,
                                  "risk_reward": p.risk_reward, "confidence": p.confidence,
-                                 "reasons": p.reasons})
+                                 "qty": qty, "notional": notional,
+                                 "portfolio_equity": round(equity, 2),
+                                 "reason_plain": plain, "reasons": p.reasons})
         _log.info("scan job surfaced %d picks from %d names", len(res.leaderboard), res.universe_size)
     except Exception as exc:  # noqa: BLE001
         _log.error("scan_job failed: %s", exc)

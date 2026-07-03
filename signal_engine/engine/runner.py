@@ -22,6 +22,13 @@ import pytz
 
 from signal_engine.alerts import send_alert
 from signal_engine.alerts.base import Alerter
+from signal_engine.alerts.plain import (  # plain-English "why" for every alert (PORTFOLIO §5)
+    _inr,
+    explain_entry,
+    explain_exit,
+    explain_halt,
+    explain_skip,
+)
 from signal_engine.brokers.base import BrokerAdapter
 from signal_engine.config import AppConfig
 from signal_engine.domain.enums import Direction, MarketState, PositionStatus
@@ -139,10 +146,26 @@ class EngineRunner:
 
         self.cost_model = CostModel(cfg.risk.costs)
         self.risk_manager = RiskManager(cfg.risk.risk)
+        # Portfolio book (PORTFOLIO §4): the ONE ₹1,00,000 paper book. Built only with a repo
+        # (live / replay-with-repo); without one the ledger stays None and every ledger hook
+        # no-ops, so backtests and scan previews keep the capital-agnostic legacy behaviour exactly.
+        self.ledger = None
+        self._debited: set = set()             # position ids whose fill notional the book blocked
+        self._reserved: Dict[str, float] = {}  # position id -> ₹ reserved at surface until fill/cancel
+        self._last_equity_snap_min = None      # throttle for intraday equity snapshots
+        if repo is not None:
+            try:
+                from signal_engine.portfolio.ledger import PortfolioLedger
+
+                self.ledger = PortfolioLedger(
+                    repo, float(getattr(cfg.risk.portfolio, "starting_capital", 100000.0)))
+            except Exception:  # noqa: BLE001 - the book is a mirror; never block the engine on it
+                self.ledger = None
         self.paper = PaperTrader(
             self.cost_model,
             slippage_pct=cfg.risk.slippage.pct_per_side,
             max_hold_minutes=cfg.risk.risk.max_hold_minutes,
+            on_fill=self._on_paper_fill,  # block the ₹ book's cash the instant an entry fills
         )
 
         self.params = dict(cfg.settings.strategy.params)
@@ -271,6 +294,7 @@ class EngineRunner:
         # Mirror this symbol's currently-open position (if any) to the DB with a fresh mark, so
         # the read-only dashboard can show the live entry + unrealized P&L the moment it fills.
         self._sync_open_position(bar)
+        self._maybe_snapshot_equity(bar)
 
         # 2) Forced square-off window: flatten, no new entries.
         if self.session.is_square_off_time(bar.ts):
@@ -458,54 +482,123 @@ class EngineRunner:
         df = pd.DataFrame(rows).set_index("ts")
         return df
 
+    def _on_paper_fill(self, pos: PaperPosition) -> None:
+        """PaperTrader callback fired the instant a paper entry FILLS. Blocks the fill notional
+        (qty * entry_fill) in the ₹ book (PORTFOLIO §4). Best-effort + idempotent: the book is a
+        mirror and must never break the feed. No-op without a ledger or for an unsized position."""
+        if self.ledger is None:
+            return
+        qty = int(getattr(pos, "qty", 0) or 0)
+        if qty <= 0 or pos.id in self._debited or pos.entry_fill is None:
+            return
+        try:
+            self.ledger.on_entry(pos, qty)
+            self._debited.add(pos.id)
+        except Exception:  # noqa: BLE001 - book mirror must never break the live feed
+            self.log.exception("ledger on_entry failed for %s", pos.id)
+        finally:
+            self._reserved.pop(pos.id, None)  # reservation is now a real block (or the debit failed)
+
     def _surface(self, plan: TradePlan) -> None:
+        # Portfolio sizing (PORTFOLIO §4): size against the book's LIVE equity (so gains/losses
+        # compound), then cap by the free cash NOT already reserved by other candidates surfaced
+        # this same minute — two same-minute picks can't both spend the whole book (no leverage).
+        # qty 0 => the book can't afford even one share, so we sit out with a plain-English skip.
+        qty = 0
+        fill_est = float(plan.entry or 0.0)
+        if self.ledger is not None:
+            size = size_plan(plan, self.cfg.risk.risk, capital=self.ledger.equity())
+            entry = float(plan.entry or 0.0)
+            # Reserve/afford at the ADVERSE-slipped fill price (what on_entry actually blocks), not
+            # the plan price — else two same-minute picks that each reserve half the cash jointly
+            # over-commit once slippage lifts the fill, breaching the no-leverage invariant.
+            slip = float(getattr(self.paper, "slippage_pct", 0.0) or 0.0) / 100.0
+            fill_est = entry * (1.0 + slip)
+            free = self.ledger.cash - sum(self._reserved.values())
+            affordable = int(free // fill_est) if fill_est > 0 else 0
+            qty = max(0, min(int(size.get("qty", 0)), affordable))
+            if qty <= 0:
+                self._alert_skip(plan, fill_est, free)
+                return
         self.summary.picks.append(plan)
         self._daily_trades += 1
         self._daily_per_symbol[plan.symbol] = self._daily_per_symbol.get(plan.symbol, 0) + 1
         if self.repo:
             self.repo.save_plan(plan)
-        self.paper.open_from_plan(plan)
+        pos = self.paper.open_from_plan(plan)
+        pos.qty = qty  # carried to the fill hook, which blocks qty * entry_fill in the book
+        if qty > 0:
+            self._reserved[pos.id] = qty * fill_est  # freed on fill or cancel
         # Log entries to the live log (not just Telegram) so the session is auditable from the log.
         if not self._suppress_alerts:
-            self.log.info("ENTRY %s %s @~%.2f SL %.2f T1 %.2f conf %.0f",
+            self.log.info("ENTRY %s %s @~%.2f SL %.2f T1 %.2f conf %.0f qty %d",
                           plan.symbol, plan.direction.value, plan.entry, plan.stop_loss,
-                          plan.t1, plan.confidence)
-        self._alert(self._format_alert(plan), level="signal", meta=self._plan_meta(plan))
+                          plan.t1, plan.confidence, qty)
+        self._alert(self._format_alert(plan, qty), level="signal", meta=self._plan_meta(plan, qty))
 
-    def _plan_meta(self, plan: TradePlan) -> dict:
-        """Structured parameters for the predictions log — everything the alert text says."""
-        size = size_plan(plan, self.cfg.risk.risk)
+    def _alert_skip(self, plan: TradePlan, price: float, cash: float) -> None:
+        """Affordability skip (PORTFOLIO §4): a valid setup the book can't afford even one share
+        of. Recorded to the predictions feed (kind 'skip') with a plain reason; opens nothing and
+        burns no daily-trade slot. Suppressed (like entries) during warm-start replay."""
+        plain = explain_skip(plan, price, cash)
+        if not self._suppress_alerts:
+            self.log.info("SKIP %s %s @~%.2f — 1 share ₹%.2f > free cash ₹%.2f",
+                          plan.symbol, plan.direction.value, plan.entry, price, cash)
+        self._alert("💤 " + plain, level="info", meta={
+            "kind": "skip", "symbol": plan.symbol, "direction": plan.direction.value,
+            "strategy": plan.strategy, "entry": plan.entry, "stop_loss": plan.stop_loss,
+            "confidence": plan.confidence, "reason_plain": plain, "reasons": plan.reasons,
+        })
+
+    def _book_equity(self) -> Optional[float]:
+        return self.ledger.equity() if self.ledger is not None else None
+
+    def _plan_meta(self, plan: TradePlan, qty: Optional[int] = None) -> dict:
+        """Structured parameters for the predictions log — everything the alert text says, plus
+        the ₹-book sizing and the plain-English 'why' (PORTFOLIO §4/§6)."""
+        equity = self._book_equity()
+        size = size_plan(plan, self.cfg.risk.risk, capital=equity)
+        q = int(size["qty"] if qty is None else qty)
+        notional = round(q * float(plan.entry or 0.0), 2)
         return {
             "kind": "entry", "symbol": plan.symbol, "direction": plan.direction.value,
             "strategy": plan.strategy, "entry": plan.entry, "stop_loss": plan.stop_loss,
             "stop_pct": plan.stop_pct, "target": plan.t1 if plan.targets else None,
             "target_pct": plan.target_pcts[0] if plan.target_pcts else None,
             "risk_reward": plan.risk_reward, "expected_move_pct": plan.expected_move_pct,
-            "confidence": plan.confidence, "qty": size["qty"],
-            "rupee_risk": size["rupee_risk"], "reasons": plan.reasons,
+            "confidence": plan.confidence, "qty": q,
+            "rupee_risk": size["rupee_risk"], "notional": notional,
+            "portfolio_equity": round(equity, 2) if equity is not None else None,
+            "reason_plain": explain_entry(plan, q, notional, equity),
+            "reasons": plan.reasons,
         }
 
-    def _format_alert(self, plan: TradePlan) -> str:
-        """D4 alert content: expected move, key level (T1), R:R, reasons, and position qty.
+    def _format_alert(self, plan: TradePlan, qty: Optional[int] = None) -> str:
+        """D4 alert content + the ₹-book position + a plain-English 'Why:' line (PORTFOLIO §6).
 
-        Position qty + rupee risk come from the M0 sizing helper using the config's reference
-        ``account_capital`` (the user overrides it). Conviction is labelled "conf" — never
-        "win-rate" — and any ML score is surfaced elsewhere as "model score", never win-rate.
-        """
-        size = size_plan(plan, self.cfg.risk.risk)
+        ``qty`` is the shares the book actually deploys (affordability-capped in ``_surface``);
+        when absent (no-ledger paths) it falls back to the reference sizing. Conviction is labelled
+        "conf" — never "win-rate" — and any ML score is surfaced elsewhere as "model score"."""
+        equity = self._book_equity()
+        size = size_plan(plan, self.cfg.risk.risk, capital=equity)
+        q = int(size["qty"] if qty is None else qty)
         tgt = f"{plan.t1:.2f} (+{plan.target_pcts[0]:.2f}%)"
+        notional = q * float(plan.entry or 0.0)
         qty_part = ""
-        if size["qty"] > 0:
-            qty_part = (f" | qty {size['qty']} (~₹{size['rupee_risk']:.0f} risk "
-                        f"@ ₹{size['capital']:.0f} cap)")
+        if q > 0:
+            book = f", book {_inr(equity)}" if equity is not None else ""
+            pct = f", {int(round(100.0 * notional / equity))}% of book" if equity else ""
+            qty_part = (f" | qty {q} (~{_inr(notional)}{pct}, "
+                        f"~{_inr(size['rupee_risk'])} risk{book})")
         reasons = f" [{', '.join(plan.reasons)}]" if plan.reasons else ""
-        return (
+        head = (
             f"{plan.symbol} {plan.direction.value} @~{plan.entry:.2f} "
             f"SL {plan.stop_loss:.2f} (-{plan.stop_pct:.2f}%) "
             f"T1 {tgt} (key level {plan.t1:.2f}) "
             f"exp move {plan.expected_move_pct:.2f}% R:R {plan.risk_reward:.2f} "
             f"conf {plan.confidence:.0f}{qty_part}{reasons}"
         )
+        return head + "\nWhy: " + explain_entry(plan, q, notional, equity)
 
     def _sync_open_position(self, bar: Bar) -> None:
         """Upsert the OPEN position for ``bar.symbol`` (if one is filled) to the DB with the
@@ -528,9 +621,40 @@ class EngineRunner:
         except Exception:  # noqa: BLE001 - dashboard mirroring must never break the feed
             pass
 
+    def _maybe_snapshot_equity(self, bar: Bar) -> None:
+        """Append an intraday equity point every ``portfolio.mark_snapshot_minutes`` (live only),
+        so the portfolio page can draw an equity curve. Best-effort; values open rows at their
+        stored marks. Off during warm-start (enforce_freshness is still False there)."""
+        if self.ledger is None or not self.enforce_freshness:
+            return
+        every = int(getattr(self.cfg.risk.portfolio, "mark_snapshot_minutes", 5) or 5)
+        m = bar.ts.replace(second=0, microsecond=0)
+        last = self._last_equity_snap_min
+        if last is not None and (m - last).total_seconds() < every * 60:
+            return
+        self._last_equity_snap_min = m
+        try:
+            self.ledger.snapshot("mark")
+        except Exception:  # noqa: BLE001 - snapshots must never break the feed
+            pass
+
     def _on_position_closed(self, pos: PaperPosition, bar: Bar) -> None:
         self.summary.closed.append(pos)
-        if self.repo:
+        # Settle the ₹ book (PORTFOLIO §4): credit the blocked notional back plus realized ₹ P&L
+        # net of the real modeled charges. on_exit ALSO persists the closed trade row (with the ₹
+        # fields) and drops the open-position mirror, so for a sized position we must NOT save/remove
+        # again here. Unsized (no-ledger / legacy) and never-filled positions take the old path.
+        money = None
+        if self.ledger is not None and int(getattr(pos, "qty", 0) or 0) > 0 \
+                and pos.entry_fill is not None and pos.exit_fill is not None:
+            try:
+                money = self.ledger.on_exit(pos, pos.qty, self.cost_model)
+            except Exception:  # noqa: BLE001 - book mirror must never break the feed
+                self.log.exception("ledger on_exit failed for %s", pos.id)
+                money = None
+            self._debited.discard(pos.id)
+        self._reserved.pop(pos.id, None)  # free any surface reservation (position filled OR cancelled)
+        if self.repo and money is None:
             self.repo.save_position(pos)
             self.repo.remove_open_position(pos.id)  # no longer open — drop the live mirror row
         # Arm the per-symbol cooldown after ANY losing exit (not just a hard STOP). Previously
@@ -546,29 +670,54 @@ class EngineRunner:
             was_halted = self.breaker.halted
             self.breaker.record(pos.pnl_pct_net)
             if not self._suppress_alerts:
-                self.log.info("EXIT  %s %s net %+.2f%% R %+.2f",
-                              pos.symbol, pos.exit_reason.value, pos.pnl_pct_net, pos.r_multiple)
-            self._alert(
-                f"{pos.symbol} CLOSED {pos.exit_reason.value} "
-                f"net {pos.pnl_pct_net:+.2f}% R {pos.r_multiple:+.2f}",
-                level="info",
-                meta={"kind": "exit", "symbol": pos.symbol,
-                      "direction": pos.direction.value, "strategy": pos.plan.strategy,
-                      "entry": pos.entry_fill, "confidence": pos.plan.confidence,
-                      "exit_reason": pos.exit_reason.value,
-                      "pnl_pct_net": pos.pnl_pct_net, "r_multiple": pos.r_multiple,
-                      "exit_fill": pos.exit_fill, "hold_minutes": pos.hold_minutes},
-            )
+                if money:
+                    self.log.info("EXIT  %s %s %s net (R %+.2f)", pos.symbol,
+                                  pos.exit_reason.value, _inr(money["pnl_inr"]), pos.r_multiple)
+                else:
+                    self.log.info("EXIT  %s %s net %+.2f%% R %+.2f", pos.symbol,
+                                  pos.exit_reason.value, pos.pnl_pct_net, pos.r_multiple)
+            self._alert(self._format_exit(pos, money), level="info",
+                        meta=self._exit_meta(pos, money))
             if self.breaker.halted and not was_halted:
                 self.log.warning("session breaker tripped: %s — halting NEW entries",
                                  self.breaker.halt_reason)
+                halt_plain = explain_halt(self.breaker.halt_reason,
+                                          self.breaker.realized_pnl_pct)
                 self._alert(
                     f"⛔ session halt — no new entries: {self.breaker.halt_reason} "
-                    f"(session {self.breaker.realized_pnl_pct:+.2f}%)",
+                    f"(session {self.breaker.realized_pnl_pct:+.2f}%)\n{halt_plain}",
                     level="warning",
                     meta={"kind": "halt", "reason": self.breaker.halt_reason,
-                          "session_pnl_pct": self.breaker.realized_pnl_pct},
+                          "session_pnl_pct": self.breaker.realized_pnl_pct,
+                          "reason_plain": halt_plain},
                 )
+
+    def _format_exit(self, pos: PaperPosition, money: Optional[dict]) -> str:
+        """Exit alert text: ₹ P&L after real charges + the book's new value + a plain line when the
+        position was sized (PORTFOLIO §6); the %/R-only phrasing for unsized/legacy positions."""
+        if money:
+            return (
+                f"{pos.symbol} CLOSED {pos.exit_reason.value} "
+                f"{_inr(money['pnl_inr'])} net (after {_inr(money['charges_inr'])} charges) "
+                f"{pos.pnl_pct_net:+.2f}% R {pos.r_multiple:+.2f} | book {_inr(money['equity_after'])}"
+                f"\n{explain_exit(pos, money)}"
+            )
+        return (f"{pos.symbol} CLOSED {pos.exit_reason.value} "
+                f"net {pos.pnl_pct_net:+.2f}% R {pos.r_multiple:+.2f}")
+
+    def _exit_meta(self, pos: PaperPosition, money: Optional[dict]) -> dict:
+        meta = {"kind": "exit", "symbol": pos.symbol,
+                "direction": pos.direction.value, "strategy": pos.plan.strategy,
+                "entry": pos.entry_fill, "confidence": pos.plan.confidence,
+                "exit_reason": pos.exit_reason.value,
+                "pnl_pct_net": pos.pnl_pct_net, "r_multiple": pos.r_multiple,
+                "exit_fill": pos.exit_fill, "hold_minutes": pos.hold_minutes}
+        if money:
+            meta.update({"pnl_inr": money["pnl_inr"], "notional": money["notional"],
+                         "charges_inr": money["charges_inr"],
+                         "portfolio_equity": money["equity_after"],
+                         "reason_plain": explain_exit(pos, money)})
+        return meta
 
     # -- entrypoints --------------------------------------------------------
     def replay(self, watchlist: Optional[List[str]] = None) -> RunSummary:
@@ -591,6 +740,11 @@ class EngineRunner:
                 continue
             for pos in self.paper.force_square_off(hist[-1]):
                 self._on_position_closed(pos, hist[-1])
+        if self.ledger is not None:
+            try:
+                self.ledger.snapshot("eod")  # close-of-day equity point for the portfolio curve
+            except Exception:  # noqa: BLE001
+                pass
         self.broker.disconnect()
         return self.summary
 
@@ -640,6 +794,18 @@ class EngineRunner:
         # empty, so this is a harmless no-op there.
         self._reset_live_risk_budget()
 
+        # Re-derive the ₹ book from the DB (closed trades + still-open positions) now that warm-start
+        # has rebuilt today as the single source of truth — a restart can never double-spend cash
+        # (PORTFOLIO §4). Any positions carried out of warm-start keep their notional blocked.
+        if self.ledger is not None:
+            try:
+                self.ledger.rebuild()
+                self.ledger.snapshot("mark")  # anchor an opening equity point for today's curve
+                self.log.info("portfolio book: ₹%.0f equity (cash ₹%.0f) at live start",
+                              self.ledger.equity(), self.ledger.cash)
+            except Exception:  # noqa: BLE001
+                self.log.exception("ledger rebuild after warm-start failed")
+
         self.enforce_freshness = True  # live feed: activate the stale-data fail-safe (§9.3)
         self.broker.subscribe(symbols)
         self.broker.set_tick_callback(self.on_tick)
@@ -660,6 +826,11 @@ class EngineRunner:
                 continue
             for pos in self.paper.force_square_off(hist[-1]):
                 self._on_position_closed(pos, hist[-1])
+        if self.ledger is not None:
+            try:
+                self.ledger.snapshot("eod")  # close-of-day equity point for the portfolio curve
+            except Exception:  # noqa: BLE001
+                pass
         self.broker.disconnect()
         return self.summary
 

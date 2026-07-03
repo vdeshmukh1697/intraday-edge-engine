@@ -15,7 +15,7 @@ Fill / exit conventions
 
 from __future__ import annotations
 
-from typing import Any, List
+from typing import Any, Callable, List, Optional
 
 from signal_engine.domain.enums import Direction, ExitReason, PositionStatus
 from signal_engine.domain.models import Bar, PaperPosition, TradePlan
@@ -37,10 +37,15 @@ class PaperTrader:
     """
 
     def __init__(self, cost_model: Any, slippage_pct: float = 0.03,
-                 max_hold_minutes: int = 90) -> None:
+                 max_hold_minutes: int = 90,
+                 on_fill: Optional[Callable[[PaperPosition], None]] = None) -> None:
         self.cost_model = cost_model
         self.slippage_pct = slippage_pct
         self.max_hold_minutes = max_hold_minutes
+        # Optional hook fired the instant a PENDING position fills (entry_fill set). The live
+        # engine uses it to block the ₹ book's cash at the real fill price. None => no-op, so
+        # replay/backtest without a portfolio book behave exactly as before.
+        self._on_fill = on_fill
         self._active: List[PaperPosition] = []  # PENDING or OPEN
         self._counter = 0
 
@@ -117,6 +122,8 @@ class PaperTrader:
         pos.status = PositionStatus.OPEN
         pos.entry_fill = fill
         pos.entry_ts = bar.ts
+        if self._on_fill is not None:
+            self._on_fill(pos)
 
     def _evaluate_exit(self, pos: PaperPosition, bar: Bar) -> bool:
         """Check stop/target/time-stop for an OPEN position. Returns True if closed."""

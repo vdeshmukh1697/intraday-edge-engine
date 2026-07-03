@@ -125,3 +125,41 @@ def test_healthcheck_treats_rate_limit_probe_as_transient(monkeypatch):
     s.healthcheck_job()
     assert calls["quote"] == 1 and calls["slept"] == []
     assert "FAILED" in alerts[-1]
+
+
+def test_premarket_job_attaches_layman_reason(monkeypatch):
+    """The 08:30 briefing (first morning-facing prediction) must carry a plain-English 'why' and
+    the paper book's value, sized as a heads-up (PORTFOLIO §5/§9)."""
+    from datetime import date
+
+    import signal_engine.scheduler as s
+
+    monkeypatch.setattr(s, "_today", lambda: date(2025, 6, 23))     # trading day
+    monkeypatch.setattr(s, "_portfolio_equity", lambda cfg: 100000.0)
+
+    outlook = type("O", (), {"gap_bias": type("G", (), {"value": "GAP_UP"})(),
+                             "expected_gap_pct": 0.4,
+                             "risk_tone": type("R", (), {"value": "RISK_ON"})()})()
+    pick = type("P", (), {"symbol": "INFY", "bias": type("D", (), {"value": "LONG"})(),
+                          "setup": "momentum", "confidence": 70.0, "catalyst": "global cues"})()
+    briefing = type("B", (), {"day": date(2025, 6, 23), "index_outlook": outlook,
+                              "picks": [pick]})()
+    monkeypatch.setattr("signal_engine.premarket.briefing.build_briefing",
+                        lambda cfg, day, cues_provider=None: briefing)
+    monkeypatch.setattr("signal_engine.factory.build_cues_provider", lambda cfg: None)
+
+    sent = []
+
+    class _Alerter:
+        def send(self, message, level="info", meta=None):
+            sent.append((message, meta))
+
+    monkeypatch.setattr("signal_engine.factory.build_alerter", lambda cfg: _Alerter())
+
+    s.premarket_job(load_config())
+    assert sent, "premarket alert was not sent"
+    msg, meta = sent[-1]
+    assert meta["kind"] == "premarket"
+    assert meta.get("reason_plain")                    # a plain-English reason is attached
+    assert meta.get("portfolio_equity") == 100000.0    # sized against the ₹1,00,000 book
+    assert "INFY" in msg and "heads-up" in msg         # names the idea + honest heads-up framing
