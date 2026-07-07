@@ -255,6 +255,11 @@ def test_auth_status_transparent_for_non_dhan(client, monkeypatch):
 
 
 def test_auth_status_reports_expired_for_dhan_without_token(client, monkeypatch):
+    import signal_engine.config as _cfg
+    # The endpoint hot-reloads the token from .env (so the dashboard stays fresh after the
+    # scheduler's nightly renewal). Neutralize that here so the test's controlled env — no token —
+    # is what the expiry logic sees, rather than the live repo's real .env token.
+    monkeypatch.setattr(_cfg, "refresh_runtime_env", lambda *a, **k: {})
     monkeypatch.setenv("SE_DATA_SOURCE", "dhan")
     monkeypatch.setenv("DHAN_ACCESS_TOKEN", "")  # no token -> not connected
     d = client.get("/api/auth/status").json()

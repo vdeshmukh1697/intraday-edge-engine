@@ -50,14 +50,32 @@ def _round2(value: Optional[float]) -> Optional[float]:
 
 class SignalRepository:
     def __init__(self, db_url: str = "sqlite:///data/signal_engine.sqlite3",
-                 run_id: Optional[str] = None):
+                 run_id: Optional[str] = None, read_only: bool = False):
         path = _path_from_url(db_url)
+        # A stable-per-process tag for every row this repo writes, unless a call overrides it.
+        self.run_id = run_id or _default_run_id()
+        # Read-only mode for the dashboard's polling endpoints: open the connection but SKIP init_db.
+        # init_db issues schema/PRAGMA statements that take a WRITE lock; during market hours that
+        # blocks ~10s behind the live engine's per-bar writes, so /api/portfolio etc. hang and the
+        # dashboard shows a perpetual "Loading…". A SELECT-only reader under WAL never takes a write
+        # lock and reads a consistent snapshot without waiting on the writer — so reads stay instant.
+        if read_only and path != ":memory:":
+            self.conn = sqlite3.connect(path, timeout=5.0)
+            self.conn.row_factory = sqlite3.Row
+            # Skip init_db when the schema already exists (established DB) — that's the whole point,
+            # so market-hours reads don't block on the live writer's lock. On a fresh/partial DB
+            # (new deploy, tests) there is NO live writer to contend with, so create the schema once.
+            # Probe the newest table (portfolio_equity): present => current init_db has already run.
+            exists = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='portfolio_equity'"
+            ).fetchone()
+            if exists is None:
+                self.init_db()
+            return
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
-        # A stable-per-process tag for every row this repo writes, unless a call overrides it.
-        self.run_id = run_id or _default_run_id()
         self.init_db()
 
     def init_db(self) -> None:

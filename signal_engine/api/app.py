@@ -311,10 +311,20 @@ def create_app() -> FastAPI:
     def auth_status():
         """Token health for the dashboard gate. Public (it gates everything else)."""
         from signal_engine.brokers.dhan import token_expiry
+        from signal_engine.config import refresh_runtime_env
 
         source = os.getenv("SE_DATA_SOURCE", "mock")
         if source != "dhan":
             return {"source": source, "auth_required": False, "connected": True}
+        # Hot-reload the token from .env before reporting: the scheduler renews it DAILY in a
+        # SEPARATE process, so this uvicorn process's startup env goes stale and the dashboard would
+        # otherwise falsely show 'disconnected' after every nightly renewal (until a tunnel restart).
+        # refresh_runtime_env only touches the volatile auth keys and is best-effort — it can never
+        # break the endpoint, and it ends the nightly staleness at its root.
+        try:
+            refresh_runtime_env()
+        except Exception:  # noqa: BLE001
+            pass
         exp = token_expiry(os.getenv("DHAN_ACCESS_TOKEN") or "")
         connected = bool(exp and exp > datetime.utcnow())
         return {"source": "dhan", "auth_required": True, "connected": connected,
@@ -575,7 +585,7 @@ def create_app() -> FastAPI:
         from signal_engine.risk.costs import CostModel
         from signal_engine.storage.repository import SignalRepository
 
-        repo = SignalRepository(cfg.env.db_url)
+        repo = SignalRepository(cfg.env.db_url, read_only=True)
         try:
             rows = repo.fetch_trades(start=start, end=end, symbol=symbol, strategy=strategy)
         finally:
@@ -623,7 +633,7 @@ def create_app() -> FastAPI:
         from signal_engine.storage.repository import SignalRepository
 
         notional = float(cfg.risk.costs.reference_trade_value)
-        repo = SignalRepository(cfg.env.db_url)
+        repo = SignalRepository(cfg.env.db_url, read_only=True)
         try:
             rows = repo.fetch_open_positions()
         finally:
@@ -664,7 +674,7 @@ def create_app() -> FastAPI:
         lets the dashboard poll cheaply — pass the max id it has and merge the delta."""
         from signal_engine.storage.repository import SignalRepository
 
-        repo = SignalRepository(cfg.env.db_url)
+        repo = SignalRepository(cfg.env.db_url, read_only=True)
         try:
             rows = repo.fetch_predictions(limit=limit, kind=kind, symbol=symbol,
                                           since_id=since_id)
@@ -679,7 +689,7 @@ def create_app() -> FastAPI:
         (during market hours that means the feed is likely down)."""
         from signal_engine.storage.repository import SignalRepository
 
-        repo = SignalRepository(cfg.env.db_url)
+        repo = SignalRepository(cfg.env.db_url, read_only=True)
         try:
             st = repo.fetch_live_status()
         finally:
@@ -714,7 +724,7 @@ def create_app() -> FastAPI:
         from signal_engine.storage.repository import SignalRepository, _now_iso
 
         start_default = float(getattr(cfg.risk.portfolio, "starting_capital", 100000.0))
-        repo = SignalRepository(cfg.env.db_url)
+        repo = SignalRepository(cfg.env.db_url, read_only=True)
         try:
             state = repo.fetch_portfolio_state()
             open_rows = repo.fetch_open_positions()
@@ -811,7 +821,7 @@ def create_app() -> FastAPI:
         """The book's equity curve — intraday 'mark' points + daily 'eod' points for `days` back."""
         from signal_engine.storage.repository import SignalRepository
 
-        repo = SignalRepository(cfg.env.db_url)
+        repo = SignalRepository(cfg.env.db_url, read_only=True)
         try:
             points = repo.fetch_equity_curve(days=days)
         finally:
