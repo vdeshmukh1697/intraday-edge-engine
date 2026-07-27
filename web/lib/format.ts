@@ -54,6 +54,17 @@ export function inrCompact(v: number | null | undefined): string {
   return `${sign}₹${abs.toFixed(0)}`;
 }
 
+/** "1.23Cr" / "3.45L" / "5.6K" — a compact COUNT on the Indian scale (traded volume).
+ *  Deliberately not `inrCompact`: shares are not rupees and must not carry a ₹. */
+export function countCompact(v: number | null | undefined): string {
+  if (isMissing(v)) return DASH;
+  const n = v as number;
+  if (n >= 1e7) return `${(n / 1e7).toFixed(2)}Cr`;
+  if (n >= 1e5) return `${(n / 1e5).toFixed(2)}L`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
+  return GROUP0.format(n);
+}
+
 /** Signed percentage: "+1.23%" / "-0.45%". */
 export function pctSigned(v: number | null | undefined, digits = 2): string {
   if (isMissing(v)) return DASH;

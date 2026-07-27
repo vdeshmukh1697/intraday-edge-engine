@@ -7,9 +7,11 @@ import {
   todayStr,
   getPaperTrades,
   getOpenPositions,
+  getWatchlistQuotes,
   type ChartResponse,
   type PaperTrade,
   type OpenPosition,
+  type WatchlistQuote,
 } from "@/lib/api";
 import CandleChart from "@/components/CandleChart";
 import LiveChart from "@/components/LiveChart";
@@ -24,7 +26,20 @@ import {
 } from "@/components/ui/primitives";
 import { StatTile } from "@/components/ui/stats";
 import { DirectionTag, Money } from "@/components/ui/cells";
-import { conf, inr, inrSigned, num, pctSigned, signCls } from "@/lib/format";
+import {
+  conf,
+  countCompact,
+  inr,
+  inrPrice,
+  inrSigned,
+  num,
+  pctSigned,
+  signCls,
+} from "@/lib/format";
+
+// Same ~2s latest-tick snapshot the watchlist polls, filtered to this symbol. It carries
+// traded volume, which the WS price stream does not.
+const QUOTE_MS = 2000;
 
 export default function StockPage() {
   const params = useParams<{ symbol: string }>();
@@ -41,6 +56,26 @@ export default function StockPage() {
   // Paper-trade history + current open position for THIS symbol.
   const [trades, setTrades] = useState<PaperTrade[]>([]);
   const [openPos, setOpenPos] = useState<OpenPosition | null>(null);
+  const [quote, setQuote] = useState<WatchlistQuote | null>(null);
+
+  // Live price + traded volume for this symbol. Best-effort: the chart stands alone.
+  useEffect(() => {
+    let cancelled = false;
+    const pull = () =>
+      getWatchlistQuotes()
+        .then((q) => {
+          if (!cancelled) setQuote(q.symbols.find((s) => s.symbol === symbol) ?? null);
+        })
+        .catch(() => {
+          /* supplementary — never surface it as a page error */
+        });
+    pull();
+    const id = setInterval(pull, QUOTE_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [symbol]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -88,6 +123,35 @@ export default function StockPage() {
           ) : undefined
         }
       />
+
+      {quote && (
+        <div className="stat-grid">
+          <StatTile
+            label="Live ₹"
+            value={inrPrice(quote.ltp)}
+            tone={signCls(quote.change_pct)}
+            sub={
+              quote.stale
+                ? "market closed or feed stale"
+                : `${pctSigned(quote.change_pct)} vs prior close`
+            }
+          />
+          <StatTile
+            label={
+              <>
+                Traded volume
+                <InfoTip
+                  full="Traded volume"
+                  def="Cumulative shares traded in this name so far today, from the live feed."
+                />
+              </>
+            }
+            value={countCompact(quote.volume)}
+            sub="shares today"
+            emphasis="quiet"
+          />
+        </div>
+      )}
 
       <LiveChart symbol={symbol} />
 

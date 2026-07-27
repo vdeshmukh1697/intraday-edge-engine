@@ -15,14 +15,18 @@ import { StatTile } from "@/components/ui/stats";
 import { DirectionTag, Money, SymbolLink } from "@/components/ui/cells";
 import {
   getWatchlist,
+  getWatchlistQuotes,
   quotesWsUrl,
   type QuotesMessage,
   type WatchlistResponse,
   type WatchlistRow,
 } from "@/lib/api";
-import { ago, clock, inr, inrPrice, pctSigned, signCls } from "@/lib/format";
+import { ago, clock, countCompact, inr, inrPrice, pctSigned, signCls } from "@/lib/format";
 
 const REFRESH_MS = 15000;
+// Traded volume comes from the latest-tick store the live loop writes, not the WS price
+// stream — so it needs its own poll. Cheap: a DB read, never a second broker connection.
+const VOLUME_MS = 2000;
 const SPARK_POINTS = 40; // rolling LTP buffer length per symbol for the sparkline
 // A quote stream that has gone this long without a tick is stale, whatever the
 // socket says — the market is closed or the feed died. Never a decorative pulse.
@@ -39,6 +43,8 @@ export default function WatchlistPage() {
   const [buffers, setBuffers] = useState<Record<string, number[]>>({});
   const [connected, setConnected] = useState(false);
   const [lastTick, setLastTick] = useState<number | null>(null);
+  // Cumulative day volume per symbol, from the latest-tick snapshot.
+  const [volumes, setVolumes] = useState<Record<string, number | null>>({});
   // Re-render on a timer so "last tick 34s ago" ages without a new tick arriving.
   const [, setClockTick] = useState(0);
   const stoppedRef = useRef(false);
@@ -67,6 +73,28 @@ export default function WatchlistPage() {
   useEffect(() => {
     const id = setInterval(() => setClockTick((n) => n + 1), 5000);
     return () => clearInterval(id);
+  }, []);
+
+  // Traded volume poll. Best-effort: the table renders fine without it.
+  useEffect(() => {
+    let cancelled = false;
+    const pull = () =>
+      getWatchlistQuotes()
+        .then((q) => {
+          if (cancelled) return;
+          const next: Record<string, number | null> = {};
+          for (const s of q.symbols) next[s.symbol] = s.volume;
+          setVolumes(next);
+        })
+        .catch(() => {
+          /* volume is supplementary — never surface it as a page error */
+        });
+    pull();
+    const id = setInterval(pull, VOLUME_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, []);
 
   // Live LTP stream over WebSocket — updates every ~1s; auto-reconnects on drop.
@@ -171,6 +199,27 @@ export default function WatchlistPage() {
     );
   };
 
+  const volumeCell = (r: WatchlistRow) => (
+    <span className="mono">{countCompact(volumes[r.symbol])}</span>
+  );
+
+  const volumeColumn: Column<WatchlistRow> = {
+    id: "volume",
+    header: (
+      <>
+        Volume
+        <InfoTip
+          full="Traded volume"
+          def="Cumulative shares traded in this name so far today, from the live feed. Holds at the closing figure once the market shuts."
+        />
+      </>
+    ),
+    label: "Traded volume",
+    numeric: true,
+    hideOnStack: true,
+    cell: volumeCell,
+  };
+
   const openColumns: Column<WatchlistRow>[] = [
     {
       id: "symbol",
@@ -199,6 +248,7 @@ export default function WatchlistPage() {
       hideOnStack: true,
       cell: priceCell,
     },
+    volumeColumn,
     {
       id: "status",
       header: (
@@ -297,6 +347,7 @@ export default function WatchlistPage() {
       hideOnStack: true,
       cell: priceCell,
     },
+    volumeColumn,
     {
       id: "trend",
       header: (
