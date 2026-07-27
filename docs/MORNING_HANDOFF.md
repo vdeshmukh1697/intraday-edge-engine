@@ -43,6 +43,10 @@ accumulated.
   costs 0% CPU. Verified: with a backtest pinned at 100% in its own child, `/api/premarket` still
   answered **200 in 5.9 s** and a warm `/api/leaderboard` in **2 ms**. So expect **one or two**
   `multiprocessing.spawn` children at 100%, not just one.
+- **Follow-up 2026-07-27 — backtest day-count capped at 30** (was 120), with a matching `max` on the
+  dashboard's Days box (`web/app/backtest/page.tsx`). A session-day costs ~62 s of one core, so a
+  stray extra zero in that box used to buy a ~2 h burn with no feedback; 30 caps an accidental run
+  at ~30 min. Raise both together if a longer window is ever wanted.
 
 ## 🟢 2026-07-26 — NIGHTLY QUANT-DESK REVIEW AGENT ("the desk") built + scheduled
 Full design: `docs/DESK_AGENT.md`. Code `signal_engine/desk/`, tests `tests/test_desk.py`, new job

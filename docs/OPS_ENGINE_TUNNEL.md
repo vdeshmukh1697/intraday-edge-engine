@@ -52,9 +52,11 @@ end-to-end every 30s. Two rules keep a self-heal from *adding* a worker instead 
   listener socket). Scoped to the port on purpose — a `cli serve` on another port belongs to someone
   else.
 
-The heavy scans (`/api/leaderboard`, `/api/premarket`, `/api/backtest`) run in a **separate process**
-(`signal_engine/api/scans.py`) behind a single-flight, serve-stale TTL cache. If you see the API
-process at ~0% CPU and a `multiprocessing.spawn` child at 100%, that is working as designed.
+The heavy scans (`/api/leaderboard`, `/api/premarket`, `/api/backtest`) run in **separate processes**
+(`signal_engine/api/scans.py`) behind a single-flight, serve-stale TTL cache. There are two lanes with
+one worker each — read-path scans on one, `/api/backtest` (minutes long) on its own so it cannot starve
+them — and each spawns on first use. If you see the API process at ~0% CPU and one or two
+`multiprocessing.spawn` children at 100%, that is working as designed.
 
 **The durable upgrade (manual, one-time):** replace the Quick Tunnel with a **named Cloudflare tunnel**
 on a domain you control → stable hostname that resolves everywhere and never changes, so the dashboard's
