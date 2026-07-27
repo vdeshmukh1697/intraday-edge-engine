@@ -34,7 +34,7 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
   direction: { full: "Direction", def: "LONG = betting the price rises (buy then sell). SHORT = betting it falls (sell then buy back)." },
   rr: { full: "Risk : Reward (R:R)", def: "How much you aim to make versus risk. 2.0 means the target is twice as far as the stop — risk ₹1 to make ₹2." },
   r_multiple: { full: "R-multiple", def: "Result of a trade in units of the risk taken. +2R = made twice the amount risked; −1R = lost the full planned risk." },
-  confidence: { full: "Confidence", def: "The strategy's conviction in the setup (0–100), from rule strength — NOT a probability of profit and never a win-rate guarantee." },
+  confidence: { full: "Rule score (uncalibrated)", def: "Count-of-rules-aligned score (0–100). UNCALIBRATED: across the first 136 live paper trades it did not predict outcomes (corr ≈ +0.09, three consecutive reviews) — descriptive only, never a probability of profit or a gate." },
   qty: { full: "Quantity", def: "Number of shares sized for the trade, from the per-trade risk and the stop distance." },
 
   // ---- Exit reasons ----

@@ -1,8 +1,14 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import type { IChartApi, LineData, UTCTimestamp } from "lightweight-charts";
+import type {
+  IChartApi,
+  ISeriesApi,
+  LineData,
+  UTCTimestamp,
+} from "lightweight-charts";
 import type { DailyReturn } from "@/lib/api";
+import { chartColors, onThemeChange } from "@/lib/theme";
 
 interface Props {
   equityCurve?: number[];
@@ -13,6 +19,8 @@ interface Props {
   points?: { time: number; value: number }[];
   // Show HH:MM on the x-axis (intraday points); off for daily curves.
   timeVisible?: boolean;
+  /** Accessible description of what the curve shows. */
+  label: string;
 }
 
 // Build {time,value} points for the equity curve. Prefer real dates from
@@ -42,6 +50,7 @@ export default function EquityChart({
   dailyReturns,
   points,
   timeVisible = false,
+  label,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -49,38 +58,38 @@ export default function EquityChart({
     if (typeof window === "undefined" || !containerRef.current) return;
 
     let chart: IChartApi | null = null;
+    let series: ISeriesApi<"Area"> | null = null;
     let resizeObs: ResizeObserver | null = null;
+    let unsubscribeTheme: (() => void) | null = null;
     let cancelled = false;
 
     (async () => {
       const lwc = await import("lightweight-charts");
       if (cancelled || !containerRef.current) return;
 
+      const applyTheme = () => {
+        const c = chartColors();
+        chart?.applyOptions({
+          layout: { background: { color: "transparent" }, textColor: c.text },
+          grid: { vertLines: { color: c.grid }, horzLines: { color: c.grid } },
+          rightPriceScale: { borderColor: c.axis },
+          timeScale: { borderColor: c.axis },
+        });
+        series?.applyOptions({
+          lineColor: c.accent,
+          topColor: c.accentFill,
+          bottomColor: "transparent",
+        });
+      };
+
       chart = lwc.createChart(containerRef.current, {
-        layout: {
-          background: { color: "transparent" },
-          textColor: "#9aa7b5",
-        },
-        grid: {
-          vertLines: { color: "#1c2230" },
-          horzLines: { color: "#1c2230" },
-        },
-        rightPriceScale: { borderColor: "#2a3140" },
-        timeScale: {
-          borderColor: "#2a3140",
-          timeVisible,
-          secondsVisible: false,
-        },
+        layout: { background: { color: "transparent" } },
+        timeScale: { timeVisible, secondsVisible: false },
         autoSize: true,
       });
+      series = chart.addAreaSeries({ lineWidth: 2, priceLineVisible: false });
+      applyTheme();
 
-      const series = chart.addAreaSeries({
-        lineColor: "#4493f8",
-        topColor: "rgba(68, 147, 248, 0.4)",
-        bottomColor: "rgba(68, 147, 248, 0.02)",
-        lineWidth: 2,
-        priceLineVisible: false,
-      });
       const data: LineData[] =
         points && points.length
           ? points.map((p) => ({ time: p.time as UTCTimestamp, value: p.value }))
@@ -94,14 +103,23 @@ export default function EquityChart({
         }
       });
       resizeObs.observe(containerRef.current);
+      unsubscribeTheme = onThemeChange(applyTheme);
     })();
 
     return () => {
       cancelled = true;
+      unsubscribeTheme?.();
       resizeObs?.disconnect();
       chart?.remove();
     };
   }, [equityCurve, dailyReturns, points, timeVisible]);
 
-  return <div ref={containerRef} className="equity-box" />;
+  return (
+    <div
+      ref={containerRef}
+      className="chart-frame"
+      role="img"
+      aria-label={label}
+    />
+  );
 }

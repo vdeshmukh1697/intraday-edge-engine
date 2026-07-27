@@ -28,17 +28,11 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   if (error) {
     return (
       <>
-        <div
-          style={{
-            background: "#7f1d1d",
-            color: "#fff",
-            padding: "10px 16px",
-            fontSize: 14,
-            textAlign: "center",
-          }}
-        >
-          ⚠️ Can&apos;t reach the engine backend — live data &amp; Dhan OTP reconnect are
-          unavailable. The Cloudflare tunnel may be down; restart it (run-with-tunnel.sh).
+        <div className="banner" role="alert">
+          <strong>Can&apos;t reach the engine backend.</strong> Live data and the Dhan
+          OTP reconnect are unavailable, so every figure below is missing rather than
+          stale. The Cloudflare tunnel may be down — restart it with{" "}
+          <code>run-with-tunnel.sh</code>.
         </div>
         {children}
       </>
@@ -56,7 +50,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
     return (
       <div className="auth-gate">
         <div className="auth-card">
-          <h2>Reconnect Dhan</h2>
+          <h1>Reconnect Dhan</h1>
           <p>
             Your Dhan session has expired (tokens last 24h). Log in with OTP to
             resume live data — you&apos;ll be brought right back here.

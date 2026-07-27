@@ -1,34 +1,34 @@
 import type { StrategyHealth } from "@/lib/api";
 
-// Map a status/score to a colour. Prefer the engine's status string;
+// Map a status/score to a tone. Prefer the engine's status string;
 // fall back to a numeric threshold on the overall score.
-function colorFor(health: StrategyHealth): "green" | "amber" | "red" {
+function toneFor(health: StrategyHealth): "positive" | "warning" | "negative" {
   const s = (health.status || "").toLowerCase();
-  if (["green", "healthy", "good", "ok"].some((k) => s.includes(k)))
-    return "green";
+  if (["green", "healthy", "good", "ok"].some((k) => s.includes(k))) return "positive";
   if (["red", "unhealthy", "bad", "poor", "critical"].some((k) => s.includes(k)))
-    return "red";
+    return "negative";
   if (["amber", "yellow", "warn", "caution", "degraded"].some((k) => s.includes(k)))
-    return "amber";
+    return "warning";
   // Numeric fallback (overall assumed 0..100; tolerate 0..1).
   const v = health.overall > 1 ? health.overall : health.overall * 100;
-  if (v >= 70) return "green";
-  if (v >= 45) return "amber";
-  return "red";
+  if (v >= 70) return "positive";
+  if (v >= 45) return "warning";
+  return "negative";
 }
 
+/** Status is never colour alone: the score and the status word are both written out. */
 export default function HealthBadge({ health }: { health: StrategyHealth }) {
-  const color = colorFor(health);
+  const tone = toneFor(health);
   const score =
     health.overall > 1 ? Math.round(health.overall) : Math.round(health.overall * 100);
   return (
-    <span className="health-badge" title={`Window trades: ${health.window_trades}`}>
-      <span className={`health-dot ${color}`} />
-      <span>
-        <span className="health-score">{score}</span>
-        <span className="subtle"> / 100</span>
-      </span>
-      <span className="health-status">{health.status}</span>
+    <span
+      className="badge"
+      data-tone={tone}
+      data-size="lg"
+      title={`Composite of hit rate, profit factor, expectancy, calibration and drawdown over ${health.window_trades} trades. Descriptive, not predictive.`}
+    >
+      Health {score}/100 · {health.status}
     </span>
   );
 }

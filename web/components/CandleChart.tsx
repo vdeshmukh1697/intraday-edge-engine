@@ -9,6 +9,7 @@ import type {
   UTCTimestamp,
 } from "lightweight-charts";
 import type { Candle, LinePoint } from "@/lib/api";
+import { chartColors, onThemeChange } from "@/lib/theme";
 
 export interface CandleChartHandle {
   updateBar: (bar: Candle) => void;
@@ -44,6 +45,7 @@ export default function CandleChart({
 
     let chart: IChartApi | null = null;
     let resizeObs: ResizeObserver | null = null;
+    let unsubscribeTheme: (() => void) | null = null;
     let cancelled = false;
 
     (async () => {
@@ -51,53 +53,56 @@ export default function CandleChart({
       if (cancelled || !containerRef.current) return;
 
       chart = lwc.createChart(containerRef.current, {
-        layout: {
-          background: { color: "transparent" },
-          textColor: "#9aa7b5",
-        },
-        grid: {
-          vertLines: { color: "#1c2230" },
-          horzLines: { color: "#1c2230" },
-        },
-        rightPriceScale: { borderColor: "#2a3140" },
-        timeScale: {
-          borderColor: "#2a3140",
-          timeVisible: true,
-          secondsVisible: false,
-        },
+        layout: { background: { color: "transparent" } },
+        timeScale: { timeVisible: true, secondsVisible: false },
         crosshair: { mode: lwc.CrosshairMode.Normal },
         autoSize: true,
       });
       chartRef.current = chart;
 
-      const candleSeries = chart.addCandlestickSeries({
-        upColor: "#3fb950",
-        downColor: "#f85149",
-        borderUpColor: "#3fb950",
-        borderDownColor: "#f85149",
-        wickUpColor: "#3fb950",
-        wickDownColor: "#f85149",
-      });
+      const candleSeries = chart.addCandlestickSeries({});
       candleSeriesRef.current = candleSeries;
 
       const vwapSeries = chart.addLineSeries({
-        color: "#d29922",
         lineWidth: 2,
         priceLineVisible: false,
         lastValueVisible: false,
       });
       const fastSeries = chart.addLineSeries({
-        color: "#4493f8",
-        lineWidth: 1,
+        lineWidth: 2,
         priceLineVisible: false,
         lastValueVisible: false,
       });
       const slowSeries = chart.addLineSeries({
-        color: "#a371f7",
-        lineWidth: 1,
+        lineWidth: 2,
+        lineStyle: 2,
         priceLineVisible: false,
         lastValueVisible: false,
       });
+
+      // Overlay hues come from the token layer, so the chart follows the theme.
+      const applyTheme = () => {
+        const c = chartColors();
+        chart?.applyOptions({
+          layout: { background: { color: "transparent" }, textColor: c.text },
+          grid: { vertLines: { color: c.grid }, horzLines: { color: c.grid } },
+          rightPriceScale: { borderColor: c.axis },
+          timeScale: { borderColor: c.axis },
+        });
+        candleSeries.applyOptions({
+          upColor: c.positive,
+          downColor: c.negative,
+          borderUpColor: c.positive,
+          borderDownColor: c.negative,
+          wickUpColor: c.positive,
+          wickDownColor: c.negative,
+        });
+        vwapSeries.applyOptions({ color: c.series2 });
+        fastSeries.applyOptions({ color: c.accent });
+        slowSeries.applyOptions({ color: c.series7 });
+      };
+      applyTheme();
+      unsubscribeTheme = onThemeChange(applyTheme);
 
       candleSeries.setData(
         candles.map(
@@ -141,6 +146,7 @@ export default function CandleChart({
 
     return () => {
       cancelled = true;
+      unsubscribeTheme?.();
       resizeObs?.disconnect();
       chart?.remove();
       chartRef.current = null;
@@ -150,5 +156,13 @@ export default function CandleChart({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [candles, vwap, emaFast, emaSlow]);
 
-  return <div ref={containerRef} className="chart-box" />;
+  return (
+    <div
+      ref={containerRef}
+      className="chart-frame"
+      data-size="tall"
+      role="img"
+      aria-label={`Candlestick chart with VWAP and EMA overlays, ${candles.length} bars`}
+    />
+  );
 }

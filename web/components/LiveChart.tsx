@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { IChartApi, ISeriesApi, UTCTimestamp } from "lightweight-charts";
 import { getIntraday, quotesWsUrl, type QuotesMessage } from "@/lib/api";
+import { chartColors, onThemeChange } from "@/lib/theme";
+import { inrPrice } from "@/lib/format";
 
 // Always-on live price graph for ONE symbol. On mount it SEEDS the line with today's intraday
 // history (from the 09:15 open to now, via /api/intraday) so the chart shows the whole day — not
@@ -23,24 +25,35 @@ export default function LiveChart({ symbol }: { symbol: string }) {
   useEffect(() => {
     let chart: IChartApi | null = null;
     let resizeObs: ResizeObserver | null = null;
+    let unsubscribeTheme: (() => void) | null = null;
     let cancelled = false;
     (async () => {
       const lwc = await import("lightweight-charts");
       if (cancelled || !containerRef.current) return;
       chart = lwc.createChart(containerRef.current, {
-        layout: { background: { color: "transparent" }, textColor: "#9aa7b5" },
-        grid: { vertLines: { color: "#1c2230" }, horzLines: { color: "#1c2230" } },
-        rightPriceScale: { borderColor: "#2a3140" },
-        timeScale: { borderColor: "#2a3140", timeVisible: true, secondsVisible: true },
+        layout: { background: { color: "transparent" } },
+        timeScale: { timeVisible: true, secondsVisible: true },
         crosshair: { mode: lwc.CrosshairMode.Normal },
         autoSize: true,
       });
-      seriesRef.current = chart.addLineSeries({
-        color: "#4493f8",
+      const series = chart.addLineSeries({
         lineWidth: 2,
         priceLineVisible: true,
         lastValueVisible: true,
       });
+      seriesRef.current = series;
+      const applyTheme = () => {
+        const c = chartColors();
+        chart?.applyOptions({
+          layout: { background: { color: "transparent" }, textColor: c.text },
+          grid: { vertLines: { color: c.grid }, horzLines: { color: c.grid } },
+          rightPriceScale: { borderColor: c.axis },
+          timeScale: { borderColor: c.axis },
+        });
+        series.applyOptions({ color: c.accent });
+      };
+      applyTheme();
+      unsubscribeTheme = onThemeChange(applyTheme);
       resizeObs = new ResizeObserver(() => {
         if (chart && containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth });
       });
@@ -49,6 +62,7 @@ export default function LiveChart({ symbol }: { symbol: string }) {
     })();
     return () => {
       cancelled = true;
+      unsubscribeTheme?.();
       resizeObs?.disconnect();
       chart?.remove();
       seriesRef.current = null;
@@ -127,23 +141,43 @@ export default function LiveChart({ symbol }: { symbol: string }) {
     };
   }, [symbol, chartReady]);
 
+  const state = live ? "live" : err ? "off" : "stale";
   return (
-    <div className="card">
-      <div className="chart-head" style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
-        <strong>Live price</strong>
-        <span className={`live-status${live ? " on" : ""}`}>
-          <span className="dot" /> {live ? "Live" : err ? "offline" : "connecting…"}
-        </span>
-        {ltp != null && <span className="mono" style={{ marginLeft: "auto", fontSize: 18 }}>₹{ltp.toFixed(2)}</span>}
+    <section className="card">
+      <div className="card-head">
+        <div className="card-head-titles">
+          <h2 className="card-title">Live price</h2>
+        </div>
+        <div className="row-wrap">
+          <span className="feed-status" data-state={state} role="status">
+            <span className="feed-dot" aria-hidden="true" />
+            <span className="feed-label">
+              {live ? "Streaming" : err ? "Offline" : "Connecting…"}
+            </span>
+          </span>
+          {ltp != null && (
+            <strong className="mono" style={{ fontSize: "var(--text-lg)" }}>
+              {inrPrice(ltp)}
+            </strong>
+          )}
+        </div>
       </div>
-      <div ref={containerRef} className="chart-box" />
-      {err && <div className="muted small">{err}</div>}
-      <div className="muted small">
-        {seededFrom && seededFrom !== "none"
-          ? `Seeded with today's intraday history (${seededFrom}), then streaming ~1s live. `
-          : "Streams ~1s from the Dhan feed. "}
-        Ticks during market hours (09:15–15:30 IST); holds the last traded price when the market is closed.
+      <div className="card-body stack-tight">
+        <div
+          ref={containerRef}
+          className="chart-frame"
+          role="img"
+          aria-label={`Live intraday price line for ${symbol}`}
+        />
+        {err && <p className="small neg">{err}</p>}
+        <p className="tiny faint">
+          {seededFrom && seededFrom !== "none"
+            ? `Seeded with today's intraday history (${seededFrom}), then streaming ~1s live. `
+            : "Streams ~1s from the Dhan feed. "}
+          Ticks during market hours (09:15–15:30 IST); holds the last traded price when
+          the market is closed.
+        </p>
       </div>
-    </div>
+    </section>
   );
 }

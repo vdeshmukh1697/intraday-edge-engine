@@ -1,9 +1,21 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
 import EquityChart from "@/components/EquityChart";
 import { InfoTip } from "@/components/InfoTip";
+import { DataTable, type Column } from "@/components/ui/DataTable";
+import {
+  Badge,
+  Callout,
+  Card,
+  EmptyState,
+  ErrorBanner,
+  LoadingBlock,
+  PageHeader,
+  Section,
+} from "@/components/ui/primitives";
+import { Hero, StatTile } from "@/components/ui/stats";
+import { DirectionTag, Money, SymbolLink } from "@/components/ui/cells";
 import {
   getPaperTrades,
   getPortfolio,
@@ -16,7 +28,17 @@ import {
   type PortfolioResponse,
   type Prediction,
 } from "@/lib/api";
-import { inr, inrPrice, inrSigned, pctSigned, signCls } from "@/lib/format";
+import {
+  clock,
+  hhmm,
+  hhmmss,
+  inr,
+  inrSigned,
+  parseTs,
+  pctSigned,
+  signArrow,
+  signCls,
+} from "@/lib/format";
 
 // The book is live during the session, so poll like the predictions page: a
 // cheap 5s page-level interval. Chart/trades/why-lines refresh on the same tick.
@@ -25,11 +47,6 @@ const POLL_MS = 5000;
 // lightweight-charts renders UTCTimestamps as UTC wall-clock; shift epoch by
 // the IST offset so intraday snapshot times read as market hours (09:15–15:30).
 const IST_OFFSET_S = 19800;
-
-// Safari rejects "YYYY-MM-DD HH:MM:SS"; normalize to the ISO "T" form.
-function parseTs(ts: string): number {
-  return Date.parse((ts || "").replace(" ", "T"));
-}
 
 // Equity points → strictly-ascending {time,value} pairs for the chart.
 // Repository timestamps are IST; a duplicate time would make setData throw,
@@ -94,7 +111,10 @@ export default function PortfolioPage() {
         count: 0,
         trades: [] as PaperTrade[],
       })),
-      getPredictions({ limit: 300 }).catch(() => ({ count: 0, predictions: [] as Prediction[] })),
+      getPredictions({ limit: 300 }).catch(() => ({
+        count: 0,
+        predictions: [] as Prediction[],
+      })),
     ])
       .then(([b, eq, tr, pr]) => {
         setBook(b);
@@ -107,7 +127,9 @@ export default function PortfolioPage() {
       .catch((e) => setError(String(e)));
   }, []);
 
-  useEffect(() => { load(); }, [load]); // initial load
+  useEffect(() => {
+    load();
+  }, [load]);
   useEffect(() => {
     const id = setInterval(load, POLL_MS);
     return () => clearInterval(id);
@@ -115,90 +137,141 @@ export default function PortfolioPage() {
 
   // Only blank the page when we have nothing to show — a transient poll
   // failure keeps the last good book on screen.
-  if (error && !book)
-    return <div className="card">Could not load the portfolio: {error}</div>;
-  if (!book) return <div className="card">Loading…</div>;
+  if (error && !book) {
+    return (
+      <>
+        <PageHeader title="Portfolio" />
+        <ErrorBanner>Could not load the portfolio: {error}</ErrorBanner>
+      </>
+    );
+  }
+  if (!book) {
+    return (
+      <>
+        <PageHeader title="Portfolio" />
+        <LoadingBlock label="Loading the paper book" />
+      </>
+    );
+  }
 
   const overallInr = book.equity - book.starting_capital;
   const curve = chartPoints(points);
+  const openUpnl = book.unrealized_pnl_inr;
 
   return (
-    <div className="paper">
-      <div className="page-head">
-        <h1>Portfolio</h1>
-        <p className="muted">
-          One shared paper book of {inr(book.starting_capital)}: the live engine debits cash on
-          every entry, credits it back with net P&amp;L on every exit (real cost model), and
-          predictions are sized against the same book. Simulated money, real prices — no live
-          orders, and no claim of edge. Updates every {POLL_MS / 1000}s.
-        </p>
-      </div>
+    <>
+      <PageHeader
+        title="Portfolio"
+        eyebrow={`Paper book · started ${inr(book.starting_capital)}`}
+        lede={
+          <>
+            One shared paper book. The live engine debits cash on every entry and credits
+            it back with net P&amp;L on every exit, using a real cost model; every
+            prediction is sized against this same book.{" "}
+            <strong>
+              Simulated money, real prices — no live orders, and no claim of edge.
+            </strong>{" "}
+            Refreshes every {POLL_MS / 1000}s.
+          </>
+        }
+        aside={
+          <Badge tone="warning" size="lg">
+            Paper money
+          </Badge>
+        }
+      />
 
-      {/* Money header — the "how much money do I have" view. */}
-      <div className="card account-summary">
-        <div className="account-head">
-          <div>
-            <div className="metric-label">Total value<InfoTip term="book_equity" /></div>
-            <div className={`account-value ${signCls(overallInr)}`}>{inr(book.equity)}</div>
-            <div className="metric-sub">
-              started {inr(book.starting_capital)}{" "}
-              <span className={signCls(overallInr)}>
-                {overallInr >= 0 ? "▲" : "▼"} {inrSigned(overallInr)} ({pctSigned(book.return_total_pct)})
-              </span>
-            </div>
-          </div>
-          <div className="account-roc">
-            <div className="metric-label">Overall return</div>
-            <div className={`metric-value ${signCls(overallInr)}`}>
-              {pctSigned(book.return_total_pct)}
-            </div>
-          </div>
-        </div>
-        <div className="cards account-grid">
-          <Card
-            label="Cash available"
-            term="cash_free"
-            value={inr(book.cash)}
-            sub="free to fund the next entry"
-          />
-          <Card
-            label="Invested now"
-            term="invested_now"
-            value={inr(book.invested)}
-            sub={
-              book.open_positions.length
-                ? `${book.open_positions.length} open · unrealized ${inrSigned(book.unrealized_pnl_inr)}`
-                : "no open positions"
+      {/* Hero: the two questions asked from a phone during market hours — what is
+          the book worth, and what has today done to it. */}
+      <Card>
+        <div className="hero-split">
+          <Hero
+            label={
+              <>
+                Total value
+                <InfoTip term="book_equity" />
+              </>
             }
-          />
-          <Card
-            label="Today's P&L"
-            term="realized_today"
-            value={inrSigned(book.realized_pnl_today_inr)}
-            tone={signCls(book.realized_pnl_today_inr)}
-            sub={`${book.today.trades} closed (${book.today.wins} wins) · ${pctSigned(book.return_today_pct)} · charges ${inr(book.today.charges_inr)}`}
-          />
-          <Card
-            label="Overall since start"
-            value={inrSigned(overallInr)}
+            value={inr(book.equity)}
             tone={signCls(overallInr)}
-            sub={`realized ${inrSigned(book.realized_pnl_total_inr)} · ${pctSigned(book.return_total_pct)}`}
-          />
-        </div>
-      </div>
-
-      {/* Equity curve of the book (intraday marks + end-of-day snapshots). */}
-      <div className="card">
-        <h3>Equity curve<InfoTip term="equity_curve" /></h3>
-        {curve.length >= 2 ? (
-          <EquityChart points={curve} timeVisible />
-        ) : (
-          <div className="muted">
-            No equity history yet — snapshots begin once the live engine starts marking the book
-            through a session.
+          >
+            <span className={signCls(overallInr)}>
+              <span className="delta-arrow" aria-hidden="true">
+                {signArrow(overallInr)}
+              </span>{" "}
+              {inrSigned(overallInr)} ({pctSigned(book.return_total_pct)})
+            </span>
+            <span className="faint">since {inr(book.starting_capital)} start</span>
+          </Hero>
+          <div className="stat-grid">
+            <StatTile
+              label={
+                <>
+                  Today&apos;s P&amp;L
+                  <InfoTip term="realized_today" />
+                </>
+              }
+              value={inrSigned(book.realized_pnl_today_inr)}
+              tone={signCls(book.realized_pnl_today_inr)}
+              sub={`${book.today.trades} closed (${book.today.wins} won) · ${pctSigned(
+                book.return_today_pct
+              )} · charges ${inr(book.today.charges_inr)}`}
+            />
+            <StatTile
+              label={
+                <>
+                  Cash available
+                  <InfoTip term="cash_free" />
+                </>
+              }
+              value={inr(book.cash)}
+              sub="free to fund the next entry"
+            />
+            <StatTile
+              label={
+                <>
+                  Invested now
+                  <InfoTip term="invested_now" />
+                </>
+              }
+              value={inr(book.invested)}
+              sub={
+                book.open_positions.length
+                  ? `${book.open_positions.length} open · unrealized ${inrSigned(openUpnl)}`
+                  : "no open positions"
+              }
+            />
+            <StatTile
+              label="Realized since start"
+              value={inrSigned(book.realized_pnl_total_inr)}
+              tone={signCls(book.realized_pnl_total_inr)}
+              sub={`closed trades only · ${pctSigned(book.return_total_pct)} overall`}
+            />
           </div>
+        </div>
+      </Card>
+
+      <Section
+        titleNode={
+          <>
+            Equity curve
+            <InfoTip term="equity_curve" />
+          </>
+        }
+        note="Intraday marks during the session plus one end-of-day snapshot, last 30 days. Simulated book value, not a return you could have banked."
+      >
+        {curve.length >= 2 ? (
+          <EquityChart
+            points={curve}
+            timeVisible
+            label={`Paper book value over the last 30 days, currently ${inr(book.equity)}`}
+          />
+        ) : (
+          <EmptyState title="No equity history yet">
+            Snapshots begin once the live engine marks the book through a session.
+          </EmptyState>
         )}
-      </div>
+      </Section>
 
       <OpenPositions positions={book.open_positions} />
 
@@ -206,194 +279,319 @@ export default function PortfolioPage() {
 
       <PerStrategy rows={book.per_strategy} />
 
-      <div className="row">
-        <p className="muted small" style={{ margin: 0 }}>
-          Paper trading — simulated money, real prices, real cost model. No live orders are ever
-          placed.
-        </p>
-        <span className="live-spacer" />
+      <p className="tiny faint">
+        Paper trading — simulated money, real prices, real cost model. No live orders are
+        ever placed.
         {lastRefresh && (
-          <span className="muted small">
-            refreshed {lastRefresh.toLocaleTimeString("en-IN")}
-            {book.updated_ts ? ` · book marked ${book.updated_ts.replace("T", " ").slice(11, 19)}` : ""}
-          </span>
+          <>
+            {" "}
+            Page refreshed {clock(lastRefresh)}
+            {book.updated_ts ? ` · book marked ${hhmmss(book.updated_ts)}` : ""}.
+          </>
         )}
-      </div>
-    </div>
-  );
-}
-
-function Card({ label, value, sub, tone, term }: {
-  label: string; value: string; sub?: string; tone?: string; term?: string;
-}) {
-  return (
-    <div className="metric">
-      <div className="metric-label">{label}{term && <InfoTip term={term} />}</div>
-      <div className={`metric-value ${tone || ""}`}>{value}</div>
-      {sub && <div className="metric-sub">{sub}</div>}
-    </div>
+      </p>
+    </>
   );
 }
 
 // Open positions with the real ₹ the book has riding on each (polled every 5s).
 function OpenPositions({ positions }: { positions: PortfolioOpenPosition[] }) {
-  if (positions.length === 0) {
-    return (
-      <div className="card empty small">
-        No open positions right now — entries appear here the moment the live engine fills one.
-      </div>
-    );
-  }
   const totUpnl = positions.reduce((a, p) => a + (p.unrealized_pnl_inr || 0), 0);
+
+  const columns: Column<PortfolioOpenPosition>[] = [
+    {
+      id: "symbol",
+      header: "Symbol",
+      primary: true,
+      cell: (p) => (
+        <>
+          <SymbolLink symbol={p.symbol} />
+          <span className="stack-only">
+            <DirectionTag direction={p.direction} />
+          </span>
+        </>
+      ),
+    },
+    {
+      id: "side",
+      header: (
+        <>
+          Side
+          <InfoTip term="direction" />
+        </>
+      ),
+      label: "Side",
+      hideOnStack: true,
+      cell: (p) => <DirectionTag direction={p.direction} />,
+    },
+    {
+      id: "pnl",
+      header: (
+        <>
+          P&amp;L
+          <InfoTip term="unrealized_pnl" />
+        </>
+      ),
+      label: "Unrealized",
+      numeric: true,
+      cell: (p) => (
+        <Money
+          value={p.unrealized_pnl_inr}
+          kind="signed"
+          sub={
+            p.unrealized_pnl_pct != null ? (
+              <span className="small"> ({pctSigned(p.unrealized_pnl_pct)})</span>
+            ) : undefined
+          }
+        />
+      ),
+    },
+    {
+      id: "qty",
+      header: (
+        <>
+          Qty
+          <InfoTip term="qty" />
+        </>
+      ),
+      label: "Qty",
+      numeric: true,
+      cell: (p) => p.qty ?? "—",
+    },
+    {
+      id: "entry",
+      header: (
+        <>
+          Avg entry
+          <InfoTip term="entry" />
+        </>
+      ),
+      label: "Avg entry",
+      numeric: true,
+      cell: (p) => <Money value={p.entry_fill} kind="price" />,
+    },
+    {
+      id: "last",
+      header: (
+        <>
+          Live
+          <InfoTip term="ltp" />
+        </>
+      ),
+      label: "Live price",
+      numeric: true,
+      cell: (p) => <Money value={p.last_price} kind="price" />,
+    },
+    {
+      id: "invested",
+      header: (
+        <>
+          Invested
+          <InfoTip term="invested_now" />
+        </>
+      ),
+      label: "Invested",
+      numeric: true,
+      cell: (p) => <Money value={p.notional} />,
+    },
+    {
+      id: "stop",
+      header: (
+        <>
+          Stop
+          <InfoTip term="stop" />
+        </>
+      ),
+      label: "Stop",
+      numeric: true,
+      cell: (p) => <Money value={p.stop_loss} kind="price" />,
+    },
+    {
+      id: "target",
+      header: (
+        <>
+          Target
+          <InfoTip term="target" />
+        </>
+      ),
+      label: "Target",
+      numeric: true,
+      cell: (p) => <Money value={p.target} kind="price" />,
+    },
+    {
+      id: "since",
+      header: "Since",
+      label: "Open since",
+      cell: (p) => <span className="faint mono">{hhmm(p.entry_ts)}</span>,
+    },
+  ];
+
   return (
-    <div className="card">
-      <h3>
-        Open positions ({positions.length}){" "}
-        <span className={signCls(totUpnl)}>· unrealized {inrSigned(totUpnl)}</span>
-      </h3>
-      <table className="grid">
-        <thead>
-          <tr>
-            <th>Symbol</th>
-            <th>Side<InfoTip term="direction" /></th>
-            <th className="num">Qty<InfoTip term="qty" /></th>
-            <th className="num">Avg entry<InfoTip term="entry" /></th>
-            <th className="num">Live<InfoTip term="ltp" /></th>
-            <th className="num">Invested<InfoTip term="invested_now" /></th>
-            <th className="num">P&L<InfoTip term="unrealized_pnl" /></th>
-            <th className="num">Stop<InfoTip term="stop" /></th>
-            <th className="num">Target<InfoTip term="target" /></th>
-            <th>Since</th>
-          </tr>
-        </thead>
-        <tbody>
-          {positions.map((p) => (
-            <tr key={`${p.symbol}-${p.entry_ts}`} className="active-row">
-              <td className="mono">
-                <Link href={`/stock/${encodeURIComponent(p.symbol)}`}>{p.symbol}</Link>
-              </td>
-              <td><span className={`tag ${p.direction === "LONG" ? "pos" : "neg"}`}>{p.direction}</span></td>
-              <td className="num mono">{p.qty ?? "—"}</td>
-              <td className="num">{inrPrice(p.entry_fill)}</td>
-              <td className="num">{inrPrice(p.last_price)}</td>
-              <td className="num">{inr(p.notional)}</td>
-              <td className={`num ${signCls(p.unrealized_pnl_inr)}`}>
-                {inrSigned(p.unrealized_pnl_inr)}
-                {p.unrealized_pnl_pct != null && (
-                  <span className="small"> ({pctSigned(p.unrealized_pnl_pct)})</span>
-                )}
-              </td>
-              <td className="num">{inrPrice(p.stop_loss)}</td>
-              <td className="num">{inrPrice(p.target)}</td>
-              <td className="muted small">{p.entry_ts ? p.entry_ts.slice(11, 16) : "—"}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <Section
+      title={`Open positions (${positions.length})`}
+      note="Marked to the latest streamed price. Nothing here is a real order."
+      aside={
+        positions.length > 0 ? (
+          <span className={signCls(totUpnl)}>
+            unrealized <strong>{inrSigned(totUpnl)}</strong>
+          </span>
+        ) : undefined
+      }
+    >
+      <DataTable
+        label="Open paper positions"
+        columns={columns}
+        rows={positions}
+        rowKey={(p) => `${p.symbol}-${p.entry_ts}`}
+        rowFlag={() => "active"}
+        empty={
+          <EmptyState title="Nothing open right now">
+            Entries appear here the moment the live engine fills one.
+          </EmptyState>
+        }
+      />
+    </Section>
   );
 }
 
 // Today's closed trades with the plain-English "why" under each row.
 function TodayTrades({ trades, preds }: { trades: PaperTrade[]; preds: Prediction[] }) {
-  if (trades.length === 0) {
-    return (
-      <div className="card empty small">
-        No closed trades yet today — they appear here as the live engine exits positions.
-      </div>
-    );
-  }
   const sorted = [...trades].sort((a, b) => (a.exit_ts < b.exit_ts ? 1 : -1));
+  const pnlOf = (t: PaperTrade) => (t.pnl_inr != null ? t.pnl_inr : t.net_pnl_abs);
+
+  const columns: Column<PaperTrade>[] = [
+    {
+      id: "symbol",
+      header: "Symbol",
+      primary: true,
+      cell: (t) => (
+        <>
+          <SymbolLink symbol={t.symbol} />
+          <span className={`stack-only mono ${signCls(pnlOf(t))}`}>
+            {inrSigned(pnlOf(t))}
+          </span>
+        </>
+      ),
+    },
+    {
+      id: "time",
+      header: "Exit time",
+      label: "Exit time",
+      cell: (t) => <span className="mono">{hhmm(t.exit_ts)}</span>,
+    },
+    {
+      id: "side",
+      header: "Side",
+      label: "Side",
+      cell: (t) => <DirectionTag direction={t.direction} />,
+    },
+    {
+      id: "qty",
+      header: "Qty",
+      label: "Qty",
+      numeric: true,
+      cell: (t) => t.qty,
+    },
+    {
+      id: "pnl",
+      header: "P&L (after charges)",
+      label: "P&L after charges",
+      numeric: true,
+      hideOnStack: true,
+      cell: (t) => {
+        const real = t.pnl_inr != null;
+        return (
+          <>
+            <Money value={pnlOf(t)} kind="signed" />
+            {real && t.charges_inr != null && (
+              <span className="faint small"> ({inr(Math.round(t.charges_inr))} charges)</span>
+            )}
+            {!real && (
+              <Badge
+                tone="warning"
+                title="Recorded before the ₹1L ledger — ₹ figures modelled at a fixed reference notional."
+              >
+                modelled
+                <InfoTip term="modeled_row" />
+              </Badge>
+            )}
+          </>
+        );
+      },
+    },
+    {
+      id: "exit",
+      header: "Exit reason",
+      label: "Exit reason",
+      cell: (t) => <span className="chip">{t.exit_reason}</span>,
+    },
+  ];
+
   return (
-    <div className="card">
-      <h3>Today&apos;s closed trades ({trades.length})</h3>
-      <table className="tbl">
-        <thead>
-          <tr>
-            <th>Time</th>
-            <th>Symbol</th>
-            <th>Side</th>
-            <th className="num">Qty</th>
-            <th className="num">P&L (after charges)</th>
-            <th>Exit</th>
-          </tr>
-        </thead>
-        <tbody>
-          {sorted.map((t) => {
-            const real = t.pnl_inr != null;
-            const pnl = real ? (t.pnl_inr as number) : t.net_pnl_abs;
-            const why = whyFor(t, preds);
-            return (
-              <TradeRow key={t.id} t={t} real={real} pnl={pnl} why={why} />
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+    <Section
+      title={`Today's closed trades (${trades.length})`}
+      note="Each row carries the plain-English reason the engine gave when it acted."
+    >
+      <DataTable
+        label="Trades closed today"
+        columns={columns}
+        rows={sorted}
+        rowKey={(t) => t.id}
+        subRow={(t) => {
+          const why = whyFor(t, preds);
+          return why ? <span>Why: {why}</span> : null;
+        }}
+        empty={
+          <EmptyState title="No closed trades yet today">
+            They appear here as the live engine exits positions.
+          </EmptyState>
+        }
+      />
+    </Section>
   );
 }
 
-function TradeRow({ t, real, pnl, why }: {
-  t: PaperTrade; real: boolean; pnl: number; why: string | null;
-}) {
-  return (
-    <>
-      <tr>
-        <td className="mono">{(t.exit_ts || "").replace("T", " ").slice(11, 16)}</td>
-        <td>
-          <Link href={`/stock/${encodeURIComponent(t.symbol)}`} className="sym-link">{t.symbol}</Link>
-        </td>
-        <td><span className={`tag small ${t.direction === "LONG" ? "pos" : "neg"}`}>{t.direction}</span></td>
-        <td className="num mono">{t.qty}</td>
-        <td className={`num mono ${signCls(pnl)}`}>
-          {inrSigned(pnl)}
-          {real && t.charges_inr != null && (
-            <span className="muted small"> (₹{Math.round(t.charges_inr)} charges)</span>
-          )}
-          {!real && (
-            <span className="tag small modeled" title="Recorded before the ₹1L ledger — ₹ figures modeled at a fixed reference notional.">
-              modeled<InfoTip term="modeled_row" />
-            </span>
-          )}
-        </td>
-        <td><span className="reason-chip">{t.exit_reason}</span></td>
-      </tr>
-      {why && (
-        <tr className="why-row">
-          <td colSpan={6}>Why: {why}</td>
-        </tr>
-      )}
-    </>
-  );
-}
-
-// Per-strategy contribution (only vwap_ema_adx today, but the table is ready
-// for more — and makes "which logic made/lost the money" visible at a glance).
+// Per-strategy contribution — makes "which logic made or lost the money" visible.
 function PerStrategy({ rows }: { rows: PortfolioResponse["per_strategy"] }) {
   if (!rows || rows.length === 0) return null;
+  const columns: Column<PortfolioResponse["per_strategy"][number]>[] = [
+    { id: "strategy", header: "Strategy", primary: true, cell: (r) => r.strategy },
+    { id: "trades", header: "Trades", label: "Trades", numeric: true, cell: (r) => r.trades },
+    {
+      id: "pnl",
+      header: "Net P&L",
+      label: "Net P&L",
+      numeric: true,
+      cell: (r) => <Money value={r.pnl_inr} kind="signed" />,
+    },
+    {
+      id: "invested",
+      header: "Invested now",
+      label: "Invested now",
+      numeric: true,
+      cell: (r) => <Money value={r.invested_now} />,
+    },
+  ];
   return (
-    <div className="card">
-      <h3>By strategy<InfoTip term="by_strategy" /></h3>
-      <table className="tbl">
-        <thead>
-          <tr>
-            <th>Strategy</th>
-            <th className="num">Trades</th>
-            <th className="num">Net P&L</th>
-            <th className="num">Invested now</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.strategy}>
-              <td>{r.strategy}</td>
-              <td className="num">{r.trades}</td>
-              <td className={`num ${signCls(r.pnl_inr)}`}>{inrSigned(r.pnl_inr)}</td>
-              <td className="num">{r.invested_now ? inr(r.invested_now) : "—"}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <Section
+      titleNode={
+        <>
+          By strategy
+          <InfoTip term="by_strategy" />
+        </>
+      }
+    >
+      <DataTable
+        label="Contribution by strategy"
+        columns={columns}
+        rows={rows}
+        rowKey={(r) => r.strategy}
+      />
+      <Callout tone="warning" icon="⚠">
+        A record of what happened, not evidence that anything works. Net P&amp;L here is
+        after modelled charges, and the sample is far too small to separate skill from
+        noise.
+      </Callout>
+    </Section>
   );
 }

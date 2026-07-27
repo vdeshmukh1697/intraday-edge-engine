@@ -602,3 +602,56 @@ export function todayStr(): string {
   const dd = String(d.getDate()).padStart(2, "0");
   return `${d.getFullYear()}-${mm}-${dd}`;
 }
+
+// ---------------------------------------------------------------------------
+// Movers research sleeve (separate paper section — measured base rates)
+// ---------------------------------------------------------------------------
+
+export interface MoverPrediction {
+  for_day: string;
+  symbol: string;
+  p_big5: number;
+  p_big10: number;
+  lift: number | null;
+  pred_dir: string;
+  p_dir: number | null;
+  // Sign-conditioned next-day tail split — P(next ret >= +5%) / P(next ret <= -5%). The honest
+  // direction picture (a down-crash reports its own bounce rate, not a blind LONG).
+  p_next_up_big: number | null;
+  p_next_down_big: number | null;
+  exp_move_pct: number | null;
+  basis: string;
+  n_bucket: number;
+  rank: number | null;
+  fillable: number;
+  warn: string;
+  tg_mentions: number | null;
+  prev_close: number | null;
+  open_px: number | null;
+  close_px: number | null;
+  realized_move_pct: number | null;
+  hit_big5: number | null;
+  dir_correct: number | null;
+  sleeve_pnl_pct: number | null;
+  resolved_ts: string | null;
+}
+
+export interface MoversResponse {
+  latest_day: string | null;
+  today: MoverPrediction[];
+  history: MoverPrediction[];
+  scoreboard: {
+    n_predictions: number;
+    n_resolved: number;
+    hit_rate_big5: number | null;
+    base_rate_big5: number;
+    dir_accuracy: number | null;
+    n_dir_called: number;
+    sleeve_cum_pnl_pct: number;
+    n_sleeve_trades: number;
+  };
+}
+
+export async function getMovers(days = 30): Promise<MoversResponse> {
+  return getJSON<MoversResponse>(`/api/movers?days=${days}`);
+}

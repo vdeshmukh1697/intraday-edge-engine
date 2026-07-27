@@ -1,18 +1,26 @@
 "use client";
 
-// Tiny dependency-free sparkline: an SVG polyline of the recent live LTPs for one symbol.
-// Green if the series is up over the window, red if down. Renders nothing until 2+ points.
+// Dependency-free sparkline: an SVG polyline of the recent live LTPs for one
+// symbol. Colour follows the sign of the window's move, and the accessible label
+// spells that out — the line is never the only cue.
 export function Sparkline({
   points,
-  width = 88,
-  height = 26,
+  label,
 }: {
   points: number[];
-  width?: number;
-  height?: number;
+  /** What the line is (e.g. "RELIANCE, last 40 ticks"). */
+  label?: string;
 }) {
+  const width = 88;
+  const height = 26;
   if (!points || points.length < 2) {
-    return <svg width={width} height={height} aria-hidden="true" />;
+    return (
+      <svg
+        className="sparkline"
+        viewBox={`0 0 ${width} ${height}`}
+        aria-hidden="true"
+      />
+    );
   }
   const min = Math.min(...points);
   const max = Math.max(...points);
@@ -25,23 +33,28 @@ export function Sparkline({
       return `${x.toFixed(1)},${y.toFixed(1)}`;
     })
     .join(" ");
-  const up = points[points.length - 1] >= points[0];
-  const color = up ? "var(--pos, #16a34a)" : "var(--neg, #dc2626)";
+  const move = points[points.length - 1] - points[0];
+  // A flat window (the market is closed and the feed is holding one price) must
+  // not read as a gain — it gets the neutral ink, not green.
+  const stroke =
+    move > 0 ? "var(--positive)" : move < 0 ? "var(--negative)" : "var(--text-tertiary)";
+  const direction = move > 0 ? "up" : move < 0 ? "down" : "flat";
   return (
     <svg
-      width={width}
-      height={height}
+      className="sparkline"
       viewBox={`0 0 ${width} ${height}`}
       preserveAspectRatio="none"
-      aria-hidden="true"
+      role="img"
+      aria-label={`${label ? `${label}: ` : ""}${direction} ${Math.abs(move).toFixed(2)} over the window`}
     >
       <polyline
         points={coords}
         fill="none"
-        stroke={color}
+        stroke={stroke}
         strokeWidth={1.5}
         strokeLinejoin="round"
         strokeLinecap="round"
+        vectorEffect="non-scaling-stroke"
       />
     </svg>
   );

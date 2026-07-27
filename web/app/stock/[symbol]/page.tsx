@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import {
   getChart,
@@ -15,10 +14,17 @@ import {
 import CandleChart from "@/components/CandleChart";
 import LiveChart from "@/components/LiveChart";
 import { InfoTip } from "@/components/InfoTip";
-
-const inr = (n: number) =>
-  `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
-const clsOf = (n: number) => (n > 0 ? "pos" : n < 0 ? "neg" : "");
+import { DataTable, type Column } from "@/components/ui/DataTable";
+import {
+  Badge,
+  EmptyState,
+  ErrorBanner,
+  PageHeader,
+  Section,
+} from "@/components/ui/primitives";
+import { StatTile } from "@/components/ui/stats";
+import { DirectionTag, Money } from "@/components/ui/cells";
+import { conf, inr, inrSigned, num, pctSigned, signCls } from "@/lib/format";
 
 export default function StockPage() {
   const params = useParams<{ symbol: string }>();
@@ -52,10 +58,7 @@ export default function StockPage() {
   // Paper-trade history + open position for this symbol (independent of the chart date).
   const loadHistory = useCallback(async () => {
     try {
-      const [t, o] = await Promise.all([
-        getPaperTrades({ symbol }),
-        getOpenPositions(),
-      ]);
+      const [t, o] = await Promise.all([getPaperTrades({ symbol }), getOpenPositions()]);
       setTrades(t.trades);
       setOpenPos(o.positions.find((p) => p.symbol === symbol) || null);
     } catch {
@@ -72,107 +75,180 @@ export default function StockPage() {
   }, [symbol]);
 
   return (
-    <div>
-      <div className="page-head">
-        <div>
-          <h1>{symbol}</h1>
-          <div className="subtle">
-            Live price (streaming) · historical candles with VWAP / EMA below
-          </div>
-        </div>
-        <Link href="/" className="nav-link">
-          ← Leaderboard
-        </Link>
-      </div>
+    <>
+      <PageHeader
+        title={symbol}
+        eyebrow="Live price · historical session · paper record"
+        lede="Streaming price above, the chosen session's candles with VWAP and EMA below, then every paper trade the engine has ever recorded on this name."
+        aside={
+          openPos ? (
+            <Badge tone={openPos.direction === "LONG" ? "positive" : "negative"} size="lg">
+              Position open · {openPos.direction}
+            </Badge>
+          ) : undefined
+        }
+      />
 
-      {/* Always-on live graph — auto-streams this symbol's price. */}
       <LiveChart symbol={symbol} />
 
-      <h3 style={{ marginTop: 20 }}>Historical session</h3>
-      <form
-        className="controls"
-        onSubmit={(e) => {
-          e.preventDefault();
-          load();
-        }}
-      >
-        <div className="field">
-          <label>Date</label>
-          <input
-            type="date"
-            value={date}
-            onChange={(e) => setDate(e.target.value)}
-          />
-        </div>
-        <button type="submit" disabled={loading}>
-          {loading ? "Loading…" : "Load"}
-        </button>
-      </form>
-
-      {error && <div className="notice error">Failed to load: {error}</div>}
-
-      <div className="chart-legend">
-        <span className="legend-item">
-          <span className="legend-swatch" style={{ background: "#d29922" }} />
-          VWAP<InfoTip term="vwap" />
-        </span>
-        <span className="legend-item">
-          <span className="legend-swatch" style={{ background: "#4493f8" }} />
-          EMA fast<InfoTip term="ema" />
-        </span>
-        <span className="legend-item">
-          <span className="legend-swatch" style={{ background: "#a371f7" }} />
-          EMA slow
-        </span>
-      </div>
-
-      {data ? (
-        <CandleChart
-          key={`${symbol}-${date}`}
-          candles={data.candles}
-          vwap={data.overlays.vwap}
-          emaFast={data.overlays.ema_fast}
-          emaSlow={data.overlays.ema_slow}
-        />
-      ) : (
-        !loading &&
-        !error && <div className="notice">No chart data loaded.</div>
-      )}
-
       {openPos && <OpenPositionCard pos={openPos} />}
+
+      <Section
+        title="Historical session"
+        note="Candles for the selected date, with the indicator overlays the strategy reads."
+        aside={
+          <form
+            className="row-wrap"
+            onSubmit={(e) => {
+              e.preventDefault();
+              load();
+            }}
+          >
+            <label className="field">
+              <span>Date</span>
+              <input
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+              />
+            </label>
+            <button type="submit" disabled={loading}>
+              {loading ? "Loading…" : "Load"}
+            </button>
+          </form>
+        }
+      >
+        <div className="stack-tight">
+          <div className="chart-legend">
+            <span className="legend-item">
+              <span
+                className="legend-swatch"
+                style={{ background: "var(--series-2)" }}
+                aria-hidden="true"
+              />
+              VWAP
+              <InfoTip term="vwap" />
+            </span>
+            <span className="legend-item">
+              <span
+                className="legend-swatch"
+                style={{ background: "var(--series-1)" }}
+                aria-hidden="true"
+              />
+              EMA fast
+              <InfoTip term="ema" />
+            </span>
+            <span className="legend-item">
+              <span
+                className="legend-swatch"
+                style={{ background: "var(--series-7)" }}
+                aria-hidden="true"
+              />
+              EMA slow (dashed)
+            </span>
+          </div>
+
+          {error && <ErrorBanner>Failed to load: {error}</ErrorBanner>}
+
+          {data ? (
+            <CandleChart
+              key={`${symbol}-${date}`}
+              candles={data.candles}
+              vwap={data.overlays.vwap}
+              emaFast={data.overlays.ema_fast}
+              emaSlow={data.overlays.ema_slow}
+            />
+          ) : (
+            !loading &&
+            !error && (
+              <EmptyState title="No chart data for this date">
+                Pick a trading session — weekends and holidays have no bars.
+              </EmptyState>
+            )
+          )}
+        </div>
+      </Section>
+
       <PaperHistory symbol={symbol} trades={trades} />
-    </div>
+    </>
   );
 }
 
 // Current open position for this symbol — live entry/target/stop (₹ + %) + unrealized P&L.
 function OpenPositionCard({ pos }: { pos: OpenPosition }) {
   return (
-    <div className="card" style={{ marginTop: 16 }}>
-      <h3>
-        Open position{" "}
-        <span className={`tag ${pos.direction === "LONG" ? "pos" : "neg"}`}>{pos.direction}</span>
-      </h3>
-      <div className="cards">
-        <Metric label="Entry" term="entry" value={`₹${pos.entry?.toFixed(2)}`}
-          sub={pos.entry_ts ? `since ${pos.entry_ts.slice(11, 16)}` : undefined} />
-        <Metric label="Last price" term="ltp" value={pos.last_price != null ? `₹${pos.last_price.toFixed(2)}` : "—"} />
-        <Metric label="Target" term="target"
-          value={pos.target != null ? `₹${pos.target.toFixed(2)}` : "—"}
-          sub={pos.target_pct != null ? `${pos.target_pct >= 0 ? "+" : ""}${pos.target_pct.toFixed(2)}%` : undefined} />
-        <Metric label="Stop" term="stop"
-          value={pos.stop_loss != null ? `₹${pos.stop_loss.toFixed(2)}` : "—"}
-          sub={pos.stop_pct != null ? `-${pos.stop_pct.toFixed(2)}%` : undefined} />
-        <Metric label="Unrealized P&L" term="unrealized_pnl"
-          value={pos.unrealized_pnl_pct != null
-            ? `${pos.unrealized_pnl_pct >= 0 ? "+" : ""}${pos.unrealized_pnl_pct.toFixed(2)}%`
-            : "—"}
-          sub={pos.unrealized_pnl_abs != null ? inr(pos.unrealized_pnl_abs) : undefined}
-          tone={clsOf(pos.unrealized_pnl_pct || 0)} />
-        <Metric label="R:R" term="rr" value={pos.risk_reward != null ? pos.risk_reward.toFixed(2) : "—"}
-          sub={`conf ${pos.confidence?.toFixed(0)}`} />
+    <Section
+      titleNode={
+        <span className="row-wrap">
+          Open position
+          <DirectionTag direction={pos.direction} />
+        </span>
+      }
+      note="Paper position, marked to the latest streamed price. No live order exists."
+    >
+      <div className="stat-grid">
+        <StatTile
+          label={
+            <>
+              Unrealized P&amp;L
+              <InfoTip term="unrealized_pnl" />
+            </>
+          }
+          value={pctSigned(pos.unrealized_pnl_pct)}
+          tone={signCls(pos.unrealized_pnl_pct)}
+          sub={pos.unrealized_pnl_abs != null ? inrSigned(pos.unrealized_pnl_abs) : undefined}
+        />
+        <StatTile
+          label={
+            <>
+              Entry
+              <InfoTip term="entry" />
+            </>
+          }
+          value={num(pos.entry)}
+          sub={pos.entry_ts ? `since ${pos.entry_ts.slice(11, 16)}` : undefined}
+        />
+        <StatTile
+          label={
+            <>
+              Last price
+              <InfoTip term="ltp" />
+            </>
+          }
+          value={num(pos.last_price)}
+        />
+        <StatTile
+          label={
+            <>
+              Target
+              <InfoTip term="target" />
+            </>
+          }
+          value={num(pos.target)}
+          sub={pos.target_pct != null ? pctSigned(pos.target_pct) : undefined}
+        />
+        <StatTile
+          label={
+            <>
+              Stop
+              <InfoTip term="stop" />
+            </>
+          }
+          value={num(pos.stop_loss)}
+          sub={pos.stop_pct != null ? `−${pos.stop_pct.toFixed(2)}%` : undefined}
+        />
+        <StatTile
+          label={
+            <>
+              R:R
+              <InfoTip term="rr" />
+            </>
+          }
+          value={num(pos.risk_reward)}
+          sub={`rule score ${conf(pos.confidence)} (uncalibrated)`}
+        />
       </div>
-    </div>
+    </Section>
   );
 }
 
@@ -180,60 +256,144 @@ function OpenPositionCard({ pos }: { pos: OpenPosition }) {
 function PaperHistory({ symbol, trades }: { symbol: string; trades: PaperTrade[] }) {
   const net = trades.reduce((a, t) => a + (t.net_pnl_abs || 0), 0);
   const wins = trades.filter((t) => (t.net_pnl_abs || 0) > 0).length;
-  return (
-    <div className="card" style={{ marginTop: 16 }}>
-      <h3>
-        Paper-trade history — {symbol} ({trades.length})
-        {trades.length > 0 && (
-          <span className={clsOf(net)}> · net {inr(net)} · {wins}W/{trades.length - wins}L</span>
-        )}
-      </h3>
-      {trades.length === 0 ? (
-        <div className="muted small">
-          No paper trades recorded for {symbol} yet. They appear here as the live paper-trader
-          fires on this name.
-        </div>
-      ) : (
-        <table className="grid">
-          <thead>
-            <tr>
-              <th>Dir<InfoTip term="direction" /></th><th>Entry</th><th className="num">Entry ₹</th>
-              <th>Exit</th><th className="num">Exit ₹</th><th>Reason</th>
-              <th className="num">Target<InfoTip term="target" /></th><th className="num">Stop<InfoTip term="stop" /></th>
-              <th className="num">Net %</th><th className="num">Net ₹</th><th className="num">R<InfoTip term="r_multiple" /></th>
-            </tr>
-          </thead>
-          <tbody>
-            {[...trades].reverse().map((t) => (
-              <tr key={t.id}>
-                <td><span className={`tag ${t.direction === "LONG" ? "pos" : "neg"}`}>{t.direction}</span></td>
-                <td className="muted small">{t.entry_ts?.slice(5, 16).replace("T", " ")}</td>
-                <td className="num">{t.entry_fill?.toFixed(2)}</td>
-                <td className="muted small">{t.exit_ts?.slice(5, 16).replace("T", " ")}</td>
-                <td className="num">{t.exit_fill?.toFixed(2)}</td>
-                <td className="small">{t.exit_reason}</td>
-                <td className="num">{t.target != null ? t.target.toFixed(2) : "—"}</td>
-                <td className="num">{t.stop_loss != null ? t.stop_loss.toFixed(2) : "—"}</td>
-                <td className={`num ${clsOf(t.net_pnl_pct)}`}>
-                  {t.net_pnl_pct >= 0 ? "+" : ""}{t.net_pnl_pct?.toFixed(2)}%
-                </td>
-                <td className={`num ${clsOf(t.net_pnl_abs)}`}>{inr(t.net_pnl_abs)}</td>
-                <td className="num">{t.r_multiple != null ? `${t.r_multiple >= 0 ? "+" : ""}${t.r_multiple.toFixed(2)}` : "—"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </div>
-  );
-}
 
-function Metric({ label, value, sub, tone, term }: { label: string; value: string; sub?: string; tone?: string; term?: string }) {
+  const columns: Column<PaperTrade>[] = [
+    {
+      id: "entry_ts",
+      header: "Entry",
+      primary: true,
+      cell: (t) => (
+        <>
+          <span className="mono">{t.entry_ts?.slice(5, 16).replace("T", " ")}</span>
+          <span className={`stack-only ${signCls(t.net_pnl_pct)}`}>
+            {pctSigned(t.net_pnl_pct)}
+          </span>
+        </>
+      ),
+      sortBy: (t) => t.entry_ts,
+    },
+    {
+      id: "dir",
+      header: (
+        <>
+          Dir
+          <InfoTip term="direction" />
+        </>
+      ),
+      label: "Direction",
+      cell: (t) => <DirectionTag direction={t.direction} />,
+    },
+    {
+      id: "entry_fill",
+      header: "Entry ₹",
+      label: "Entry price",
+      numeric: true,
+      cell: (t) => <Money value={t.entry_fill} kind="price" />,
+    },
+    {
+      id: "exit_ts",
+      header: "Exit",
+      label: "Exit time",
+      hideOnStack: true,
+      cell: (t) => (
+        <span className="mono faint">{t.exit_ts?.slice(5, 16).replace("T", " ")}</span>
+      ),
+    },
+    {
+      id: "exit_fill",
+      header: "Exit ₹",
+      label: "Exit price",
+      numeric: true,
+      cell: (t) => <Money value={t.exit_fill} kind="price" />,
+    },
+    {
+      id: "reason",
+      header: "Reason",
+      label: "Exit reason",
+      cell: (t) => <span className="chip">{t.exit_reason}</span>,
+    },
+    {
+      id: "target",
+      header: (
+        <>
+          Target
+          <InfoTip term="target" />
+        </>
+      ),
+      label: "Target",
+      numeric: true,
+      hideOnStack: true,
+      cell: (t) => <Money value={t.target} kind="price" />,
+    },
+    {
+      id: "stop",
+      header: (
+        <>
+          Stop
+          <InfoTip term="stop" />
+        </>
+      ),
+      label: "Stop",
+      numeric: true,
+      hideOnStack: true,
+      cell: (t) => <Money value={t.stop_loss} kind="price" />,
+    },
+    {
+      id: "netpct",
+      header: "Net %",
+      label: "Net %",
+      numeric: true,
+      hideOnStack: true,
+      cell: (t) => (
+        <span className={signCls(t.net_pnl_pct)}>{pctSigned(t.net_pnl_pct)}</span>
+      ),
+      sortBy: (t) => t.net_pnl_pct,
+    },
+    {
+      id: "netabs",
+      header: "Net ₹",
+      label: "Net ₹",
+      numeric: true,
+      cell: (t) => <Money value={t.net_pnl_abs} kind="signed" />,
+      sortBy: (t) => t.net_pnl_abs,
+    },
+    {
+      id: "r",
+      header: (
+        <>
+          R<InfoTip term="r_multiple" />
+        </>
+      ),
+      label: "R-multiple",
+      numeric: true,
+      cell: (t) => (t.r_multiple == null ? "—" : `${num(t.r_multiple)}R`),
+    },
+  ];
+
   return (
-    <div className="metric">
-      <div className="metric-label">{label}{term && <InfoTip term={term} />}</div>
-      <div className={`metric-value ${tone || ""}`}>{value}</div>
-      {sub && <div className="metric-sub">{sub}</div>}
-    </div>
+    <Section
+      title={`Paper-trade history — ${symbol} (${trades.length})`}
+      aside={
+        trades.length > 0 ? (
+          <span className={signCls(net)}>
+            net <strong>{inr(net)}</strong> · {wins}W/{trades.length - wins}L
+          </span>
+        ) : undefined
+      }
+      note="Every paper trade the engine has recorded on this name, newest first."
+    >
+      <DataTable
+        label={`Paper trades for ${symbol}`}
+        columns={columns}
+        rows={[...trades].reverse()}
+        rowKey={(t) => t.id}
+        tall
+        empty={
+          <EmptyState title={`No paper trades on ${symbol} yet`}>
+            They appear here as the live paper-trader fires on this name.
+          </EmptyState>
+        }
+      />
+    </Section>
   );
 }

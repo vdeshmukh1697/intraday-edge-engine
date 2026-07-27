@@ -1,16 +1,32 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { InfoTip } from "@/components/InfoTip";
 import { Sparkline } from "@/components/Sparkline";
-import { getWatchlist, quotesWsUrl, type QuotesMessage, type WatchlistResponse } from "@/lib/api";
+import { DataTable, type Column } from "@/components/ui/DataTable";
+import {
+  EmptyState,
+  ErrorBanner,
+  LoadingBlock,
+  PageHeader,
+  Section,
+} from "@/components/ui/primitives";
+import { StatTile } from "@/components/ui/stats";
+import { DirectionTag, Money, SymbolLink } from "@/components/ui/cells";
+import {
+  getWatchlist,
+  quotesWsUrl,
+  type QuotesMessage,
+  type WatchlistResponse,
+  type WatchlistRow,
+} from "@/lib/api";
+import { ago, clock, inr, inrPrice, pctSigned, signCls } from "@/lib/format";
 
-const inr = (n: number) =>
-  `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
-const cls = (n: number) => (n > 0 ? "pos" : n < 0 ? "neg" : "");
 const REFRESH_MS = 15000;
 const SPARK_POINTS = 40; // rolling LTP buffer length per symbol for the sparkline
+// A quote stream that has gone this long without a tick is stale, whatever the
+// socket says — the market is closed or the feed died. Never a decorative pulse.
+const TICK_STALE_MS = 20000;
 
 export default function WatchlistPage() {
   const [data, setData] = useState<WatchlistResponse | null>(null);
@@ -21,7 +37,11 @@ export default function WatchlistPage() {
   // Live quotes (WebSocket): latest LTP per symbol + a rolling buffer for the sparkline.
   const [quotes, setQuotes] = useState<Record<string, number>>({});
   const [buffers, setBuffers] = useState<Record<string, number[]>>({});
-  const [live, setLive] = useState(false);
+  const [connected, setConnected] = useState(false);
+  const [lastTick, setLastTick] = useState<number | null>(null);
+  // Re-render on a timer so "last tick 34s ago" ages without a new tick arriving.
+  const [, setClockTick] = useState(0);
+  const stoppedRef = useRef(false);
 
   const load = useCallback((spinner = true) => {
     if (spinner) setLoading(true);
@@ -35,25 +55,32 @@ export default function WatchlistPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+  }, [load]);
   useEffect(() => {
     if (!auto) return;
     const id = setInterval(() => load(false), REFRESH_MS);
     return () => clearInterval(id);
   }, [auto, load]);
 
+  useEffect(() => {
+    const id = setInterval(() => setClockTick((n) => n + 1), 5000);
+    return () => clearInterval(id);
+  }, []);
+
   // Live LTP stream over WebSocket — updates every ~1s; auto-reconnects on drop.
   useEffect(() => {
     let ws: WebSocket | null = null;
-    let stopped = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
+    stoppedRef.current = false;
     const connect = () => {
       try {
         ws = new WebSocket(quotesWsUrl(1));
       } catch {
         return;
       }
-      ws.onopen = () => setLive(true);
+      ws.onopen = () => setConnected(true);
       ws.onmessage = (ev) => {
         let msg: QuotesMessage;
         try {
@@ -63,6 +90,7 @@ export default function WatchlistPage() {
         }
         if (!msg.quotes) return;
         const q = msg.quotes;
+        setLastTick(Date.now());
         setQuotes((prev) => ({ ...prev, ...q }));
         setBuffers((prev) => {
           const next = { ...prev };
@@ -74,8 +102,8 @@ export default function WatchlistPage() {
         });
       };
       ws.onclose = () => {
-        setLive(false);
-        if (!stopped) retry = setTimeout(connect, 3000);
+        setConnected(false);
+        if (!stoppedRef.current) retry = setTimeout(connect, 3000);
       };
       ws.onerror = () => {
         try {
@@ -87,7 +115,7 @@ export default function WatchlistPage() {
     };
     connect();
     return () => {
-      stopped = true;
+      stoppedRef.current = true;
       if (retry) clearTimeout(retry);
       try {
         ws?.close();
@@ -95,155 +123,326 @@ export default function WatchlistPage() {
         /* ignore */
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (error)
-    return <div className="card">Could not load the watchlist: {error}</div>;
-  if (!data) return <div className="card">Loading…</div>;
+  if (error && !data) {
+    return (
+      <>
+        <PageHeader title="Watchlist" />
+        <ErrorBanner>Could not load the watchlist: {error}</ErrorBanner>
+      </>
+    );
+  }
+  if (!data) {
+    return (
+      <>
+        <PageHeader title="Watchlist" />
+        <LoadingBlock label="Loading the watchlist" />
+      </>
+    );
+  }
 
-  // Open positions first, then traded-today, then the rest; alphabetical within each group.
-  const rank = (r: WatchlistResponse["symbols"][number]) =>
-    r.open_position ? 0 : r.trades_today > 0 ? 1 : 2;
-  const rows = [...data.symbols].sort((a, b) =>
-    rank(a) !== rank(b) ? rank(a) - rank(b) : a.symbol.localeCompare(b.symbol)
-  );
+  const tickAge = lastTick == null ? null : (Date.now() - lastTick) / 1000;
+  const feedState = !connected
+    ? "off"
+    : lastTick != null && Date.now() - lastTick < TICK_STALE_MS
+      ? "live"
+      : "stale";
+  const feedLabel =
+    feedState === "live"
+      ? `Live prices — last tick ${ago(tickAge)}`
+      : feedState === "stale"
+        ? `Prices held — no tick ${tickAge == null ? "since the page opened" : ago(tickAge)} (market closed or feed down)`
+        : "Quote stream offline — reconnecting";
 
-  return (
-    <div className="watchlist">
-      <div className="page-head">
-        <h1>Watchlist</h1>
-        <p className="muted">
-          The fixed intraday paper-trading basket — {data.count} liquid, sector-diversified
-          NSE names. The live feed subscribes to exactly these and paper-trades signals on them
-          through the session. Click any row for that stock&apos;s chart + full paper-trade
-          history. Decision-support only — no live orders.
-        </p>
-      </div>
+  const open = data.symbols.filter((r) => r.open_position);
+  const basket = [...data.symbols].sort((a, b) => {
+    const rank = (r: WatchlistRow) => (r.trades_today > 0 ? 0 : 1);
+    return rank(a) !== rank(b) ? rank(a) - rank(b) : a.symbol.localeCompare(b.symbol);
+  });
 
-      <div className="stats-strip">
-        <Stat label="Symbols watched" value={String(data.count)} />
-        <Stat label="Open now" value={String(data.open_now)} />
-        <Stat label="Traded today" value={String(data.traded_today)} />
-        <Stat label="Session date" value={data.date} />
-        <span
-          className={`tag small ${live ? "pos" : ""}`}
-          title="Live LTP stream (WebSocket). Ticks during market hours; holds last price when closed."
-        >
-          {live ? "● LIVE" : "○ offline"}
+  const priceCell = (r: WatchlistRow) => {
+    const ltp = quotes[r.symbol];
+    const buf = buffers[r.symbol];
+    const prev = buf && buf.length >= 2 ? buf[buf.length - 2] : undefined;
+    const tick = ltp != null && prev != null ? (ltp > prev ? "pos" : ltp < prev ? "neg" : "") : "";
+    return (
+      <span className={`mono ${tick}`}>{ltp != null ? inrPrice(ltp) : "—"}</span>
+    );
+  };
+
+  const openColumns: Column<WatchlistRow>[] = [
+    {
+      id: "symbol",
+      header: "Symbol",
+      primary: true,
+      cell: (r) => (
+        <>
+          <SymbolLink symbol={r.symbol} />
+          <span className="stack-only">{priceCell(r)}</span>
+        </>
+      ),
+    },
+    {
+      id: "price",
+      header: (
+        <>
+          Live ₹
+          <InfoTip
+            full="Live price"
+            def="Last traded price, streamed ~1s from the Dhan feed. Ticks during market hours; holds the last traded price when the market is closed."
+          />
+        </>
+      ),
+      label: "Live price",
+      numeric: true,
+      hideOnStack: true,
+      cell: priceCell,
+    },
+    {
+      id: "status",
+      header: (
+        <>
+          Side
+          <InfoTip term="direction" />
+        </>
+      ),
+      label: "Side",
+      cell: (r) => <DirectionTag direction={r.open_position?.direction} />,
+    },
+    {
+      id: "unreal",
+      header: (
+        <>
+          Unrealized
+          <InfoTip term="unrealized_pnl" />
+        </>
+      ),
+      label: "Unrealized",
+      numeric: true,
+      cell: (r) => (
+        <span className={signCls(r.open_position?.unrealized_pnl_pct)}>
+          {pctSigned(r.open_position?.unrealized_pnl_pct)}
         </span>
-        <span className="live-spacer" />
-        {lastRefresh && (
-          <span className="muted small">refreshed {lastRefresh.toLocaleTimeString("en-IN")}</span>
-        )}
-        <label className="toggle small">
-          <input type="checkbox" checked={auto} onChange={() => setAuto((a) => !a)} /> auto
-        </label>
-        <button className="ghost" onClick={() => load(true)} disabled={loading}>
-          {loading ? "…" : "Refresh"}
-        </button>
-      </div>
+      ),
+    },
+    {
+      id: "entry",
+      header: (
+        <>
+          Entry ₹<InfoTip term="entry" />
+        </>
+      ),
+      label: "Entry",
+      numeric: true,
+      cell: (r) => <Money value={r.open_position?.entry} kind="price" />,
+    },
+    {
+      id: "target",
+      header: (
+        <>
+          Target
+          <InfoTip term="target" />
+        </>
+      ),
+      label: "Target",
+      numeric: true,
+      cell: (r) => (
+        <>
+          <Money value={r.open_position?.target} kind="price" />
+          {r.open_position?.target_pct != null && (
+            <span className="faint small"> ({pctSigned(r.open_position.target_pct)})</span>
+          )}
+        </>
+      ),
+    },
+    {
+      id: "stop",
+      header: (
+        <>
+          Stop
+          <InfoTip term="stop" />
+        </>
+      ),
+      label: "Stop",
+      numeric: true,
+      cell: (r) => (
+        <>
+          <Money value={r.open_position?.stop_loss} kind="price" />
+          {r.open_position?.stop_pct != null && (
+            <span className="faint small"> (−{r.open_position.stop_pct.toFixed(2)}%)</span>
+          )}
+        </>
+      ),
+    },
+  ];
 
-      <div className="card">
-        <table className="grid watchlist-grid">
-          <thead>
-            <tr>
-              <th>Symbol</th>
-              <th className="num">Live ₹<InfoTip full="Live price" def="Last traded price, streamed ~1s from the Dhan feed. Ticks during market hours; holds the last traded price when the market is closed." /></th>
-              <th>Trend<InfoTip full="Intraday trend" def="Sparkline of the recent live prices this session (rolling ~40 samples). Green = up over the window, red = down." /></th>
-              <th>Sector / note<InfoTip term="sector" /></th>
-              <th>Status<InfoTip term="direction" /></th>
-              <th className="num">Entry ₹<InfoTip term="entry" /></th>
-              <th className="num">Target (₹ / %)<InfoTip term="target" /></th>
-              <th className="num">Stop (₹ / %)<InfoTip term="stop" /></th>
-              <th className="num">Unrealized<InfoTip term="unrealized_pnl" /></th>
-              <th className="num">Today<InfoTip full="Today's activity" def="Number of paper trades on this name today and their net ₹ P&L." /></th>
-              <th className="num">All-time<InfoTip full="All-time trades" def="Total paper trades recorded on this name across all sessions." /></th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => {
-              const op = r.open_position;
-              const ltp = quotes[r.symbol];
-              const buf = buffers[r.symbol];
-              const prev = buf && buf.length >= 2 ? buf[buf.length - 2] : undefined;
-              const tickCls =
-                ltp != null && prev != null
-                  ? ltp > prev ? "pos" : ltp < prev ? "neg" : ""
-                  : "";
-              return (
-                <tr key={r.symbol} className={op ? "active-row" : ""}>
-                  <td className="mono">
-                    <Link href={`/stock/${encodeURIComponent(r.symbol)}`}>{r.symbol}</Link>
-                  </td>
-                  <td className={`num mono ${tickCls}`}>
-                    {ltp != null ? ltp.toFixed(2) : "—"}
-                  </td>
-                  <td>
-                    <Sparkline points={buffers[r.symbol] || []} />
-                  </td>
-                  <td className="muted">{r.sector || "—"}</td>
-                  <td>
-                    {op ? (
-                      <span className={`tag ${op.direction === "LONG" ? "pos" : "neg"}`}>
-                        {op.direction} OPEN
-                      </span>
-                    ) : r.trades_today > 0 ? (
-                      <span className="muted small">flat (traded)</span>
-                    ) : (
-                      <span className="muted small">—</span>
-                    )}
-                  </td>
-                  <td className="num">{op?.entry != null ? op.entry.toFixed(2) : "—"}</td>
-                  <td className="num">
-                    {op?.target != null ? (
-                      <>
-                        {op.target.toFixed(2)}
-                        {op.target_pct != null && (
-                          <span className="muted small"> ({op.target_pct >= 0 ? "+" : ""}{op.target_pct.toFixed(2)}%)</span>
-                        )}
-                      </>
-                    ) : "—"}
-                  </td>
-                  <td className="num">
-                    {op?.stop_loss != null ? (
-                      <>
-                        {op.stop_loss.toFixed(2)}
-                        {op.stop_pct != null && (
-                          <span className="muted small"> (-{op.stop_pct.toFixed(2)}%)</span>
-                        )}
-                      </>
-                    ) : "—"}
-                  </td>
-                  <td className={`num ${cls(op?.unrealized_pnl_pct || 0)}`}>
-                    {op?.unrealized_pnl_pct != null
-                      ? `${op.unrealized_pnl_pct >= 0 ? "+" : ""}${op.unrealized_pnl_pct.toFixed(2)}%`
-                      : "—"}
-                  </td>
-                  <td className={`num ${cls(r.pnl_today)}`}>
-                    {r.trades_today > 0 ? `${r.trades_today} · ${inr(r.pnl_today)}` : "—"}
-                  </td>
-                  <td className="num">{r.trades_total || "—"}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-      <p className="muted small">
-        Entry / Target / Stop show only while a position is open (the live trade levels). Target
-        &amp; Stop are shown as price (₹) and move (%). The strategy is selective, so most names
-        sit flat most of the time.
-      </p>
-    </div>
-  );
-}
+  const basketColumns: Column<WatchlistRow>[] = [
+    {
+      id: "symbol",
+      header: "Symbol",
+      primary: true,
+      cell: (r) => (
+        <>
+          <SymbolLink symbol={r.symbol} />
+          <span className="stack-only">{priceCell(r)}</span>
+        </>
+      ),
+    },
+    {
+      id: "price",
+      header: "Live ₹",
+      label: "Live price",
+      numeric: true,
+      hideOnStack: true,
+      cell: priceCell,
+    },
+    {
+      id: "trend",
+      header: (
+        <>
+          Trend
+          <InfoTip
+            full="Intraday trend"
+            def="Sparkline of the recent live prices this session (rolling ~40 samples). Green = up over the window, red = down."
+          />
+        </>
+      ),
+      label: "Trend",
+      cell: (r) =>
+        (buffers[r.symbol]?.length ?? 0) >= 2 ? (
+          <Sparkline points={buffers[r.symbol]} label={r.symbol} />
+        ) : null,
+    },
+    {
+      id: "sector",
+      header: (
+        <>
+          Sector
+          <InfoTip term="sector" />
+        </>
+      ),
+      label: "Sector",
+      hideOnStack: true,
+      cell: (r) => <span className="muted">{r.sector || "—"}</span>,
+    },
+    {
+      id: "today",
+      header: (
+        <>
+          Today
+          <InfoTip
+            full="Today's activity"
+            def="Number of paper trades on this name today and their net ₹ P&L."
+          />
+        </>
+      ),
+      label: "Today",
+      numeric: true,
+      cell: (r) =>
+        r.trades_today > 0 ? (
+          <span className={signCls(r.pnl_today)}>
+            {r.trades_today} · {inr(r.pnl_today)}
+          </span>
+        ) : null,
+      sortBy: (r) => r.pnl_today,
+    },
+    {
+      id: "alltime",
+      header: (
+        <>
+          All-time
+          <InfoTip
+            full="All-time trades"
+            def="Total paper trades recorded on this name across all sessions."
+          />
+        </>
+      ),
+      label: "All-time trades",
+      numeric: true,
+      hideOnStack: true,
+      cell: (r) => r.trades_total || null,
+      sortBy: (r) => r.trades_total,
+    },
+  ];
 
-function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="stat">
-      <div className="stat-label">{label}</div>
-      <div className="stat-value">{value}</div>
-    </div>
+    <>
+      <PageHeader
+        title="Watchlist"
+        eyebrow={`Session ${data.date}`}
+        lede={
+          <>
+            The fixed intraday paper-trading basket — {data.count} liquid,
+            sector-diversified NSE names. The live feed subscribes to exactly these and
+            paper-trades signals on them through the session. The strategy is selective,
+            so most names sit flat most of the time.{" "}
+            <strong>Decision-support only — no live orders.</strong>
+          </>
+        }
+      />
+
+      <div className="feed-status" data-state={feedState} role="status">
+        <span className="feed-dot" aria-hidden="true" />
+        <span className="feed-label">{feedLabel}</span>
+        <span className="feed-spacer" />
+        <span className="feed-actions">
+          {lastRefresh && <span className="faint tiny">table {clock(lastRefresh)}</span>}
+          <label className="checkbox tiny">
+            <input
+              type="checkbox"
+              checked={auto}
+              onChange={() => setAuto((a) => !a)}
+            />
+            auto
+          </label>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => load(true)}
+            disabled={loading}
+          >
+            {loading ? "…" : "Refresh"}
+          </button>
+        </span>
+      </div>
+
+      <div className="stat-grid">
+        <StatTile label="Symbols watched" value={String(data.count)} emphasis="quiet" />
+        <StatTile label="Open now" value={String(data.open_now)} emphasis="quiet" />
+        <StatTile label="Traded today" value={String(data.traded_today)} emphasis="quiet" />
+      </div>
+
+      <Section
+        title={`Open now (${open.length})`}
+        note="Live trade levels. Entry, target and stop only exist while a position is open."
+      >
+        <DataTable
+          label="Open positions in the watchlist"
+          columns={openColumns}
+          rows={open}
+          rowKey={(r) => r.symbol}
+          rowFlag={() => "active"}
+          empty={
+            <EmptyState title="Nothing open">
+              Positions appear here the moment the engine fills one.
+            </EmptyState>
+          }
+        />
+      </Section>
+
+      <Section
+        title={`The basket (${data.count} names)`}
+        note="Names that traded today sort first. Tap a symbol for its live chart and full paper-trade history."
+      >
+        <DataTable
+          label="Watchlist basket"
+          columns={basketColumns}
+          rows={basket}
+          rowKey={(r) => r.symbol}
+          rowFlag={(r) => (r.open_position ? "active" : undefined)}
+        />
+      </Section>
+    </>
   );
 }

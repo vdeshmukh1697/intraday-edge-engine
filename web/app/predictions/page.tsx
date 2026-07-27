@@ -1,8 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
 import { getPredictions, type Prediction } from "@/lib/api";
+import { DataTable, type Column } from "@/components/ui/DataTable";
+import {
+  Badge,
+  EmptyState,
+  ErrorBanner,
+  LoadingBlock,
+  PageHeader,
+  Section,
+} from "@/components/ui/primitives";
+import { DirectionTag, SymbolLink } from "@/components/ui/cells";
+import { conf, dayTime, num, pctSigned, signCls } from "@/lib/format";
 
 // The log is append-only, so after the first load we poll only for rows newer than the
 // newest id we hold (since_id) — a tiny delta request every few seconds ≈ live.
@@ -20,28 +30,16 @@ const KINDS = [
   { key: "halt", label: "Halts" },
 ];
 
-const KIND_CLS: Record<string, string> = {
-  entry: "pos",
-  exit: "",
-  skip: "",
-  halt: "neg",
-  error: "neg",
+type Tone = "neutral" | "positive" | "negative" | "warning" | "info";
+
+// Entry/exit/skip must be told apart at a glance; failures must shout.
+const KIND_TONE: Record<string, Tone> = {
+  entry: "positive",
+  exit: "info",
+  skip: "warning",
+  halt: "negative",
+  error: "negative",
 };
-
-const fmt = (n: number | null | undefined, digits = 2) =>
-  n == null ? "—" : n.toFixed(digits);
-
-function istTime(ts: string): { day: string; time: string } {
-  try {
-    const d = new Date(ts);
-    return {
-      day: d.toLocaleDateString("en-IN", { day: "2-digit", month: "short" }),
-      time: d.toLocaleTimeString("en-IN", { hour12: false }),
-    };
-  } catch {
-    return { day: "", time: ts };
-  }
-}
 
 export default function PredictionsPage() {
   const [rows, setRows] = useState<Prediction[]>([]);
@@ -64,7 +62,9 @@ export default function PredictionsPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  useEffect(() => { loadFull(); }, [loadFull]);
+  useEffect(() => {
+    loadFull();
+  }, [loadFull]);
 
   // Live updates: cheap delta poll for rows newer than what we already have.
   useEffect(() => {
@@ -87,153 +87,225 @@ export default function PredictionsPage() {
             ].slice(0, PAGE_SIZE);
           });
         })
-        .catch(() => { /* transient poll failure — next tick retries */ });
+        .catch(() => {
+          /* transient poll failure — next tick retries */
+        });
     }, POLL_MS);
     return () => clearInterval(id);
   }, []);
 
-  if (error)
-    return <div className="card">Could not load predictions: {error}</div>;
-  if (loading && rows.length === 0) return <div className="card">Loading…</div>;
-
   const visible = kind ? rows.filter((r) => r.kind === kind) : rows;
 
-  return (
-    <div className="predictions">
-      <div className="page-head">
-        <h1>Predictions</h1>
-        <p className="muted">
-          Every alert the engine pushes to Telegram, logged at send time with its full
-          parameters — entries with entry/stop/target/confidence/sizing, exits with realized
-          P&amp;L, skips the book couldn&apos;t afford, plus pre-market briefings, scan picks and
-          health pings. Updates live (~{POLL_MS / 1000}s). Paper-trading decision support only —
-          no live orders.
-        </p>
-      </div>
-
-      <div className="stats-strip">
-        {KINDS.map((k) => (
-          <button
-            key={k.key}
-            className={`tag small${kind === k.key ? " pos" : ""}`}
-            onClick={() => setKind(k.key)}
-            style={{ cursor: "pointer" }}
-          >
-            {k.label}
-          </button>
-        ))}
-        <span className="live-spacer" />
-        {lastPoll && (
-          <span className="muted small">
-            updated {lastPoll.toLocaleTimeString("en-IN")} · {visible.length} shown
+  const columns: Column<Prediction>[] = [
+    {
+      id: "kind",
+      header: "Kind",
+      primary: true,
+      cell: (r) => {
+        const t = dayTime(r.ts);
+        return (
+          <>
+            <span className="row-wrap">
+              <Badge tone={KIND_TONE[r.kind] ?? "neutral"}>{r.kind}</Badge>
+              {r.symbol ? (
+                <span className="stack-only">
+                  <SymbolLink symbol={r.symbol} />
+                </span>
+              ) : null}
+              {r.delivered === 0 && (
+                <Badge tone="warning" title="Alert was logged but not delivered">
+                  ⚠ undelivered
+                </Badge>
+              )}
+            </span>
+            <span className="stack-only mono tiny faint">
+              {t.day} {t.time}
+            </span>
+          </>
+        );
+      },
+    },
+    {
+      id: "time",
+      header: "Time (IST)",
+      label: "Time",
+      hideOnStack: true,
+      cell: (r) => {
+        const t = dayTime(r.ts);
+        return (
+          <span className="mono" title={r.ts}>
+            <span className="faint tiny">{t.day} </span>
+            {t.time}
           </span>
-        )}
+        );
+      },
+      sortBy: (r) => r.id,
+    },
+    {
+      id: "symbol",
+      header: "Symbol",
+      label: "Symbol",
+      hideOnStack: true,
+      cell: (r) => (r.symbol ? <SymbolLink symbol={r.symbol} /> : null),
+    },
+    {
+      id: "dir",
+      header: "Dir",
+      label: "Direction",
+      cell: (r) => (r.direction ? <DirectionTag direction={r.direction} /> : null),
+    },
+    {
+      id: "entry",
+      header: "Entry",
+      label: "Entry",
+      numeric: true,
+      cell: (r) => (r.entry == null ? null : num(r.entry)),
+    },
+    {
+      id: "stop",
+      header: "Stop",
+      label: "Stop",
+      numeric: true,
+      cell: (r) =>
+        r.stop_loss == null
+          ? null
+          : `${num(r.stop_loss)}${r.stop_pct != null ? ` (−${num(r.stop_pct)}%)` : ""}`,
+    },
+    {
+      id: "target",
+      header: "Target",
+      label: "Target",
+      numeric: true,
+      cell: (r) =>
+        r.target == null
+          ? null
+          : `${num(r.target)}${r.target_pct != null ? ` (+${num(r.target_pct)}%)` : ""}`,
+    },
+    {
+      id: "rr",
+      header: "R:R",
+      label: "Risk : reward",
+      numeric: true,
+      hideOnStack: true,
+      cell: (r) => (r.risk_reward == null ? null : num(r.risk_reward, 1)),
+    },
+    {
+      id: "rule",
+      header: "Rule score",
+      label: "Rule score (uncalibrated)",
+      numeric: true,
+      hideOnStack: true,
+      cell: (r) => (r.confidence == null ? null : conf(r.confidence)),
+    },
+    {
+      id: "qty",
+      header: "Qty",
+      label: "Qty",
+      numeric: true,
+      hideOnStack: true,
+      cell: (r) => r.qty ?? null,
+    },
+    {
+      id: "result",
+      header: "Result",
+      label: "Result",
+      numeric: true,
+      cell: (r) =>
+        r.pnl_pct_net == null ? null : (
+          <span className={signCls(r.pnl_pct_net)}>
+            {pctSigned(r.pnl_pct_net)}
+            {r.exit_reason ? <span className="faint small"> {r.exit_reason}</span> : null}
+          </span>
+        ),
+    },
+    {
+      id: "strategy",
+      header: "Strategy",
+      label: "Strategy",
+      hideOnStack: true,
+      cell: (r) => (r.strategy ? <span className="faint small">{r.strategy}</span> : null),
+    },
+    {
+      id: "message",
+      header: "Message",
+      label: "Message",
+      spanOnStack: true,
+      cell: (r) => (
+        <div className="log-message">
+          <div className="clamp-2" title={r.message}>
+            {r.message}
+          </div>
+          {r.reason_plain && (
+            <div className="clamp-2 faint tiny" title={r.reason_plain}>
+              Why: {r.reason_plain}
+            </div>
+          )}
+        </div>
+      ),
+    },
+  ];
+
+  return (
+    <>
+      <PageHeader
+        title="Predictions"
+        eyebrow="Append-only alert log"
+        lede={
+          <>
+            Every alert the engine pushes to Telegram, logged at send time with its full
+            parameters — entries with entry/stop/target/rule-score/sizing, exits with
+            realized P&amp;L, skips the book couldn&apos;t afford, plus pre-market
+            briefings, scan picks and health pings. Updates live (~{POLL_MS / 1000}s).{" "}
+            <strong>Paper-trading decision support only — no live orders.</strong>
+          </>
+        }
+      />
+
+      {error && <ErrorBanner>Could not load predictions: {error}</ErrorBanner>}
+
+      <div className="control-bar">
+        <div className="field" style={{ flex: 1 }}>
+          <span id="kind-filter-label">Filter by kind</span>
+          <div className="segmented" role="group" aria-labelledby="kind-filter-label">
+            {KINDS.map((k) => (
+              <button
+                key={k.key}
+                type="button"
+                aria-pressed={kind === k.key}
+                onClick={() => setKind(k.key)}
+              >
+                {k.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <span className="faint tiny">
+          {visible.length} shown
+          {lastPoll ? ` · polled ${lastPoll.toLocaleTimeString("en-IN", { hour12: false })}` : ""}
+        </span>
       </div>
 
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Time (IST)</th>
-              <th>Kind</th>
-              <th>Symbol</th>
-              <th>Dir</th>
-              <th>Entry</th>
-              <th>Stop</th>
-              <th>Target</th>
-              <th>R:R</th>
-              <th>Conf</th>
-              <th>Qty</th>
-              <th>Result</th>
-              <th>Strategy</th>
-              <th>Message</th>
-            </tr>
-          </thead>
-          <tbody>
-            {visible.map((r) => {
-              const t = istTime(r.ts);
-              return (
-                <tr key={r.id}>
-                  <td title={r.ts}>
-                    <span className="muted small">{t.day}</span> {t.time}
-                  </td>
-                  <td>
-                    <span className={`tag small ${KIND_CLS[r.kind] ?? ""}`}>
-                      {r.kind}
-                      {r.delivered === 0 ? " ⚠︎" : ""}
-                    </span>
-                  </td>
-                  <td>
-                    {r.symbol ? (
-                      <Link href={`/stock/${r.symbol}`}>{r.symbol}</Link>
-                    ) : (
-                      "—"
-                    )}
-                  </td>
-                  <td className={r.direction === "LONG" ? "pos" : r.direction === "SHORT" ? "neg" : ""}>
-                    {r.direction ?? "—"}
-                  </td>
-                  <td>{fmt(r.entry)}</td>
-                  <td>
-                    {r.stop_loss != null
-                      ? `${fmt(r.stop_loss)}${r.stop_pct != null ? ` (−${fmt(r.stop_pct)}%)` : ""}`
-                      : "—"}
-                  </td>
-                  <td>
-                    {r.target != null
-                      ? `${fmt(r.target)}${r.target_pct != null ? ` (+${fmt(r.target_pct)}%)` : ""}`
-                      : "—"}
-                  </td>
-                  <td>{fmt(r.risk_reward, 1)}</td>
-                  <td>{r.confidence != null ? r.confidence.toFixed(0) : "—"}</td>
-                  <td>{r.qty ?? "—"}</td>
-                  <td className={r.pnl_pct_net != null ? (r.pnl_pct_net >= 0 ? "pos" : "neg") : ""}>
-                    {r.pnl_pct_net != null
-                      ? `${r.pnl_pct_net >= 0 ? "+" : ""}${fmt(r.pnl_pct_net)}%${
-                          r.exit_reason ? ` ${r.exit_reason}` : ""
-                        }`
-                      : "—"}
-                  </td>
-                  <td className="muted small">{r.strategy ?? "—"}</td>
-                  <td className="muted small" style={{ maxWidth: 360 }}>
-                    <div
-                      style={{
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                      title={r.message}
-                    >
-                      {r.message}
-                    </div>
-                    {/* Plain-English reason, when the alert carried one. */}
-                    {r.reason_plain && (
-                      <div
-                        className="why-sub"
-                        style={{
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                        title={r.reason_plain}
-                      >
-                        Why: {r.reason_plain}
-                      </div>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-            {visible.length === 0 && (
-              <tr>
-                <td colSpan={13} className="muted">
-                  No predictions logged yet — rows appear here the moment an alert is sent.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
+      {loading && rows.length === 0 ? (
+        <LoadingBlock label="Loading the alert log" rows={6} />
+      ) : (
+        <Section
+          title={kind ? `${KINDS.find((k) => k.key === kind)?.label} (${visible.length})` : `Log (${visible.length})`}
+          note="Newest first. New rows arrive at the top without moving what you're reading below them."
+        >
+          <DataTable
+            label="Engine alert log"
+            columns={columns}
+            rows={visible}
+            rowKey={(r) => String(r.id)}
+            tall
+            empty={
+              <EmptyState title="Nothing logged for this filter">
+                Rows appear here the moment an alert is sent.
+              </EmptyState>
+            }
+          />
+        </Section>
+      )}
+    </>
   );
 }

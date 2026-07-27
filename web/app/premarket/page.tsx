@@ -1,14 +1,31 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
 import {
   getPremarket,
   todayStr,
+  type PremarketPick,
   type PremarketResponse,
 } from "@/lib/api";
 import { conf, signed } from "@/lib/format";
 import { InfoTip } from "@/components/InfoTip";
+import { DataTable, type Column } from "@/components/ui/DataTable";
+import {
+  Badge,
+  Callout,
+  ChipRow,
+  EmptyState,
+  ErrorBanner,
+  LoadingBlock,
+  PageHeader,
+  Section,
+} from "@/components/ui/primitives";
+import { StatTile } from "@/components/ui/stats";
+import { SymbolLink } from "@/components/ui/cells";
+
+function biasTone(bias: string): "positive" | "negative" {
+  return /short|bear|down/i.test(bias) ? "negative" : "positive";
+}
 
 export default function PremarketPage() {
   const [date, setDate] = useState<string>(todayStr());
@@ -35,54 +52,149 @@ export default function PremarketPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return (
-    <div>
-      <div className="page-head">
-        <div>
-          <h1>Pre-market</h1>
-          <div className="subtle">
-            Index outlook and pre-open picks{data ? ` · ${data.day}` : ""}
-          </div>
-        </div>
-      </div>
+  const columns: Column<PremarketPick>[] = [
+    {
+      id: "symbol",
+      header: "Symbol",
+      primary: true,
+      cell: (p) => (
+        <>
+          <SymbolLink symbol={p.symbol} date={date} />
+          <span className="stack-only">
+            <Badge tone={biasTone(p.bias)}>
+              {biasTone(p.bias) === "positive" ? "▲" : "▼"} {p.bias}
+            </Badge>
+          </span>
+        </>
+      ),
+    },
+    {
+      id: "bias",
+      header: (
+        <>
+          Bias
+          <InfoTip term="bias" />
+        </>
+      ),
+      label: "Bias",
+      hideOnStack: true,
+      cell: (p) => (
+        <Badge tone={biasTone(p.bias)}>
+          {biasTone(p.bias) === "positive" ? "▲" : "▼"} {p.bias}
+        </Badge>
+      ),
+    },
+    {
+      id: "setup",
+      header: (
+        <>
+          Setup
+          <InfoTip term="setup" />
+        </>
+      ),
+      label: "Setup",
+      cell: (p) => p.setup,
+    },
+    {
+      id: "gap",
+      header: (
+        <>
+          Exp gap
+          <InfoTip term="expected_gap" />
+        </>
+      ),
+      label: "Expected gap",
+      numeric: true,
+      cell: (p) => `${signed(p.expected_gap_pct)}%`,
+      sortBy: (p) => p.expected_gap_pct,
+    },
+    {
+      id: "rule",
+      header: (
+        <>
+          Rule score
+          <InfoTip term="confidence" />
+        </>
+      ),
+      label: "Rule score (uncalibrated)",
+      numeric: true,
+      cell: (p) => conf(p.confidence),
+      sortBy: (p) => p.confidence,
+    },
+    {
+      id: "catalyst",
+      header: (
+        <>
+          Catalyst
+          <InfoTip term="catalyst" />
+        </>
+      ),
+      label: "Catalyst",
+      cell: (p) => p.catalyst,
+    },
+    {
+      id: "drivers",
+      header: (
+        <>
+          Drivers
+          <InfoTip term="drivers" />
+        </>
+      ),
+      label: "Drivers",
+      spanOnStack: true,
+      cell: (p) => <ChipRow items={p.drivers} />,
+    },
+  ];
 
-      {/* How the picks are made — answers "why these stocks / how chosen". */}
-      <div className="card explain" style={{ marginBottom: 16 }}>
-        <strong>How pre-open picks are chosen.</strong> Before the bell we score the{" "}
-        {data?.meta ? data.meta.scored : "most-liquid"} most-liquid NSE names for the most likely
-        opening move. Each name gets a directional <em>bias</em> (LONG/SHORT) from four inputs —
-        overnight <InfoTip term="adr" /> moves, the expected index gap, overnight{" "}
-        <InfoTip term="catalyst" /> news, and the prior day&apos;s momentum — then they&apos;re
-        ranked by conviction and the top {count} are shown. Use the count control to see more.
+  return (
+    <>
+      <PageHeader
+        title="Pre-market"
+        eyebrow={data ? `Briefing for ${data.day}` : "08:30 briefing"}
+        lede={
+          <>
+            Index outlook from overnight global cues, plus the pre-open watchlist ranked
+            by conviction. Read before the bell to know what the day might look like —{" "}
+            <strong>not a list of trades to place.</strong>
+          </>
+        }
+      />
+
+      <Callout icon="ℹ" title="How pre-open picks are chosen">
+        Before the bell the engine scores the{" "}
+        {data?.meta ? `${data.meta.scored} ` : ""}most-liquid NSE names for the most likely
+        opening move. Each name gets a directional <em>bias</em> from four inputs —
+        overnight ADR
+        <InfoTip term="adr" /> moves, the expected index gap, overnight catalyst
+        <InfoTip term="catalyst" /> news, and the prior day&apos;s momentum — then they are
+        ranked and the top {count} shown.{" "}
+        <strong>
+          Real ADR/news catalysts only exist for headline names, so most picks lean on
+          index gap plus momentum alone.
+        </strong>{" "}
+        Rule score is uncalibrated and is not a probability.
         {data?.meta && (
-          <span className="muted small">
-            {" "}Source: {data.meta.universe_source}; cues = {data.meta.cues ?? "—"}, news ={" "}
+          <span className="faint small">
+            {" "}
+            Source: {data.meta.universe_source}; cues = {data.meta.cues ?? "—"}, news ={" "}
             {data.meta.news ?? "—"}.
           </span>
         )}
-        <span className="muted small">
-          {" "}Note: real ADR/news catalysts only exist for headline names, so many picks lean on
-          index gap + momentum. Decision-support only — no orders.
-        </span>
-      </div>
+      </Callout>
 
       <form
-        className="controls"
+        className="control-bar"
         onSubmit={(e) => {
           e.preventDefault();
           load();
         }}
       >
-        <div className="field">
-          <label>Date</label>
-          <input
-            type="date"
-            value={date}
-            onChange={(e) => setDate(e.target.value)}
-          />
-        </div>
-        <div className="field">
-          <label>Show top</label>
+        <label className="field">
+          <span>Date</span>
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+        </label>
+        <label className="field">
+          <span>Show top</span>
           <input
             type="number"
             min={1}
@@ -90,113 +202,80 @@ export default function PremarketPage() {
             value={count}
             onChange={(e) => setCount(Number(e.target.value))}
           />
-        </div>
+        </label>
         <button type="submit" disabled={loading}>
           {loading ? "Loading…" : "Refresh"}
         </button>
       </form>
 
-      {error && <div className="notice error">Failed to load: {error}</div>}
+      {error && <ErrorBanner>Failed to load: {error}</ErrorBanner>}
+      {loading && !data && <LoadingBlock label="Loading the pre-market briefing" />}
 
       {data && (
         <>
-          <div className="card" style={{ marginBottom: 20 }}>
-            <h2>Index outlook</h2>
-            <div className="card-grid" style={{ marginBottom: 12 }}>
-              <Metric label="Gap bias" term="gap_bias" value={data.outlook.gap_bias} />
-              <Metric
-                label="Expected gap"
-                term="expected_gap"
-                value={`${signed(data.outlook.expected_gap_pct)}%`}
-              />
-              <Metric label="Risk tone" term="risk_tone" value={data.outlook.risk_tone} />
-            </div>
-            {data.outlook.drivers.length > 0 && (
-              <div className="reasons">
-                {data.outlook.drivers.map((d, i) => (
-                  <span className="reason-chip" key={i}>
-                    {d}
-                  </span>
-                ))}
+          <Section
+            title="Index outlook"
+            note="Derived from overnight global cues (GIFT Nifty, US close, ADRs). A view on the open, not on the day."
+          >
+            <div className="stack">
+              <div className="stat-grid">
+                <StatTile
+                  label={
+                    <>
+                      Gap bias
+                      <InfoTip term="gap_bias" />
+                    </>
+                  }
+                  value={data.outlook.gap_bias}
+                />
+                <StatTile
+                  label={
+                    <>
+                      Expected gap
+                      <InfoTip term="expected_gap" />
+                    </>
+                  }
+                  value={`${signed(data.outlook.expected_gap_pct)}%`}
+                />
+                <StatTile
+                  label={
+                    <>
+                      Risk tone
+                      <InfoTip term="risk_tone" />
+                    </>
+                  }
+                  value={data.outlook.risk_tone}
+                />
               </div>
-            )}
-          </div>
-
-          <h2>
-            Pre-open picks{" "}
-            {data.meta && (
-              <span className="muted small">
-                (showing {data.meta.shown} of {data.meta.scored} scored)
-              </span>
-            )}
-          </h2>
-          {data.picks.length === 0 ? (
-            <div className="notice">No pre-open picks for the selected day.</div>
-          ) : (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Symbol</th>
-                    <th>Bias<InfoTip term="bias" /></th>
-                    <th>Setup<InfoTip term="setup" /></th>
-                    <th className="num">Exp gap<InfoTip term="expected_gap" /></th>
-                    <th className="num">Conf<InfoTip term="confidence" /></th>
-                    <th>Catalyst<InfoTip term="catalyst" /></th>
-                    <th>Drivers<InfoTip term="drivers" /></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.picks.map((p, idx) => (
-                    <tr key={`${p.symbol}-${idx}`}>
-                      <td className="sym">
-                        <Link
-                          href={`/stock/${encodeURIComponent(
-                            p.symbol
-                          )}?date=${date}`}
-                        >
-                          {p.symbol}
-                        </Link>
-                      </td>
-                      <td>
-                        <span
-                          className={`dir ${
-                            /short|bear|down/i.test(p.bias) ? "short" : "long"
-                          }`}
-                        >
-                          {p.bias}
-                        </span>
-                      </td>
-                      <td>{p.setup}</td>
-                      <td className="num">{signed(p.expected_gap_pct)}%</td>
-                      <td className="num">{conf(p.confidence)}</td>
-                      <td>{p.catalyst}</td>
-                      <td>
-                        <div className="reasons">
-                          {p.drivers.map((d, i) => (
-                            <span className="reason-chip" key={i}>
-                              {d}
-                            </span>
-                          ))}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              {data.outlook.drivers.length > 0 && (
+                <ChipRow items={data.outlook.drivers} />
+              )}
             </div>
-          )}
+          </Section>
+
+          <Section
+            title={`Pre-open picks (${data.picks.length})`}
+            note={
+              data.meta
+                ? `Showing ${data.meta.shown} of ${data.meta.scored} scored names.`
+                : undefined
+            }
+          >
+            <DataTable
+              label="Pre-open ranked picks"
+              columns={columns}
+              rows={data.picks}
+              rowKey={(p) => p.symbol}
+              tall
+              empty={
+                <EmptyState title="No pre-open picks for this day">
+                  The 08:30 job may not have run, or nothing scored above the threshold.
+                </EmptyState>
+              }
+            />
+          </Section>
         </>
       )}
-    </div>
-  );
-}
-
-function Metric({ label, value, term }: { label: string; value: string; term?: string }) {
-  return (
-    <div className="metric">
-      <div className="metric-label">{label}{term && <InfoTip term={term} />}</div>
-      <div className="metric-value">{value}</div>
-    </div>
+    </>
   );
 }
