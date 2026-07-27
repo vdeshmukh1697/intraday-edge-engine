@@ -170,7 +170,9 @@ both the OS media-query change and the in-app toggle event.
 `web/lib/format.ts` is the **single** implementation of every number and date format:
 `inr`, `inrPrice`, `inrSigned`, `inrCompact` (lakh/crore), `pct`, `pctSigned`, `probPct`,
 `num`, `int`, `rMultiple`, `conf`, `signed`, `signCls`, `signArrow`, `parseTs`, `hhmm`,
-`hhmmss`, `dayTime`, `isoDay`, `dayLabel`, `ago`, `clock`. Pages no longer define their own.
+`hhmmss`, `dayTime`, `isoDay`, `dayLabel`, `ago`, `clock`, `countCompact`. Pages no longer
+define their own. Note `countCompact` (share counts: "3.45L") is separate from `inrCompact`
+(money: "₹3.45L") — a volume must never render with a ₹.
 
 ### DataTable — the responsive contract
 

@@ -1,5 +1,30 @@
 # Morning Handoff — live system ready for the open (updated 2026-07-12 by the P0-implementation session)
 
+## 🟢 2026-07-27 — everything landed on `feat/full-nse-realtime-pipeline`, PR #1 merged in
+The branch had drifted badly: ~32 unpushed commits locally and a collaborator's merged PR #1
+(Mayank — live price + traded volume) sitting on origin, unmerged here. All of it is now committed,
+merged and pushed; PR #2 closed as merged. Three conflicts were resolved, none of PR #1 dropped:
+`repository.py` and `test_engine.py` kept BOTH sides (`latest_ticks` alongside the portfolio and
+movers tables); `globals.css` kept OURS (his side re-added the pre-redesign stylesheet the
+2026-07-26 redesign deleted, including a global `table` rule that would fight DataTable); the two
+web pages took the redesigned versions and **ported his feature into them** — a sortable Volume
+column on /watchlist and a live price + traded-volume StatTile pair on /stock/<SYM>, both fed by his
+`GET /api/watchlist/quotes`. Live price still comes from the existing WebSocket (faster, already
+drives the sparkline); the 2s poll supplies only volume, which the price stream does not carry.
+- ⚠️ **The Volume column reads "—" until the SCHEDULER is restarted.** `latest_ticks` is written by
+  the live runner's throttled `on_tick` flush, and the scheduler process running now (16h+ uptime)
+  predates the merge, so the table is empty (0 rows). The API serves it correctly; nothing writes it
+  yet. Restart the scheduler **after the close** — not mid-session — or just let tomorrow's start
+  pick it up:
+  `launchctl kickstart -k gui/$(id -u)/com.vikrant.signal-engine-scheduler`
+- Also landed: a 30s `AbortController` bound on every dashboard fetch (a stalled tunnel used to
+  leave the promise pending forever behind a spinner with no actionable error), and `data/` +
+  `scratchpad/` are now gitignored wholesale — data/ is ~10GB of regenerable runtime state and its
+  DB sidecars kept showing up as files to commit.
+- Verified after the merge: 674 tests pass, `tsc --noEmit` clean, all 7 read endpoints 200,
+  `/api/watchlist/quotes` returns source=LIVE for 40 symbols, one `cli serve` worker, and the day
+  filter / daily-net tiles / Volume column confirmed present in the **deployed** JS bundle.
+
 ## 🟢 2026-07-27 — /paper Trade history filters by session, with that day's net result
 The evening-review question ("what did today actually cost me?") needed summing a column by eye.
 Trade history now has a **Day** picker listing only sessions that have trades (17 of them, newest
