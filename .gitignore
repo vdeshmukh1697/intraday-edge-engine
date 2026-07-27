@@ -20,15 +20,14 @@ htmlcov/
 !.env.example
 
 # Data artifacts (do not commit large/generated data)
-data/parquet/
-data/ticks/
-data/*.duckdb
-*.sqlite
-*.sqlite3
-*.db
-data/cache/
+# Everything under data/ is runtime state — the live DB and its WAL/backups, the Parquet
+# archive, caches, trained models. It is ~10GB locally; none of it belongs in the repo.
+data/
 # trained ML models (regenerate with `train`)
 data/models/
+
+# Throwaway probe scripts kept for reference, never part of the build.
+scratchpad/
 
 # Runtime logs
 logs/
