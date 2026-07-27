@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+import time as _time
 from datetime import date, datetime, time
 
 import pytz
@@ -21,17 +22,13 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, W
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
-_IST = pytz.timezone("Asia/Kolkata")
-
-from signal_engine.api.serializers import (
-    backtest_to_json,
-    chart_to_json,
-    leaderboard_to_json,
-    premarket_to_json,
-)
+from signal_engine.api import scans
+from signal_engine.api.serializers import chart_to_json, leaderboard_to_json
 from signal_engine.config import load_config
 from signal_engine.data.synthetic import bars_to_ticks, generate_session
 from signal_engine.market.calendar import NSECalendar
+
+_IST = pytz.timezone("Asia/Kolkata")
 
 _DISCLAIMER = (
     "Decision-support only. Not investment advice. No live orders are placed. "
@@ -46,100 +43,6 @@ _AUTH_TTL_S = 600
 # Cache the (expensive) real-archive leaderboard for the process; recomputing per request
 # would re-read the whole archived universe each time.
 _LEADERBOARD_CACHE: dict = {}
-_REAL_SCAN_CAP = 600  # scan at most the N most-liquid archived names (keeps it responsive)
-_MAX_LEADERBOARD = 100  # compute the ranking once at this size; requests slice [:top] from it
-                        # (must be >= the leaderboard endpoint's `top` ceiling)
-
-
-def _archive_leaderboard(cfg, top: int, news: bool):
-    """Build the leaderboard from the REAL backfilled Parquet corpus (no network).
-
-    Reads each archived symbol's latest session, derives a real liquidity snapshot, keeps the
-    most-liquid names, and runs the same Scanner used everywhere else. Returns None if the
-    archive is empty (caller falls back to synthetic)."""
-    from signal_engine.scan.real_harness import run_real_scan
-    from signal_engine.storage.bars import ParquetBarStore
-    from signal_engine.universe.nse import NSEUniverseProvider
-
-    store = ParquetBarStore(cfg.env.parquet_dir)
-    sessions, metrics = {}, {}
-    day = None
-    for sym in store.list_symbols():
-        df = store.load_latest_session(sym)
-        if df is None or df.empty:
-            continue
-        sessions[sym] = df
-        metrics[sym] = {"last_price": float(df["close"].iloc[-1]),
-                        "avg_daily_turnover_cr": float((df["close"] * df["volume"]).sum()) / 1e7}
-        day = df.index.max().date()
-    if not sessions:
-        return None
-    # Keep the most-liquid N so the deep scan stays responsive.
-    top_syms = sorted(sessions, key=lambda s: metrics[s]["avg_daily_turnover_cr"],
-                      reverse=True)[:_REAL_SCAN_CAP]
-    uni = NSEUniverseProvider([s for s in top_syms], {s: metrics[s] for s in top_syms})
-    res = run_real_scan(cfg, uni, day, top_n=top, with_news=news,
-                        intraday_fetch=lambda syms: {s: sessions[s] for s in syms if s in sessions})
-    return leaderboard_to_json(res, day)
-
-
-_LIQUID_UNIVERSE_CACHE: dict = {}
-
-
-def _liquid_universe_data(cfg, limit: int):
-    """Return (symbols, sessions) for the N most-liquid archived NSE names, ranked by the latest
-    session's rupee turnover. `sessions[sym]` is that latest session's bars — reused for real
-    prior-day momentum in the pre-market briefing (for today's briefing the prior session IS the
-    latest archived one). Cached per (corpus size, newest date, limit); None if the archive is
-    empty (caller falls back to the watchlist)."""
-    from signal_engine.storage.bars import ParquetBarStore
-
-    store = ParquetBarStore(cfg.env.parquet_dir)
-    all_syms = store.list_symbols()
-    if not all_syms:
-        return None
-    latest = None
-    for s in all_syms[:5] + all_syms[-5:]:
-        d = store.load_latest_session(s)
-        if d is not None and not d.empty:
-            dt = d.index.max().date()
-            latest = dt if latest is None or dt > latest else latest
-    ckey = (len(all_syms), str(latest), int(limit))
-    if ckey in _LIQUID_UNIVERSE_CACHE:
-        return _LIQUID_UNIVERSE_CACHE[ckey]
-
-    sessions, turnover = {}, {}
-    for sym in all_syms:
-        df = store.load_latest_session(sym)
-        if df is None or df.empty:
-            continue
-        sessions[sym] = df
-        turnover[sym] = float((df["close"] * df["volume"]).sum()) / 1e7  # ₹cr
-    if not sessions:
-        return None
-    ranked = sorted(sessions, key=lambda s: turnover.get(s, 0.0), reverse=True)[:int(limit)]
-    result = (ranked, {s: sessions[s] for s in ranked})
-    _LIQUID_UNIVERSE_CACHE.clear()
-    _LIQUID_UNIVERSE_CACHE[ckey] = result
-    return result
-
-
-def _prior_state_from_sessions(sessions: dict):
-    """Build a prior_state_fn(sym, prior_day) closure that reads real prior-session momentum from
-    already-loaded archive bars (% return + where it closed in its range). Neutral if missing."""
-    def _fn(sym: str, _prior_day) -> dict:
-        df = sessions.get(sym)
-        if df is None or df.empty:
-            return {"prev_return_pct": 0.0, "close_position": 0.5}
-        o = float(df["open"].iloc[0])
-        c = float(df["close"].iloc[-1])
-        hi = float(df["high"].max())
-        lo = float(df["low"].min())
-        return {
-            "prev_return_pct": (c / o - 1.0) * 100.0 if o else 0.0,
-            "close_position": (c - lo) / (hi - lo) if hi > lo else 0.5,
-        }
-    return _fn
 
 
 def _watchlist_sectors() -> dict:
@@ -384,23 +287,16 @@ def create_app() -> FastAPI:
         # The cache key includes the archive's symbol count, so the leaderboard auto-refreshes
         # as the backfill/gap-fill (and nightly archive) grow the corpus — no restart needed.
         # Falls back to the synthetic universe only if the archive is empty or SE_DATA_SOURCE=mock.
+        #
+        # IMPORTANT: `top` is deliberately NOT part of the cache key. The expensive part is
+        # scanning the corpus; the result is a ranked list that `top` only TRUNCATES. So we
+        # compute the full ranking ONCE (at scans._MAX_LEADERBOARD), cache it per (news, corpus,
+        # date), and slice [:top] per request.
         if cfg.env.data_source != "mock":
             from signal_engine.storage.bars import ParquetBarStore
 
             store = ParquetBarStore(cfg.env.parquet_dir)
             syms = store.list_symbols()
-            # Cache key includes the symbol count AND the newest archived session date, so the
-            # leaderboard auto-refreshes both as the corpus grows and as each new session is
-            # archived (intraday refresh or nightly). It is still the most-recent COMPLETE
-            # session, not a tick-live ranking — see /api/leaderboard docs.
-            #
-            # IMPORTANT: `top` is deliberately NOT part of the cache key. The expensive part is
-            # scanning the corpus (loading ~2k Parquet sessions, ~150s cold); the result is a
-            # ranked list that `top` only TRUNCATES. So we compute the full ranking ONCE (at
-            # _MAX_LEADERBOARD), cache it per (news, corpus, date), and slice [:top] per request.
-            # Previously `top` was in the key AND the cache was cleared on every miss, so changing
-            # the dashboard's stock-count forced a fresh ~150s scan that blew past the frontend
-            # fetch timeout — only the pre-warmed default (20) ever loaded.
             latest = None
             for s in syms[:5] + syms[-5:]:  # cheap probe of a few symbols for the newest date
                 d = store.load_latest_session(s)
@@ -409,7 +305,7 @@ def create_app() -> FastAPI:
                     latest = dt if latest is None or dt > latest else latest
             ckey = (news, len(syms), str(latest))
             if ckey not in _LEADERBOARD_CACHE:
-                real = _archive_leaderboard(cfg, _MAX_LEADERBOARD, news)
+                real = scans.archive_leaderboard(news)
                 if real is not None:
                     _LEADERBOARD_CACHE.clear()
                     _LEADERBOARD_CACHE[ckey] = real
@@ -438,49 +334,17 @@ def create_app() -> FastAPI:
     def premarket(date_str: str = Query(default=None, alias="date"), seed: int = 42,
                   top: int = Query(default=40, ge=1, le=200),
                   universe: int = Query(default=150, ge=10, le=2000)):
-        """Pre-open briefing. By default scores the `universe` most-liquid archived NSE names
-        (not just the trading watchlist) and shows the top `top` by conviction. With a real data
-        source it uses real Yahoo global cues + real RSS news + real prior-session momentum from
-        the archive; falls back to the synthetic path (and the watchlist) when the archive is
-        empty or SE_DATA_SOURCE=mock. TTL-cached per full param set (see _PREMARKET_TTL)."""
-        import time as _t
-
-        from signal_engine.factory import build_cues_provider, build_news_provider
-        from signal_engine.premarket.briefing import build_briefing
-
+        """Pre-open briefing over the most-liquid archived NSE names — see
+        ``scans.premarket_briefing``. TTL-cached per full param set (see _PREMARKET_TTL)."""
         ckey = (date_str, seed, top, universe)
         hit = _premarket_cache.get(ckey)
-        if hit and _t.time() - hit[0] < _PREMARKET_TTL:
+        if hit and _time.time() - hit[0] < _PREMARKET_TTL:
             return hit[1]
 
-        d = _parse_date(date_str)
-        symbols = None
-        cues_provider = None
-        news_provider = None
-        prior_state_fn = None
-        meta = {"universe_source": "watchlist (synthetic)", "data": "synthetic"}
-        if cfg.env.data_source != "mock":
-            liquid = _liquid_universe_data(cfg, universe)
-            if liquid is not None:
-                symbols, sessions = liquid
-                prior_state_fn = _prior_state_from_sessions(sessions)
-                cues_provider = build_cues_provider(cfg)   # real Yahoo (None if not configured)
-                news_provider = build_news_provider(cfg)   # real RSS (None if not configured)
-                meta = {
-                    "universe_source": f"{len(symbols)} most-liquid NSE names (archive)",
-                    "data": "real" if (cues_provider or news_provider) else "archive+synthetic",
-                    "cues": "yahoo" if cues_provider else "synthetic",
-                    "news": "rss" if news_provider else "synthetic",
-                }
-        briefing = build_briefing(cfg, symbols=symbols, day=d, seed=seed, top_n=top,
-                                  cues_provider=cues_provider, news_provider=news_provider,
-                                  prior_state_fn=prior_state_fn)
-        payload = premarket_to_json(briefing)
-        payload["meta"] = {**meta, "scored": len(symbols) if symbols else len(cfg.settings.watchlist),
-                           "shown": len(payload["picks"])}
+        payload = scans.premarket_briefing(_parse_date(date_str), seed, top, universe)
         if len(_premarket_cache) >= 32:      # bound the cache (params are user-controlled)
             _premarket_cache.pop(min(_premarket_cache, key=lambda k: _premarket_cache[k][0]))
-        _premarket_cache[ckey] = (_t.time(), payload)
+        _premarket_cache[ckey] = (_time.time(), payload)
         return payload
 
     @app.get("/api/backtest", dependencies=[Depends(_require_token)])
@@ -488,11 +352,8 @@ def create_app() -> FastAPI:
         start: str = Query(default=None), days: int = Query(default=10, ge=1, le=120),
         seed: int = 42,
     ):
-        from signal_engine.backtest.engine import run_backtest
-
         start_d = _parse_date(start) if start else date(2025, 6, 2)
-        res = run_backtest(cfg, cfg.settings.watchlist, start_d, days, seed=seed)
-        return backtest_to_json(res)
+        return scans.backtest(start_d, days, seed)
 
     @app.get("/api/chart/{symbol}", dependencies=[Depends(_require_token)])
     def chart(symbol: str, date_str: str = Query(default=None, alias="date"), seed: int = 42):
@@ -810,6 +671,98 @@ def create_app() -> FastAPI:
             "updated_ts": state.get("updated_ts") if state else None,
         }
 
+    @app.get("/api/microstructure", dependencies=[Depends(_require_token)])
+    def microstructure(day: str = Query(default="")):
+        """Microstructure shadow signal (order-book imbalance + volume-delta) for a session,
+        plus its next-bar directional hit rate vs the 50% coin-flip. Pure research — this
+        signal NEVER gates a trade (see signal_engine/microstructure/)."""
+        from datetime import datetime as _dt
+
+        import pytz as _pytz
+
+        from signal_engine.microstructure.store import MicrostructureStore
+
+        d = day or _dt.now(_pytz.timezone("Asia/Kolkata")).date().isoformat()
+        store = MicrostructureStore(cfg.env.db_url, read_only=True)
+        try:
+            rows = store.fetch_day(d)
+        finally:
+            store.close()
+        scored = [r for r in rows if r.get("dir_correct") is not None]
+        hits = sum(r["dir_correct"] for r in scored)
+        return {
+            "day": d, "n_signals": len(rows), "n_scored": len(scored),
+            "hit_rate": (hits / len(scored)) if scored else None, "baseline": 0.5,
+            "note": "shadow signal — logged + scored, never gates a trade",
+            "rows": rows[:1000],
+        }
+
+    @app.get("/api/movers", dependencies=[Depends(_require_token)])
+    def movers(days: int = Query(default=30, ge=1, le=120)):
+        """Movers research sleeve: daily big-move predictions + realized outcomes + running
+        scoreboard. Paper research only — measured base rates, honest labels (see
+        signal_engine/movers/). Separate from the main paper book by design."""
+        from signal_engine.storage.repository import SignalRepository
+
+        repo = SignalRepository(cfg.env.db_url, read_only=True)
+        try:
+            rows = repo.fetch_mover_predictions(limit=days * 12)
+        finally:
+            repo.close()
+        resolved = [r for r in rows if r.get("resolved_ts")]
+        hits = [r for r in resolved if r.get("hit_big5")]
+        dir_rows = [r for r in resolved if r.get("dir_correct") is not None]
+        pnl_rows = [r for r in resolved if r.get("sleeve_pnl_pct") is not None]
+        latest_day = rows[0]["for_day"] if rows else None
+        return {
+            "latest_day": latest_day,
+            "today": [r for r in rows if r["for_day"] == latest_day],
+            "history": rows,
+            "scoreboard": {
+                "n_predictions": len(rows),
+                "n_resolved": len(resolved),
+                "hit_rate_big5": (len(hits) / len(resolved)) if resolved else None,
+                "base_rate_big5": 0.0491,  # 16y unconditional panel base rate (calibrate.py)
+                "dir_accuracy": (sum(r["dir_correct"] for r in dir_rows) / len(dir_rows))
+                                if dir_rows else None,
+                "n_dir_called": len(dir_rows),
+                "sleeve_cum_pnl_pct": sum(r["sleeve_pnl_pct"] for r in pnl_rows)
+                                      if pnl_rows else 0.0,
+                "n_sleeve_trades": len(pnl_rows),
+            },
+        }
+
+    @app.get("/api/desk", dependencies=[Depends(_require_token)])
+    def desk(days: int = Query(default=60, ge=1, le=365)):
+        """Nightly quant-desk review: the gap-to-1%/day time series, the hypothesis ledger and
+        the ranked PROPOSALS. Read-only. Proposals are never auto-applied — `applied` is 0 on
+        every row the desk writes, and only a human changes that (see docs/DESK_AGENT.md)."""
+        from signal_engine.desk.ledger import DeskStore
+
+        store = DeskStore(cfg.env.db_url, read_only=True)
+        try:
+            reviews = store.fetch_reviews(limit=days)
+            gap_gated = store.fetch_gap_series("gated", limit=days)
+            gap_trailing = store.fetch_gap_series("trailing", limit=days)
+            gap_session = store.fetch_gap_series("session", limit=days)
+            hypotheses = store.fetch_hypotheses(limit=200)
+            proposals = store.fetch_proposals(limit=200)
+            priors = store.priors()
+        finally:
+            store.close()
+        return {
+            "latest_review": reviews[0] if reviews else None,
+            "reviews": reviews,
+            "gap_series": {"session": gap_session, "gated": gap_gated,
+                           "trailing": gap_trailing},
+            "hypotheses": hypotheses,
+            "proposals": proposals,
+            "priors": priors,
+            "target_daily_net_pct": 1.00,
+            "note": ("Paper book, no demonstrated edge. Every proposal is a written diff for a "
+                     "human to apply; the desk has no code path that edits config."),
+        }
+
     @app.get("/api/portfolio", dependencies=[Depends(_require_token)])
     def portfolio():
         """The paper portfolio manager: the ₹1,00,000 book's live value, cash, holdings and P&L.
@@ -954,7 +907,7 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def _prewarm_leaderboard() -> None:
         """Warm the real-archive leaderboard cache in a background thread so the first user
-        request after a restart isn't the one that pays the ~150s corpus scan. No-op for the
+        request after a restart isn't the one that pays the corpus scan. No-op for the
         synthetic universe (that path is already fast)."""
         if cfg.env.data_source == "mock":
             return
@@ -975,13 +928,13 @@ def create_app() -> FastAPI:
                         latest = dt if latest is None or dt > latest else latest
                 ckey = (True, len(syms), str(latest))  # news=True is the dashboard default
                 if ckey not in _LEADERBOARD_CACHE:
-                    real = _archive_leaderboard(cfg, _MAX_LEADERBOARD, True)
+                    real = scans.archive_leaderboard(True)
                     if real is not None:
                         _LEADERBOARD_CACHE.clear()
                         _LEADERBOARD_CACHE[ckey] = real
                 # Also warm the pre-market liquid universe (the ~2k-session load is the slow part;
                 # do it once here so the first /api/premarket request isn't the one that pays it).
-                _liquid_universe_data(cfg, 150)
+                scans.warm_liquid_universe(150)
             except Exception:  # noqa: BLE001 - pre-warm is best-effort; never block startup
                 pass
 

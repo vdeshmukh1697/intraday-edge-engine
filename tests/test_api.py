@@ -3,6 +3,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+import signal_engine.api.app as app_mod
 from signal_engine.api.app import create_app
 
 
@@ -219,16 +220,16 @@ def test_leaderboard_top_change_slices_without_rescan(tmp_path, monkeypatch):
     monkeypatch.setenv("SE_PARQUET_DIR", str(tmp_path))
 
     # Spy on the expensive scan so we can assert it runs at most once across top values.
-    import signal_engine.api.app as app_mod
+    import signal_engine.api.scans as scans
 
     calls = {"n": 0}
-    real_scan = app_mod._archive_leaderboard
+    real_scan = scans.archive_leaderboard
 
-    def _counting_scan(cfg, top, news):
+    def _counting_scan(news):
         calls["n"] += 1
-        return real_scan(cfg, top, news)
+        return real_scan(news)
 
-    monkeypatch.setattr(app_mod, "_archive_leaderboard", _counting_scan)
+    monkeypatch.setattr(scans, "archive_leaderboard", _counting_scan)
     app_mod._LEADERBOARD_CACHE.clear()  # cold cache for a deterministic count
 
     c = TestClient(create_app())
