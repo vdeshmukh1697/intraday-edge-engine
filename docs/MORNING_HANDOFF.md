@@ -14,9 +14,12 @@ drives the sparkline); the 2s poll supplies only volume, which the price stream 
 - ⚠️ **The Volume column reads "—" until the SCHEDULER is restarted.** `latest_ticks` is written by
   the live runner's throttled `on_tick` flush, and the scheduler process running now (16h+ uptime)
   predates the merge, so the table is empty (0 rows). The API serves it correctly; nothing writes it
-  yet. Restart the scheduler **after the close** — not mid-session — or just let tomorrow's start
-  pick it up:
+  yet. Restart the scheduler **after 17:45 IST** — or just let tomorrow's 09:15 start pick it up,
+  which needs no action at all:
   `launchctl kickstart -k gui/$(id -u)/com.vikrant.signal-engine-scheduler`
+  Not "after the close": six post-close jobs fire between **15:45 and 17:15** (scan 15:45, 15:50,
+  archive 16:10, alpha 16:20, movers 16:40, desk 17:15). A 15:30 restart lands on top of that chain
+  and would cost you the session archive. Deferred on 2026-07-27 for exactly this reason.
 - Also landed: a 30s `AbortController` bound on every dashboard fetch (a stalled tunnel used to
   leave the promise pending forever behind a spinner with no actionable error), and `data/` +
   `scratchpad/` are now gitignored wholesale — data/ is ~10GB of regenerable runtime state and its
