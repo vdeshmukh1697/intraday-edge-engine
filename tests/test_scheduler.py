@@ -8,7 +8,11 @@ def test_scheduler_registers_all_jobs():
     sched = build_scheduler(load_config())
     job_ids = {j.id for j in sched.get_jobs()}
     assert job_ids == {"renew_token_6", "renew_token_14", "renew_token_22",
-                       "archive_morning", "premarket", "healthcheck", "live", "scan", "archive"}
+                       "archive_morning", "premarket", "healthcheck", "live", "scan", "archive",
+                       "alpha", "movers", "movers_alert", "microstructure_score",
+                       # 17:15 nightly quant-desk review (signal_engine/desk/) — proposals only.
+                       "desk_review"}
+    assert len(job_ids) == 14
     sched.shutdown(wait=False) if sched.running else None
 
 
@@ -23,6 +27,9 @@ def test_jobs_skip_non_trading_day(monkeypatch):
     s.premarket_job(load_config())
     s.scan_job(load_config())
     s.archive_job(load_config())
+    # The 17:15 desk review must also no-op: reviewing a day with no session is exactly the
+    # dead-session case the review is built to refuse, and a holiday needs no Telegram digest.
+    s.desk_review_job(load_config())
 
 
 def test_renew_token_retries_next_totp_window(monkeypatch):

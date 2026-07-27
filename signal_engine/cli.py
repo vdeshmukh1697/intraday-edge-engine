@@ -662,6 +662,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # Prefer IPv4 before any network I/O: dual-stack Dhan hosts hang in SYN_SENT on
+    # broken-IPv6 networks (hotspot), which froze the scheduler+live feed on 2026-07-13.
+    # Safe no-op on healthy networks; disable with SE_PREFER_IPV4=0. See signal_engine/net.py.
+    from signal_engine.net import prefer_ipv4
+
+    prefer_ipv4()
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)

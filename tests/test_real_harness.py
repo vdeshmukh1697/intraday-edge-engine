@@ -39,6 +39,11 @@ def _fake_intraday(symbols):
 
 def test_run_real_scan_screens_then_ranks():
     cfg = load_config()
+    # Friction gates are calibrated/tested in test_risk + test_engine; THIS test targets
+    # scan/dataset mechanics, so neutralize the V3 slippage add-on and the P0 friction-in-R
+    # gate to keep the synthetic setups surfacing (charges-only hurdle, as pre-2026-07-07).
+    cfg.risk.costs.slippage_scalar = 0.0
+    cfg.risk.risk.max_cost_r = 0.0
     res = run_real_scan(cfg, _universe(), DAY, with_news=False,
                         intraday_fetch=_fake_intraday)
     # Universe size is reported against the FULL universe, not just survivors.
@@ -51,6 +56,11 @@ def test_run_real_scan_screens_then_ranks():
 
 def test_run_real_scan_only_fetches_survivors():
     cfg = load_config()
+    # Friction gates are calibrated/tested in test_risk + test_engine; THIS test targets
+    # scan/dataset mechanics, so neutralize the V3 slippage add-on and the P0 friction-in-R
+    # gate to keep the synthetic setups surfacing (charges-only hurdle, as pre-2026-07-07).
+    cfg.risk.costs.slippage_scalar = 0.0
+    cfg.risk.risk.max_cost_r = 0.0
     requested = []
 
     def spy_fetch(symbols):
@@ -65,6 +75,11 @@ def test_run_real_scan_only_fetches_survivors():
 
 def test_run_real_scan_respects_as_of_cutoff():
     cfg = load_config()
+    # Friction gates are calibrated/tested in test_risk + test_engine; THIS test targets
+    # scan/dataset mechanics, so neutralize the V3 slippage add-on and the P0 friction-in-R
+    # gate to keep the synthetic setups surfacing (charges-only hurdle, as pre-2026-07-07).
+    cfg.risk.costs.slippage_scalar = 0.0
+    cfg.risk.risk.max_cost_r = 0.0
     res = run_real_scan(cfg, _universe(), DAY, as_of=time(10, 0),
                         with_news=False, intraday_fetch=_fake_intraday)
     # With a 10:00 cutoff the scan still runs on the truncated history.

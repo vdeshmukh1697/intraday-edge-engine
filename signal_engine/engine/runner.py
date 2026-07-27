@@ -143,8 +143,21 @@ class EngineRunner:
         # Live re-rating advisor (set on the live() path). None elsewhere -> no behaviour change
         # for replay/backtest, so they stay deterministic.
         self.advisor = None
+        # Microstructure shadow collector (order-book imbalance + volume-delta). Set on the
+        # live() path only; None everywhere else. Pure observability — logged + scored, never
+        # gates a trade. See signal_engine/microstructure/.
+        self._micro = None
 
+        # Two cost models with DIFFERENT slippage semantics (V3 regression fix, 2026-07-07):
+        # - cost_model (charges only) feeds the PaperTrader and the ₹ ledger: the trader applies
+        #   slippage adversely to BOTH fills, so its net subtraction must be statutory charges
+        #   only — folding slippage in here would double-count it.
+        # - gate_cost_model (charges + round-trip slippage) feeds plan BUILDING: a plan's true
+        #   friction includes the slippage its fills WILL pay — what the V3 edge-after-cost
+        #   comment in risk.yaml promised and what the P0 friction-in-R gate (max_cost_r)
+        #   prices. Without this, gates priced friction at ~8bps vs the ~14bps fills realize.
         self.cost_model = CostModel(cfg.risk.costs)
+        self.gate_cost_model = CostModel(cfg.risk.costs, cfg.risk.slippage)
         self.risk_manager = RiskManager(cfg.risk.risk)
         # Portfolio book (PORTFOLIO §4): the ONE ₹1,00,000 paper book. Built only with a repo
         # (live / replay-with-repo); without one the ledger stays None and every ledger hook
@@ -227,6 +240,8 @@ class EngineRunner:
                     self._alert(msg, "signal", meta={"kind": "advice", "symbol": tick.symbol})
             except Exception:  # noqa: BLE001 - price probe must never break the feed
                 pass
+        if self._micro is not None:
+            self._micro.on_tick(tick)  # shadow: buffer the tick for its 1-min bar signal
         agg = self._aggs.get(tick.symbol)
         if agg is None:
             agg = self._aggs[tick.symbol] = BarAggregator(tick.symbol, 1)
@@ -244,6 +259,9 @@ class EngineRunner:
     # -- core per-bar logic -------------------------------------------------
     def on_closed_bar(self, bar: Bar) -> None:
         self.summary.bars_processed += 1
+
+        if self._micro is not None:
+            self._micro.on_bar_close(bar)  # shadow: compute + persist this bar's signal
 
         # D1b: as soon as the event-time MINUTE advances, the previous minute's collection of
         # qualified candidates is complete — rank it and open the top-N. Doing this at the TOP
@@ -325,7 +343,7 @@ class EngineRunner:
             params=self.params,
         )
         signal = self.strategy.on_bar(ctx)
-        plan = self.risk_manager.build_trade_plan(signal, features, self.cost_model) if signal else None
+        plan = self.risk_manager.build_trade_plan(signal, features, self.gate_cost_model) if signal else None
         if plan is not None and self.ml_scorer is not None and self.ml_gate > 0.0:
             from signal_engine.ml.features import build_matrix
             prob = float(self.ml_scorer.score_matrix(build_matrix([features]))[0]) / 100.0
@@ -577,8 +595,9 @@ class EngineRunner:
         """D4 alert content + the ₹-book position + a plain-English 'Why:' line (PORTFOLIO §6).
 
         ``qty`` is the shares the book actually deploys (affordability-capped in ``_surface``);
-        when absent (no-ledger paths) it falls back to the reference sizing. Conviction is labelled
-        "conf" — never "win-rate" — and any ML score is surfaced elsewhere as "model score"."""
+        when absent (no-ledger paths) it falls back to the reference sizing. The rule score is
+        labelled "rule score (uncalibrated)" (P2, STRATEGY_IMPROVEMENT_PLAN_2026-07: three reviews
+        found it non-predictive) — never "conf"/"win-rate"; ML surfaces elsewhere as "model score"."""
         equity = self._book_equity()
         size = size_plan(plan, self.cfg.risk.risk, capital=equity)
         q = int(size["qty"] if qty is None else qty)
@@ -596,7 +615,7 @@ class EngineRunner:
             f"SL {plan.stop_loss:.2f} (-{plan.stop_pct:.2f}%) "
             f"T1 {tgt} (key level {plan.t1:.2f}) "
             f"exp move {plan.expected_move_pct:.2f}% R:R {plan.risk_reward:.2f} "
-            f"conf {plan.confidence:.0f}{qty_part}{reasons}"
+            f"rule score {plan.confidence:.0f} (uncalibrated){qty_part}{reasons}"
         )
         return head + "\nWhy: " + explain_entry(plan, q, notional, equity)
 
@@ -806,6 +825,22 @@ class EngineRunner:
             except Exception:  # noqa: BLE001
                 self.log.exception("ledger rebuild after warm-start failed")
 
+        # Microstructure shadow collector (live only, config-gated, needs a repo/db to log to).
+        # Guarded construction: a failure here must never stop the live session starting.
+        if self.repo is not None and getattr(self.cfg.env, "microstructure_shadow", False):
+            try:
+                from signal_engine.microstructure.collector import MicrostructureCollector
+                from signal_engine.microstructure.store import MicrostructureStore
+
+                self._micro = MicrostructureCollector(
+                    MicrostructureStore(self.cfg.env.db_url, run_id=getattr(self.repo, "run_id", None)))
+                self.log.info("microstructure shadow: ON (feed_mode=%s) — logging order-book/"
+                              "volume-delta signals, never gating",
+                              getattr(self.cfg.env, "dhan_feed_mode", "quote"))
+            except Exception:  # noqa: BLE001
+                self._micro = None
+                self.log.exception("microstructure shadow init failed — continuing without it")
+
         self.enforce_freshness = True  # live feed: activate the stale-data fail-safe (§9.3)
         self.broker.subscribe(symbols)
         self.broker.set_tick_callback(self.on_tick)
@@ -815,6 +850,21 @@ class EngineRunner:
 
         self.log.info("live feed starting for %d symbols", len(symbols))
         self.broker.run(stop=_market_closed)
+
+        # 2026-07-13 hardening: broker.run returning BEFORE the close means the feed died
+        # (gave up reconnecting / fatal transport). Say so loudly — the scheduler's live_job
+        # relaunches a fresh runner (warm-start re-derives today), so this is recoverable —
+        # but it must never again be silent.
+        if not _market_closed():
+            self.log.error("live feed ended before market close — feed died")
+            try:
+                from signal_engine.alerts import send_alert
+                send_alert(self.alerter,
+                           "Live feed ended before market close — restarting automatically "
+                           "(positions are safe; warm-start re-derives today's state).",
+                           level="warning")
+            except Exception:  # noqa: BLE001 - alerting must not break the shutdown path
+                pass
 
         for agg in self._aggs.values():
             last = agg.flush()

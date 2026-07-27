@@ -173,6 +173,13 @@ class RiskManager:
             return None
         if expected_move_pct < r.edge_cost_multiple * cost_to_break_even_pct:
             return None
+        # P0 friction-in-R gate (docs/STRATEGY_IMPROVEMENT_PLAN_2026-07.md §2-§3): the edge gate
+        # above bounds the reward side; this bounds friction against the RISK unit. A stop narrower
+        # than cost/max_cost_r pays that fraction of 1R in charges+slippage before the market
+        # moves (median live stop 0.37% paid ~0.46R). max_cost_r == 0 disables (legacy behavior).
+        max_cost_r = _getf(r, "max_cost_r", 0.0)
+        if max_cost_r > 0 and stop_pct > 0 and cost_to_break_even_pct / stop_pct > max_cost_r:
+            return None
 
         time_validity = signal.ts + timedelta(minutes=r.max_hold_minutes)
 

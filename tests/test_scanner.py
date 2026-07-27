@@ -11,6 +11,11 @@ _DAY = date(2025, 6, 23)  # Monday, trading day
 
 def _scan(seed=42, n=400, top=20):
     cfg = load_config()
+    # Friction gates are calibrated/tested in test_risk + test_engine; THIS test targets
+    # scan/dataset mechanics, so neutralize the V3 slippage add-on and the P0 friction-in-R
+    # gate to keep the synthetic setups surfacing (charges-only hurdle, as pre-2026-07-07).
+    cfg.risk.costs.slippage_scalar = 0.0
+    cfg.risk.risk.max_cost_r = 0.0
     uni = MockUniverseProvider(n=n, seed=seed)
     return run_scan(cfg, uni, _DAY, as_of=time(11, 0), seed=seed, top_n=top)
 

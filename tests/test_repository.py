@@ -74,6 +74,22 @@ def test_save_position_tags_run_id():
     repo.close()
 
 
+def test_save_position_persists_cost_identity_columns():
+    """P3.1 (STRATEGY_IMPROVEMENT_PLAN_2026-07): pnl_pct_gross/cost_pct persist on every closed
+    trade; a legacy position object (fields unset) persists NULL without erroring."""
+    repo = SignalRepository("sqlite:///:memory:")
+    pos = _position()
+    pos.pnl_pct_gross = 1.38
+    pos.cost_pct = 0.18
+    repo.save_position(pos)
+    (row,) = repo.fetch_trades()
+    assert abs(row["pnl_pct_gross"] - 1.38) < 1e-9
+    assert abs(row["cost_pct"] - 0.18) < 1e-9
+    # alpha columns exist from the migration (P3.2 resolver fills them later), default NULL.
+    assert row["alpha_pct"] is None and row["nifty_ret_pct"] is None
+    repo.close()
+
+
 def test_default_run_id_used_when_none_passed():
     repo = SignalRepository("sqlite:///:memory:")
     repo.save_plan(_plan())

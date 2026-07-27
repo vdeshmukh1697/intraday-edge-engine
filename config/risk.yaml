@@ -28,6 +28,16 @@ risk:
   # 4.0 -> 3.0 so the gate stays a sane rejection filter rather than rejecting everything.
   edge_cost_multiple: 3.0       # k — only trade when the target is clear of (cost + slippage)
 
+  # P0 friction-in-R gate (8-session review 2026-07-07, docs/STRATEGY_IMPROVEMENT_PLAN_2026-07.md).
+  # edge_cost_multiple bounds the REWARD side; this bounds friction against the RISK unit: reject
+  # when (charges+slippage)% / stop% > max_cost_r. Retro: stops <0.5% (n=92) held the ENTIRE book
+  # loss (sumR -38.1, ~0.3-0.5R friction/trade); stops >=0.5% (n=44, 23 symbols, both halves,
+  # ex-OLAELEC p=0.003) summed +11.5R. ENABLED per the pre-registered plan; the claim defended is
+  # "remove mechanically negative-EV trades", not "the remainder is profitable". Evidence bar at
+  # session ~18: cost share of |gross| < 40% AND book net >= 0, else the verdict is on the signal.
+  # 0.25 => stop must span >= 4x round-trip friction (~0.6% at current ~15bps). 0 == off.
+  max_cost_r: 0.25
+
   # Time stop (PLAN §5.2)
   max_hold_minutes: 90
 

@@ -81,6 +81,13 @@ class RiskParams(BaseModel):
     max_entries_per_minute: int = 0          # cap NEW entries opened in one event-minute (0 => top_n governs)
     max_entries_per_symbol_per_day: int = 0  # cap entries per symbol per day (0 => only 1-open + cooldown apply)
 
+    # P0 friction-in-R gate (8-session review, docs/STRATEGY_IMPROVEMENT_PLAN_2026-07.md §2-§3).
+    # Reject a plan when round-trip friction (cost_to_break_even_pct = charges + slippage) would
+    # consume more than this fraction of 1R (the stop distance). edge_cost_multiple bounds the
+    # REWARD side (target vs cost); nothing bounded cost against the RISK unit, so a 0.35%-stop
+    # trade passed every gate while paying ~0.46R friction per attempt. 0 == OFF.
+    max_cost_r: float = 0.0                  # e.g. 0.25 => stop must span >= 4x round-trip cost
+
     # Targets / exits (PLAN §5.2) — structure-aware exit construction.
     hard_floor_pct: float = 0.20          # safety stop floor, decoupled from target sizing
     target_atr_multiple: float = 2.0      # vol target = target_atr_multiple * atr_pct
@@ -211,6 +218,19 @@ def refresh_runtime_env(path: Optional[Path] = None) -> dict:
 class EnvConfig(BaseModel):
     data_source: str = "mock"            # "mock" | "yahoo_nse" | "angelone" | "dhan"
     news_source: str = "mock"            # "mock" | "rss" (rss = live current headlines)
+    # Public Telegram channels to ingest as UNVERIFIED tip-news (comma-separated handles,
+    # e.g. "starbhainews"). Empty = off. Items carry source "telegram:<handle>" so every
+    # surface can tell tip-channel posts from wire news; the movers sleeve MEASURES their
+    # mention->outcome hit rate before any weight is given (SPIKE_HUNTER honesty rules).
+    news_telegram_channels: str = ""
+    # Dhan live feed mode: "quote" (LTP+volume, cheap) or "full" (adds best bid/ask depth,
+    # ~3x bandwidth). FULL powers the order-book-imbalance shadow signal; on a flaky hotspot
+    # keep "quote" (the volume-delta/CVD shadow works in quote mode anyway).
+    dhan_feed_mode: str = "quote"
+    # Microstructure shadow signal (signal_engine/microstructure/): log per-bar order-book +
+    # volume-delta directional reads during live and SCORE them vs the next bar — NEVER gates
+    # a trade. Pure observability, so ON by default; SE_MICROSTRUCTURE_SHADOW=0 disables.
+    microstructure_shadow: bool = True
     cues_source: str = "mock"            # "mock" | "yahoo" (yahoo = live yfinance cues)
     allow_live_orders: bool = False      # safety switch; live orders are NOT implemented
     alerter: str = "console"             # "console" | "telegram" | "whatsapp" | "callmebot"
@@ -243,6 +263,9 @@ class EnvConfig(BaseModel):
         return cls(
             data_source=os.getenv("SE_DATA_SOURCE", "mock"),
             news_source=os.getenv("SE_NEWS_SOURCE", "mock"),
+            news_telegram_channels=os.getenv("SE_NEWS_TELEGRAM_CHANNELS", ""),
+            dhan_feed_mode=os.getenv("SE_DHAN_FEED_MODE", "quote"),
+            microstructure_shadow=os.getenv("SE_MICROSTRUCTURE_SHADOW", "1") != "0",
             cues_source=os.getenv("SE_CUES_SOURCE", "mock"),
             allow_live_orders=_bool(os.getenv("SE_ALLOW_LIVE_ORDERS", "false")),
             alerter=os.getenv("SE_ALERTER", "console"),

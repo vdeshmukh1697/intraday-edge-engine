@@ -27,6 +27,11 @@ class Tick:
     volume: int           # cumulative traded volume for the day
     bid: Optional[float] = None
     ask: Optional[float] = None
+    # Best-bid / best-ask QUANTITIES (top-of-book depth) — only present in Dhan FULL feed
+    # mode; None in TICKER/QUOTE. Feed the order-book-imbalance shadow signal
+    # (signal_engine/microstructure/). Kept Optional so QUOTE-mode ticks are unchanged.
+    bid_qty: Optional[int] = None
+    ask_qty: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +126,12 @@ class PaperPosition:
     exit_ts: Optional[datetime] = None
     exit_reason: ExitReason = ExitReason.OPEN
     pnl_pct_net: Optional[float] = None      # net-of-cost % return on the move
+    # Cost decomposition (P3.1, STRATEGY_IMPROVEMENT_PLAN_2026-07): the cost identity
+    # (gross - cost == net) is the book's most important number, so both sides persist on
+    # EVERY closed trade — not just ledger-sized ones. pnl_pct_gross is the raw fill-to-fill
+    # move; cost_pct is what the trader subtracted (charges + round-trip slippage %).
+    pnl_pct_gross: Optional[float] = None    # fill-to-fill % move before costs
+    cost_pct: Optional[float] = None         # round-trip friction % (breakeven_pct at entry)
     r_multiple: Optional[float] = None       # realized R (pnl / risk)
     hold_minutes: Optional[float] = None
     won: Optional[bool] = None               # reached T1 before stop?

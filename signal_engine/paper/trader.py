@@ -171,7 +171,10 @@ class PaperTrader:
 
         sign = pos.direction.sign
         gross_pct = sign * (exit_fill - pos.entry_fill) / pos.entry_fill * 100
-        pos.pnl_pct_net = gross_pct - self.cost_model.breakeven_pct(pos.entry_fill)
+        cost_pct = self.cost_model.breakeven_pct(pos.entry_fill)
+        pos.pnl_pct_gross = gross_pct
+        pos.cost_pct = cost_pct
+        pos.pnl_pct_net = gross_pct - cost_pct
         pos.r_multiple = pos.pnl_pct_net / pos.plan.stop_pct
         pos.won = (exit_reason == ExitReason.TARGET)
         pos.hold_minutes = (exit_ts - pos.entry_ts).total_seconds() / 60.0

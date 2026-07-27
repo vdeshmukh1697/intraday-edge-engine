@@ -153,7 +153,39 @@ def live_job(cfg: Optional[AppConfig] = None) -> None:
         from signal_engine.storage.repository import SignalRepository
         from signal_engine.strategies.base import create_strategy
 
-        broker = build_broker(cfg, day=_today())
+        # 2026-07-17 hardening: build_broker fetches the Dhan instrument master over the
+        # network. A TRANSIENT DNS/connectivity blip at exactly 09:15 (common on a just-woken
+        # laptop / network switch) used to throw here and kill the WHOLE day's live session with
+        # no retry — the failure that lost 2026-07-17. Retry with backoff (~15 min) so a morning
+        # hiccup self-heals, and if it truly can't start, ALERT the user instead of dying silently.
+        import time as _t
+
+        broker = None
+        for _attempt in range(1, 13):
+            try:
+                broker = build_broker(cfg, day=_today())
+                if _attempt > 1:
+                    _log.info("live_job: broker built on retry %d", _attempt)
+                break
+            except Exception as _exc:  # noqa: BLE001 - transient network at the open
+                _wait = min(30 * _attempt, 90)
+                _log.warning("live_job: broker build failed (%d/12): %s — retry in %ds",
+                             _attempt, _exc, _wait)
+                try:
+                    refresh_runtime_env()  # pick up a token the renew job may have just written
+                except Exception:  # noqa: BLE001
+                    pass
+                _t.sleep(_wait)
+        if broker is None:
+            _log.error("live_job: broker unbuildable after retries — no live session today")
+            try:
+                send_alert(build_alerter(cfg),
+                           "⚠️ Live session could NOT start (network unreachable at the open, "
+                           "after ~15 min of retries). If the network is back, recover manually: "
+                           "scripts/live_ipv4.py live --persist", level="warning")
+            except Exception:  # noqa: BLE001
+                pass
+            return
         strategy = create_strategy(cfg.settings.strategy.active, cfg.settings.strategy.params)
         session = MarketSession(cfg.settings.market, cal)
         # Persist every live paper trade so the Paper-Trading tracker accumulates real history.
@@ -164,9 +196,35 @@ def live_job(cfg: Optional[AppConfig] = None) -> None:
             _log.info("live_job: universe gate ON — trading %d of %d watchlist names",
                       len(symbols), len(cfg.settings.watchlist))
         _log.info("live_job: streaming Dhan feed for %d symbols until close", len(symbols))
-        summary = runner.live(symbols)
-        _log.info("live_job done: %d bars, %d picks, %d paper trades (persisted)",
-                  summary.bars_processed, len(summary.picks), len(summary.closed))
+        # 2026-07-13 hardening: if the feed dies mid-session (runner.live returns while the
+        # market is still open), rebuild a FRESH broker+runner and go again — warm-start
+        # re-derives today as the single source of truth, so a relaunch is always safe.
+        # Bounded attempts guard against a hard-down day burning the loop forever.
+        import time as _t
+
+        from datetime import datetime as _dt
+
+        import pytz as _pytz
+
+        _ist = _pytz.timezone("Asia/Kolkata")
+        attempts = 0
+        while True:
+            summary = runner.live(symbols)
+            _log.info("live_job leg done: %d bars, %d picks, %d paper trades (persisted)",
+                      summary.bars_processed, len(summary.picks), len(summary.closed))
+            now = _dt.now(_ist)
+            if now.hour > 15 or (now.hour == 15 and now.minute >= 30):
+                break  # normal end: session closed
+            attempts += 1
+            if attempts > 8:
+                _log.error("live_job: feed died %d times before close — giving up for today",
+                           attempts)
+                break
+            _log.warning("live_job: feed ended early (%s IST) — relaunch %d/8 in 30s",
+                         now.strftime("%H:%M"), attempts)
+            _t.sleep(30)
+            broker = build_broker(cfg, day=_today())  # fresh WS + token re-read
+            runner = EngineRunner(cfg, broker, strategy, session, build_alerter(cfg), repo=repo)
     except Exception as exc:  # noqa: BLE001
         _log.error("live_job failed: %s", exc)
     finally:
@@ -363,6 +421,165 @@ def archive_job(cfg: AppConfig, limit: Optional[int] = None) -> None:
         _log.error("archive_job failed: %s", exc)
 
 
+def alpha_job(cfg: Optional[AppConfig] = None) -> None:
+    """Resolve alpha-vs-NIFTY on the day's closed paper trades (P3.2, 16:20 IST).
+
+    Self-healing: processes EVERY session with unresolved trades (not just today), so a
+    missed run catches up tomorrow while Yahoo's ~30-day 1m window lasts. Best-effort and
+    guarded — an outage leaves rows NULL for the next run; it never kills the scheduler."""
+    cal = NSECalendar()
+    if not cal.is_trading_day(_today()):
+        return
+    try:
+        from signal_engine.analytics.alpha import resolve_all
+
+        if cfg is None:
+            cfg = load_config()
+        from signal_engine.storage.repository import _path_from_url
+
+        results = resolve_all(_path_from_url(cfg.env.db_url))
+        done = {d: r for d, r in results.items() if r != (0, -1)}
+        failed = [d for d, r in results.items() if r == (0, -1)]
+        _log.info("alpha_job resolved %s%s", done or "nothing pending",
+                  f" (fetch failed: {failed})" if failed else "")
+    except Exception as exc:  # noqa: BLE001
+        _log.error("alpha_job failed: %s", exc)
+
+
+def microstructure_score_job(cfg: Optional[AppConfig] = None) -> None:
+    """Score the day's microstructure shadow signal (order-book imbalance + volume-delta) vs
+    the next bar's direction. Pure measurement — the signal NEVER gates a trade; this just
+    records whether it predicted anything (hit rate vs 50%). Runs after the 15:30 close."""
+    cal = NSECalendar()
+    if not cal.is_trading_day(_today()):
+        return
+    try:
+        from signal_engine.microstructure.scorer import score_day
+        from signal_engine.microstructure.store import MicrostructureStore
+
+        if cfg is None:
+            cfg = load_config()
+        store = MicrostructureStore(cfg.env.db_url)
+        try:
+            res = score_day(store, _today().isoformat())
+        finally:
+            store.close()
+        _log.info("microstructure_score_job: %s", res)
+    except Exception as exc:  # noqa: BLE001
+        _log.error("microstructure_score_job failed: %s", exc)
+
+
+def movers_job(cfg: Optional[AppConfig] = None) -> None:
+    """Movers research sleeve (16:40 IST): resolve today's predictions against the archived
+    bars, then predict tomorrow's big movers and alert the top picks (paper research only —
+    measured base rates, honest labels; see signal_engine/movers/)."""
+    cal = NSECalendar()
+    if not cal.is_trading_day(_today()):
+        return
+    try:
+        from signal_engine.movers.sleeve import predict_for_next_day, resolve_pending
+        from signal_engine.risk.costs import CostModel
+        from signal_engine.storage.bars import ParquetBarStore
+        from signal_engine.storage.repository import SignalRepository
+
+        if cfg is None:
+            cfg = load_config()
+        repo = SignalRepository(cfg.env.db_url)
+        try:
+            store = ParquetBarStore(cfg.env.parquet_dir)
+            cost_pct = CostModel(cfg.risk.costs, cfg.risk.slippage).breakeven_pct(1000.0)
+            # Self-healing sweep: resolve TODAY plus any older still-unscored predictions
+            # (thin names missing from the archive, a missed job, a slept machine) so the
+            # movers track record is gapless — not just whatever happened to price tonight.
+            stats = resolve_pending(repo, store, cost_pct, _today())
+            news_items = None
+            channels = [c for c in (cfg.env.news_telegram_channels or "").split(",")
+                        if c.strip()]
+            if channels:
+                try:
+                    from signal_engine.news.telegram_channel import TelegramChannelProvider
+
+                    news_items = TelegramChannelProvider(channels).fetch()
+                except Exception:  # noqa: BLE001 - tip feed is optional, never blocks
+                    _log.warning("movers_job: telegram channel fetch failed", exc_info=True)
+            preds = predict_for_next_day(repo, store, cal, _today(), news_items=news_items)
+            # The ALERT is sent pre-open by movers_alert_job (08:50) so it lands when it is
+            # actionable, not the evening before. Here we only compute + persist + log.
+            _log.info("movers_job: resolved %s, predicted %d for next session (alert at 08:50)",
+                      stats, len(preds))
+        finally:
+            repo.close()
+    except Exception as exc:  # noqa: BLE001
+        _log.error("movers_job failed: %s", exc)
+
+
+def movers_alert_job(cfg: Optional[AppConfig] = None) -> None:
+    """Pre-open (08:50 IST): send TODAY's big-movers watchlist to Telegram — the predictions
+    computed at 16:40 the prior session — so it reaches the user minutes before the 09:15 open
+    (when it is actionable), not the evening before. Read-only: it does not recompute anything."""
+    cal = NSECalendar()
+    if not cal.is_trading_day(_today()):
+        return
+    try:
+        from signal_engine.movers.sleeve import format_alert
+        from signal_engine.storage.repository import SignalRepository
+
+        if cfg is None:
+            cfg = load_config()
+        repo = SignalRepository(cfg.env.db_url)
+        try:
+            preds = repo.fetch_mover_predictions(for_day=_today().isoformat())
+        finally:
+            repo.close()
+        if not preds:
+            _log.warning("movers_alert_job: no predictions for %s — did 16:40 movers_job run?",
+                         _today())
+            return
+        send_alert(build_alerter_cached(cfg), format_alert(preds), level="info")
+        _log.info("movers_alert_job: sent pre-open watchlist (%d names) for %s",
+                  len(preds), _today())
+    except Exception as exc:  # noqa: BLE001
+        _log.error("movers_alert_job failed: %s", exc)
+
+
+def desk_review_job(cfg: Optional[AppConfig] = None) -> None:
+    """Nightly quant-desk review (17:15 IST) — forensic analysis of today's paper session.
+
+    Runs after archive (16:10), alpha (16:20) and movers (16:40) so the bar archive and the
+    benchmark-adjusted columns are already in place. Fully deterministic by default: no LLM call
+    unless SE_DESK_LLM=1, so this job can never surprise-bill or fail on an API outage.
+
+    **The desk writes proposals; it NEVER applies a config or strategy change** (see
+    signal_engine/desk/__init__.py and docs/DESK_AGENT.md). It refuses to draw conclusions from a
+    dead session, and the Telegram digest is deliberately honest — no "profit tomorrow" language.
+    Guarded like every other job: a failure here can never kill the scheduler.
+    """
+    cal = NSECalendar()
+    if not cal.is_trading_day(_today()):
+        return
+    try:
+        from signal_engine.desk.review import run_review
+
+        if cfg is None:
+            cfg = load_config()
+        review = run_review(day=_today().isoformat(), cfg=cfg)
+        send_alert(build_alerter_cached(cfg), review.digest, level="info",
+                   meta={"kind": "advice", "strategy": "desk_review",
+                         "reason_plain": review.digest})
+        _log.info("desk_review_job: %s (integrity=%s, %d trades, %d findings, %d proposals) -> %s",
+                  _today(), review.facts.integrity.verdict, review.facts.n_trades,
+                  len(review.attribution.findings), len(review.proposal_ids),
+                  review.report_path)
+    except Exception as exc:  # noqa: BLE001
+        _log.error("desk_review_job failed: %s", exc)
+
+
+def build_alerter_cached(cfg: AppConfig):
+    from signal_engine.factory import build_alerter
+
+    return build_alerter(cfg)
+
+
 def build_scheduler(cfg: AppConfig):
     """Build (but do not start) the scheduler with all jobs registered.
 
@@ -398,6 +615,10 @@ def build_scheduler(cfg: AppConfig):
     # Pre-open self-check + Telegram alert (token/feed health, self-heals token) before the 09:15 open.
     sched.add_job(healthcheck_job, CronTrigger(day_of_week="mon-fri", hour=8, minute=45, timezone=IST),
                   id="healthcheck", replace_existing=True, misfire_grace_time=1800, coalesce=True)
+    # Movers watchlist ALERT at pre-open (predictions computed 16:40 prior session) so it lands
+    # ~25 min before the 09:15 open, when it is actionable rather than the evening before.
+    sched.add_job(movers_alert_job, CronTrigger(day_of_week="mon-fri", hour=8, minute=50, timezone=IST),
+                  args=[cfg], id="movers_alert", replace_existing=True)
     # Live intraday feed: blocks one worker for the whole session. Generous misfire grace +
     # coalesce so a slightly late start (e.g. scheduler restart) still launches the session.
     sched.add_job(live_job, CronTrigger(day_of_week="mon-fri", hour=9, minute=15, timezone=IST),
@@ -407,6 +628,23 @@ def build_scheduler(cfg: AppConfig):
                   args=[cfg], id="scan", replace_existing=True)
     sched.add_job(archive_job, CronTrigger(day_of_week="mon-fri", hour=16, minute=10, timezone=IST),
                   args=[cfg], id="archive", replace_existing=True)
+    # P3.2: benchmark-adjusted outcomes after the archive lands (needs the session closed).
+    sched.add_job(alpha_job, CronTrigger(day_of_week="mon-fri", hour=16, minute=20, timezone=IST),
+                  args=[cfg], id="alpha", replace_existing=True)
+    # Movers research sleeve: resolve + predict + alert after the archive (16:10) lands.
+    sched.add_job(movers_job, CronTrigger(day_of_week="mon-fri", hour=16, minute=40, timezone=IST),
+                  args=[cfg], id="movers", replace_existing=True)
+    # Nightly quant-desk review: LAST job of the day (17:15) so the archive (16:10), alpha
+    # (16:20) and movers (16:40) data it reads are all already written. Deterministic; proposals
+    # only — it never applies a config change (docs/DESK_AGENT.md).
+    sched.add_job(desk_review_job,
+                  CronTrigger(day_of_week="mon-fri", hour=17, minute=15, timezone=IST),
+                  args=[cfg], id="desk_review", replace_existing=True,
+                  misfire_grace_time=3600, coalesce=True)
+    # Microstructure shadow signal scoring (order-book/volume-delta) — after the 15:30 close.
+    sched.add_job(microstructure_score_job,
+                  CronTrigger(day_of_week="mon-fri", hour=15, minute=50, timezone=IST),
+                  args=[cfg], id="microstructure_score", replace_existing=True)
     return sched
 
 

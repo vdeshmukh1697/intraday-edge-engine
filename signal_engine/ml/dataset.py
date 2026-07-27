@@ -199,7 +199,9 @@ def build_dataset(
     params = dict(cfg.settings.strategy.params)
     strategy = create_strategy(cfg.settings.strategy.active, params)
     risk = RiskManager(cfg.risk.risk)
-    cost = CostModel(cfg.risk.costs)
+    # Slippage-inclusive so dataset labels see the same gate friction as the live engine
+    # (V3 parity, 2026-07-07). ML is shadow-mode; labels regenerate on next retrain.
+    cost = CostModel(cfg.risk.costs, cfg.risk.slippage)
     max_hold = int(cfg.risk.risk.max_hold_minutes)
     min_bars = 35
 
@@ -247,7 +249,9 @@ def build_dataset_from_archive(
     params = dict(cfg.settings.strategy.params)
     strategy = create_strategy(cfg.settings.strategy.active, params)
     risk = RiskManager(cfg.risk.risk)
-    cost = CostModel(cfg.risk.costs)
+    # Slippage-inclusive so dataset labels see the same gate friction as the live engine
+    # (V3 parity, 2026-07-07). ML is shadow-mode; labels regenerate on next retrain.
+    cost = CostModel(cfg.risk.costs, cfg.risk.slippage)
     max_hold = int(cfg.risk.risk.max_hold_minutes)
     min_bars = 35
 

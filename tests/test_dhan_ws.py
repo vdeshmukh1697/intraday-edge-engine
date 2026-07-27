@@ -202,3 +202,95 @@ def test_no_tick_tap_default_is_off():
     dhan_ws.run_feed("wss://x", [], resolve=RESOLVE, on_tick=delivered.append,
                      ws_factory=lambda url: fake)
     assert [t.symbol for t in delivered] == ["RELIANCE"]
+
+
+def test_run_feed_reconnect_on_close_survives_clean_server_close():
+    """2026-07-13 incident: a clean server close must RECONNECT on the live path
+    (reconnect_on_close=True), not end the feed. Default (False) keeps old semantics."""
+    conns = []
+
+    def factory(url):
+        # conn 1: one tick then clean close (empty recv). conn 2: one tick, then stop() ends it.
+        ws = _FakeWS([_quote(101, 2900.0, 10)])
+        conns.append(ws)
+        return ws
+
+    got = []
+    stop_after = {"n": 0}
+
+    def stop():
+        # allow both connections to serve their tick, then stop on the third connect attempt
+        return len(conns) >= 2 and not conns[-1]._frames and stop_after.setdefault("hit", True)
+
+    dhan_ws.run_feed(
+        "wss://x", [{"RequestCode": 17, "InstrumentCount": 0, "InstrumentList": []}],
+        resolve=RESOLVE, on_tick=got.append, ws_factory=factory,
+        sleep_fn=lambda *_: None, reconnect_on_close=True, stop=stop,
+    )
+    assert len(conns) >= 2               # it DID reconnect after the clean close
+    assert [t.symbol for t in got] == ["RELIANCE", "RELIANCE"]
+    assert all(c.closed for c in conns)  # every connection cleanly closed
+
+
+def test_run_feed_default_still_ends_on_clean_close():
+    """Back-compat: without reconnect_on_close, a clean close ends the feed (one connection)."""
+    conns = []
+
+    def factory(url):
+        ws = _FakeWS([_quote(101, 2900.0, 10)])
+        conns.append(ws)
+        return ws
+
+    got = []
+    dhan_ws.run_feed(
+        "wss://x", [{"RequestCode": 17, "InstrumentCount": 0, "InstrumentList": []}],
+        resolve=RESOLVE, on_tick=got.append, ws_factory=factory, sleep_fn=lambda *_: None,
+    )
+    assert len(conns) == 1 and [t.symbol for t in got] == ["RELIANCE"]
+
+
+def test_instant_drop_loop_escalates_backoff_not_storm():
+    """2026-07-26 incident: connect+subscribe OK then the stream dies INSTANTLY. Previously
+    `attempts` reset after subscribe, so backoff never grew and we reconnected 1,426 times
+    until Dhan IP-blocked the client (429). Now a connection must survive min_productive_s
+    to count as healthy, so the waits ESCALATE."""
+    waits = []
+    conns = {"n": 0}
+
+    def factory(url):
+        conns["n"] += 1
+        if conns["n"] > 5:
+            raise KeyboardInterrupt  # stop the test loop
+        class _Dies:
+            def send(self, m): pass
+            def recv(self): raise ConnectionError("Connection to remote host was lost.")
+            def close(self): pass
+        return _Dies()
+
+    try:
+        dhan_ws.run_feed(
+            "wss://x", [{"RequestCode": 17, "InstrumentCount": 0, "InstrumentList": []}],
+            resolve=RESOLVE, on_tick=lambda t: None, ws_factory=factory,
+            sleep_fn=waits.append, reconnect_on_close=True, stop=lambda: False,
+            min_productive_s=30.0,
+        )
+    except KeyboardInterrupt:
+        pass
+    # Escalating, not a flat 2s hammer: each wait >= the previous one.
+    assert len(waits) >= 4
+    assert waits == sorted(waits) and waits[-1] > waits[0]
+
+
+def test_rate_limit_429_backs_off_hard():
+    """A 429 ('client id is blocked') must trigger a MINUTES-long wait, not seconds —
+    retrying gently keeps the block alive."""
+    waits = []
+
+    def factory(url):
+        raise RuntimeError("Handshake status 429 Too Many Requests -+- client id is blocked")
+
+    dhan_ws.run_feed(
+        "wss://x", [], resolve=RESOLVE, on_tick=lambda t: None, ws_factory=factory,
+        sleep_fn=waits.append, max_reconnects=2,
+    )
+    assert waits and min(waits) >= 60.0   # minutes-scale, not the 2s default

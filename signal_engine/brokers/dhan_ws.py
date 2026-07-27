@@ -146,6 +146,10 @@ def _packet_to_tick(code: int, buf: bytes, off: int, security_id: int,
             symbol=symbol, ts=_ts_from_epoch(ltt, now_fn), ltp=float(ltp), volume=int(vol),
             bid=float(bid_px) if bid_px > 0 else None,
             ask=float(ask_px) if ask_px > 0 else None,
+            # Top-of-book quantities feed the order-book-imbalance shadow signal
+            # (signal_engine/microstructure/); only present in FULL mode.
+            bid_qty=int(bid_qty) if bid_qty > 0 else None,
+            ask_qty=int(ask_qty) if ask_qty > 0 else None,
         )
 
     return None  # OI / PrevClose / Disconnect carry no standalone Tick
@@ -189,6 +193,10 @@ def run_feed(
     backoff_cap_s: float = 15.0,
     sleep_fn: Callable[[float], None] = _time.sleep,
     tick_tap: Optional[Callable[[Tick], None]] = None,
+    reconnect_on_close: bool = False,
+    min_productive_s: float = 30.0,        # a connection must last this long to count as healthy
+    rate_limit_backoff_s: float = 60.0,    # per-attempt wait once the vendor returns 429
+    rate_limit_cap_s: float = 600.0,       # ...capped at 10 min so a block has time to clear
 ) -> None:
     """Connect, subscribe, and stream ticks to ``on_tick`` until ``stop()`` or the feed ends.
 
@@ -199,12 +207,25 @@ def run_feed(
     multi-minute network outage and resume in place when connectivity returns. A falsy
     ``recv()`` (empty/None) ends the current connection cleanly — used by tests.
 
+    ``reconnect_on_close=True`` (the LIVE path) treats a clean server close like any other
+    transport hiccup and reconnects with the same backoff budget, instead of ending the feed.
+    Root cause of the 2026-07-13 silent 14:02 feed death: Dhan/CF closed the socket cleanly,
+    the feed returned, and the engine sat tickless until the close with no recovery. Default
+    False preserves the historical semantics (and every existing test/backtest fake).
+
     ``tick_tap`` is an OPTIONAL, default-OFF observer invoked with each parsed tick BEFORE
     ``on_tick`` (e.g. a :class:`~signal_engine.ingestion.tick_recorder.TickRecorder.record`
     bound method). Default None preserves the current behaviour exactly; a tap exception is
     swallowed so recording can never break the live signal path.
     """
-    def _backoff(n: int) -> float:
+    def _backoff(n: int, exc: Optional[BaseException] = None) -> float:
+        """Linear backoff, with a HARD penalty when the vendor is rate-limiting us.
+
+        A 429 ("Too many requests from this IP hence client id is blocked") means backing off
+        gently is exactly wrong — it keeps the block alive. Wait minutes, not seconds.
+        """
+        if exc is not None and "429" in str(exc):
+            return min(rate_limit_backoff_s * n, rate_limit_cap_s)
         return min(backoff_s * n, backoff_cap_s)
 
     factory = ws_factory or _default_ws_factory
@@ -220,18 +241,40 @@ def run_feed(
                 log.error("dhan feed: giving up after %d connect failures: %s", attempts, exc)
                 return
             log.warning("dhan feed: connect failed (%d/%d): %s", attempts, max_reconnects, exc)
-            sleep_fn(_backoff(attempts))
+            sleep_fn(_backoff(attempts, exc))
             continue
 
         try:
             for msg in subscribe_msgs:
                 ws.send(json.dumps(msg))
             log.info("dhan feed: subscribed (%d messages)", len(subscribe_msgs))
-            attempts = 0  # a clean connect + subscribe resets the failure counter
+            # 2026-07-26 INCIDENT FIX: do NOT reset the failure counter merely because the
+            # subscribe succeeded. On 2026-07-23 Dhan accepted the connection then dropped the
+            # stream instantly (stale token / duplicate session); because `attempts` was zeroed
+            # right here, backoff never escalated and the loop reconnected 1,426 times until
+            # Dhan IP-BLOCKED the client id (HTTP 429) — the whole session logged 0 bars.
+            # A connection now only counts as healthy once it has been PRODUCTIVE: it survived
+            # `min_productive_s`. Otherwise the attempt counter keeps climbing and the backoff
+            # (plus the 429 penalty below) throttles us long before the vendor does.
+            _t0 = _time.time()
             _consume(ws, resolve, on_tick, now_fn, stop, tick_tap)
-            # recv loop returned without error -> feed ended; close and stop.
+            if (_time.time() - _t0) >= min_productive_s:
+                attempts = 0
+            # recv loop returned without error -> clean close (or stop()).
             _safe_close(ws)
-            return
+            # Reconnect-on-close is only sane under a bounded lifecycle: with no stop()
+            # there is nothing to ever end the loop (a fake/replay feed that ends by
+            # exhaustion would reconnect forever — caught by tests/test_dhan.py hanging).
+            if not reconnect_on_close or stop is None or stop():
+                return
+            # Live path: a clean server close mid-session is a failure mode, not an ending.
+            attempts += 1
+            if attempts > max_reconnects:
+                log.error("dhan feed: giving up after %d clean closes", attempts)
+                return
+            log.warning("dhan feed: server closed the stream (%d/%d) — reconnecting",
+                        attempts, max_reconnects)
+            sleep_fn(_backoff(attempts))
         except Exception as exc:  # noqa: BLE001 - transport hiccup -> reconnect
             _safe_close(ws)
             attempts += 1
@@ -240,7 +283,7 @@ def run_feed(
                 return
             log.warning("dhan feed: stream error (%d/%d), reconnecting: %s",
                         attempts, max_reconnects, exc)
-            sleep_fn(_backoff(attempts))
+            sleep_fn(_backoff(attempts, exc))
 
 
 def _consume(ws, resolve: ResolveFn, on_tick, now_fn, stop, tick_tap=None) -> None:

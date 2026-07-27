@@ -17,6 +17,11 @@ _SYMBOLS = ["RELIANCE", "HDFCBANK", "INFY", "TCS", "ICICIBANK"]
 
 def test_build_dataset_shape_and_labels():
     cfg = load_config()
+    # Friction gates are calibrated/tested in test_risk + test_engine; THIS test targets
+    # scan/dataset mechanics, so neutralize the V3 slippage add-on and the P0 friction-in-R
+    # gate to keep the synthetic setups surfacing (charges-only hurdle, as pre-2026-07-07).
+    cfg.risk.costs.slippage_scalar = 0.0
+    cfg.risk.risk.max_cost_r = 0.0
     days = trading_days(date(2025, 6, 2), 4, NSECalendar())
     ds = build_dataset(cfg, _SYMBOLS, days, seed=42)
     assert len(ds) > 50
@@ -28,6 +33,11 @@ def test_build_dataset_shape_and_labels():
 
 def test_train_saves_loadable_model(tmp_path):
     cfg = load_config()
+    # Friction gates are calibrated/tested in test_risk + test_engine; THIS test targets
+    # scan/dataset mechanics, so neutralize the V3 slippage add-on and the P0 friction-in-R
+    # gate to keep the synthetic setups surfacing (charges-only hurdle, as pre-2026-07-07).
+    cfg.risk.costs.slippage_scalar = 0.0
+    cfg.risk.risk.max_cost_r = 0.0
     out = str(tmp_path / "m.json")
     model, rep = train_model(cfg, _SYMBOLS, date(2025, 6, 2), n_days=5, seed=42, model_path=out)
     assert model is not None
@@ -44,6 +54,11 @@ def test_train_saves_loadable_model(tmp_path):
 def test_ml_beats_rules_on_synthetic():
     """On this synthetic data the model should out-rank the rules-confidence baseline."""
     cfg = load_config()
+    # Friction gates are calibrated/tested in test_risk + test_engine; THIS test targets
+    # scan/dataset mechanics, so neutralize the V3 slippage add-on and the P0 friction-in-R
+    # gate to keep the synthetic setups surfacing (charges-only hurdle, as pre-2026-07-07).
+    cfg.risk.costs.slippage_scalar = 0.0
+    cfg.risk.risk.max_cost_r = 0.0
     _, rep = train_model(cfg, _SYMBOLS, date(2025, 6, 2), n_days=12, seed=42, model_path=None)
     assert rep.ml["auc"] > rep.rules["auc"]   # ML adds predictive signal over rules conf
 
@@ -51,6 +66,11 @@ def test_ml_beats_rules_on_synthetic():
 def test_shadow_ml_does_not_change_ranking(tmp_path):
     """SHADOW mode: ML confidence is recorded but must not change the leaderboard order."""
     cfg = load_config()
+    # Friction gates are calibrated/tested in test_risk + test_engine; THIS test targets
+    # scan/dataset mechanics, so neutralize the V3 slippage add-on and the P0 friction-in-R
+    # gate to keep the synthetic setups surfacing (charges-only hurdle, as pre-2026-07-07).
+    cfg.risk.costs.slippage_scalar = 0.0
+    cfg.risk.risk.max_cost_r = 0.0
     out = str(tmp_path / "m.json")
     train_model(cfg, _SYMBOLS, date(2025, 6, 2), n_days=5, seed=42, model_path=out)
 

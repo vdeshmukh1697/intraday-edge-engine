@@ -47,7 +47,9 @@ def run_real_scan(
     with_news: bool = True,
     intraday_fetch: Optional[IntradayFetch] = None,
 ) -> ScanResult:
-    cost_model = CostModel(cfg.risk.costs)
+    # Gates price TRUE friction: charges + the round-trip slippage live fills pay (V3 /
+    # P0 friction-in-R parity with the live engine's gate_cost_model, 2026-07-07).
+    cost_model = CostModel(cfg.risk.costs, cfg.risk.slippage)
     liquidity_filter = LiquidityCostFilter(cfg.risk.liquidity, cost_model)
 
     metas = universe.instruments()

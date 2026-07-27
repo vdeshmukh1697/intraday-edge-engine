@@ -164,6 +164,24 @@ class SignalRepository:
             )
             """
         )
+        # Movers sleeve (research): daily big-move predictions + realized outcomes.
+        # A PRE-REGISTERED prediction tracker (signal_engine/movers/) — separate from the
+        # main paper book by design; sleeve P&L lives here, never in portfolio_state.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mover_predictions (
+                for_day TEXT, symbol TEXT,
+                p_big5 REAL, p_big10 REAL, lift REAL,
+                pred_dir TEXT, p_dir REAL, exp_move_pct REAL,
+                basis TEXT, n_bucket INTEGER, rank INTEGER,
+                fillable INTEGER, warn TEXT, prev_close REAL,
+                open_px REAL, close_px REAL, realized_move_pct REAL,
+                hit_big5 INTEGER, dir_correct INTEGER, sleeve_pnl_pct REAL,
+                created_ts TEXT, resolved_ts TEXT, run_id TEXT,
+                PRIMARY KEY (for_day, symbol)
+            )
+            """
+        )
         # Predictions log: every alert pushed to the user (Telegram), with its structured
         # parameters — written by RecordingAlerter, read by GET /api/predictions. Created
         # here too so a fresh DB serves the dashboard before the first alert fires.
@@ -185,11 +203,21 @@ class SignalRepository:
         # excluded from ₹ sums — the analytics fallback still models them at a fixed notional).
         for table, new_cols in (
             ("paper_trades", (("qty", "INTEGER"), ("notional_entry", "REAL"),
-                              ("charges_inr", "REAL"), ("pnl_inr", "REAL"))),
+                              ("charges_inr", "REAL"), ("pnl_inr", "REAL"),
+                              # P3.1/P3.2 (STRATEGY_IMPROVEMENT_PLAN_2026-07): cost identity on
+                              # every trade (gross - cost == net) + benchmark-adjusted outcome.
+                              ("pnl_pct_gross", "REAL"), ("cost_pct", "REAL"),
+                              ("nifty_ret_pct", "REAL"), ("alpha_pct", "REAL"))),
             ("open_positions", (("qty", "INTEGER"), ("notional", "REAL"),
                                 ("unrealized_pnl_inr", "REAL"))),
             ("predictions", (("reason_plain", "TEXT"), ("portfolio_equity", "REAL"),
                              ("notional", "REAL"))),
+            # Tip-channel mention count at prediction time (telegram news integration,
+            # 2026-07-14) — a MEASURED shadow feature, never a probability adjustment.
+            # p_next_up_big / p_next_down_big: sign-conditioned next-day tail split
+            # (2026-07-15) — direction as an explicit split, not a blended P(up).
+            ("mover_predictions", (("tg_mentions", "INTEGER"),
+                                   ("p_next_up_big", "REAL"), ("p_next_down_big", "REAL"))),
         ):
             cols = {r["name"] for r in cur.execute(f"PRAGMA table_info({table})")}
             for col, decl in new_cols:
@@ -228,8 +256,9 @@ class SignalRepository:
             """INSERT OR REPLACE INTO paper_trades
                (id, symbol, strategy, direction, entry_fill, entry_ts, exit_fill,
                 exit_ts, exit_reason, pnl_pct_net, r_multiple, hold_minutes, won, confidence,
-                stop_loss, target, qty, notional_entry, charges_inr, pnl_inr, run_id)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                stop_loss, target, qty, notional_entry, charges_inr, pnl_inr,
+                pnl_pct_gross, cost_pct, run_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 pos.id, pos.symbol, pos.plan.strategy, pos.direction.value,
                 pos.entry_fill, pos.entry_ts.isoformat() if pos.entry_ts else None,
@@ -239,8 +268,75 @@ class SignalRepository:
                 pos.plan.confidence, pos.plan.stop_loss, target,
                 qty, _round2(getattr(pos, "notional", None)),
                 _round2(getattr(pos, "charges_inr", None)), _round2(getattr(pos, "pnl_inr", None)),
+                # P3.1: cost identity on every trade (getattr — legacy objects persist NULL).
+                getattr(pos, "pnl_pct_gross", None), getattr(pos, "cost_pct", None),
                 run_id or self.run_id,
             ),
+        )
+        self.conn.commit()
+
+    # --- movers sleeve (research) ---------------------------------------------------- #
+    def save_mover_prediction(self, p: dict, run_id: Optional[str] = None) -> None:
+        """Upsert one prediction row (movers sleeve). Idempotent on (for_day, symbol)."""
+        from datetime import datetime as _dt
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """INSERT OR REPLACE INTO mover_predictions
+               (for_day, symbol, p_big5, p_big10, lift, pred_dir, p_dir, exp_move_pct,
+                basis, n_bucket, rank, fillable, warn, prev_close, tg_mentions,
+                p_next_up_big, p_next_down_big, created_ts, run_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (p["for_day"], p["symbol"], p.get("p_big5"), p.get("p_big10"), p.get("lift"),
+             p.get("pred_dir"), p.get("p_dir"), p.get("exp_move_pct"), p.get("basis"),
+             p.get("n_bucket"), p.get("rank"), p.get("fillable"), p.get("warn"),
+             p.get("prev_close"), p.get("tg_mentions"),
+             p.get("p_next_up_big"), p.get("p_next_down_big"),
+             _dt.now().isoformat(timespec="seconds"),
+             run_id or self.run_id),
+        )
+        self.conn.commit()
+
+    def fetch_mover_predictions(self, for_day: Optional[str] = None,
+                                unresolved_only: bool = False, limit: int = 500) -> list:
+        cur = self.conn.cursor()
+        clauses, params = ["1=1"], []
+        if for_day:
+            clauses.append("for_day = ?")
+            params.append(for_day)
+        if unresolved_only:
+            clauses.append("resolved_ts IS NULL")
+        params.append(limit)
+        rows = cur.execute(
+            f"""SELECT * FROM mover_predictions WHERE {' AND '.join(clauses)}
+                ORDER BY for_day DESC, rank ASC LIMIT ?""", params).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_unresolved_mover_predictions(self, for_day: str) -> int:
+        """Drop unresolved predictions for ``for_day`` so a re-run REPLACES the day's set
+        (resolved rows are history and are never deleted)."""
+        cur = self.conn.cursor()
+        cur.execute(
+            "DELETE FROM mover_predictions WHERE for_day = ? AND resolved_ts IS NULL",
+            (for_day,),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def resolve_mover_prediction(self, for_day: str, symbol: str, **fields) -> None:
+        """Set realized-outcome columns for one prediction row."""
+        from datetime import datetime as _dt
+
+        allowed = {"open_px", "close_px", "realized_move_pct", "hit_big5",
+                   "dir_correct", "sleeve_pnl_pct"}
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        if not sets:
+            return
+        cols = ", ".join(f"{k} = ?" for k in sets)
+        cur = self.conn.cursor()
+        cur.execute(
+            f"UPDATE mover_predictions SET {cols}, resolved_ts = ? WHERE for_day = ? AND symbol = ?",
+            (*sets.values(), _dt.now().isoformat(timespec="seconds"), for_day, symbol),
         )
         self.conn.commit()
 

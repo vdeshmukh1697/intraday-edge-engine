@@ -37,6 +37,24 @@ class NewsProvider(ABC):
         """Return enriched NewsItems known at or before ``as_of`` (point-in-time)."""
 
 
+class CompositeNewsProvider(NewsProvider):
+    """Merge several providers into one point-in-time stream (dedup by item id)."""
+
+    def __init__(self, providers: List[NewsProvider]) -> None:
+        self.providers = list(providers)
+
+    def fetch(self, as_of: Optional[datetime] = None) -> List[NewsItem]:
+        by_id = {}
+        for prov in self.providers:
+            try:
+                for item in prov.fetch(as_of=as_of):
+                    by_id.setdefault(item.id, item)
+            except Exception:  # noqa: BLE001 - one dead source never starves the rest
+                continue
+        items = sorted(by_id.values(), key=lambda it: it.ts)
+        return items
+
+
 class MockNewsProvider(NewsProvider):
     """Deterministic synthetic news: emits ~`prob` of symbols a headline during the morning."""
 

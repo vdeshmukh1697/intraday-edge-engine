@@ -354,3 +354,16 @@ def test_gate_before_advisor_suppresses_phantom_new_alert():
     msg = runner.advisor.update("NEWSYM", plan, actionable=actionable)
     assert msg is None  # no fresh-looking NEW alert for a symbol we can't enter
     assert all("NEW" not in m for _lvl, m in runner.alerter.msgs)
+
+
+def test_gate_cost_model_prices_slippage_trader_model_does_not():
+    """V3 regression fix (2026-07-07): plan gates price charges + round-trip slippage, while
+    the PaperTrader's model stays charges-only (fills already carry slippage — folding it into
+    the trader's subtraction would double-count). Pins the no-double-count invariant."""
+    cfg, runner, _ = _run()
+    charges_only = runner.cost_model.breakeven_pct(1000.0)
+    gate = runner.gate_cost_model.breakeven_pct(1000.0)
+    slip = 2.0 * cfg.risk.slippage.pct_per_side
+    assert abs(gate - charges_only - slip) < 1e-9  # gate = charges + round-trip slippage
+    assert runner.cost_model.slippage is None      # trader/ledger model: statutory charges only
+    assert runner.paper.cost_model is runner.cost_model

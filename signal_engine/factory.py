@@ -71,7 +71,8 @@ def build_broker(
         # live feed need the (free, no-auth) scrip master loaded to map symbols both ways.
         instruments = DhanInstrumentMaster.fetch()
         return DhanBroker(cfg.env.dhan_client_id, cfg.env.dhan_access_token,
-                          instruments=instruments)
+                          instruments=instruments,
+                          feed_mode=getattr(cfg.env, "dhan_feed_mode", "quote"))
     from signal_engine.brokers.mock import MockBroker
 
     return MockBroker(day=day, seed=seed, regime_map=regime_map)
@@ -92,8 +93,22 @@ def build_news_provider(cfg: AppConfig):
     Note: RSS yields *current* headlines — meaningful for live/today runs, not for historical
     backtest dates (use mock there).
     """
+    providers = []
     if cfg.env.news_source == "rss":
         from signal_engine.news.rss import RSSNewsProvider
 
-        return RSSNewsProvider()
-    return None
+        providers.append(RSSNewsProvider())
+    channels = [c for c in (cfg.env.news_telegram_channels or "").split(",") if c.strip()]
+    if channels and cfg.env.news_source != "mock":
+        # Tip-channel ingestion rides alongside RSS (never alone in mock mode): posts are
+        # UNVERIFIED and labeled "telegram:<handle>" downstream (see news/telegram_channel.py).
+        from signal_engine.news.telegram_channel import TelegramChannelProvider
+
+        providers.append(TelegramChannelProvider(channels))
+    if not providers:
+        return None
+    if len(providers) == 1:
+        return providers[0]
+    from signal_engine.news.provider import CompositeNewsProvider
+
+    return CompositeNewsProvider(providers)

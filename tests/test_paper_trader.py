@@ -103,6 +103,10 @@ def test_long_hits_target():
     assert abs(pos.exit_fill - 102.0) < TOL
     # gross = (102-100)/100*100 = 2.0 ; net = 2.0 - 0.10 = 1.9
     assert abs(pos.pnl_pct_net - 1.9) < TOL
+    # P3.1 cost identity: gross and cost persist alongside net; gross - cost == net.
+    assert abs(pos.pnl_pct_gross - 2.0) < TOL
+    assert abs(pos.cost_pct - 0.10) < TOL
+    assert abs(pos.pnl_pct_gross - pos.cost_pct - pos.pnl_pct_net) < TOL
     # r = net / stop_pct = 1.9 / 1.0 = 1.9
     assert abs(pos.r_multiple - 1.9) < TOL
     assert abs(pos.hold_minutes - 0.0) < TOL
@@ -128,6 +132,9 @@ def test_long_hits_stop():
     # gross = (99-100)/100*100 = -1.0 ; net = -1.0 - 0.10 = -1.1
     assert abs(pos.pnl_pct_net - (-1.1)) < TOL
     assert abs(pos.r_multiple - (-1.1)) < TOL
+    # P3.1 cost identity on the losing side too.
+    assert abs(pos.pnl_pct_gross - (-1.0)) < TOL
+    assert abs(pos.cost_pct - 0.10) < TOL
 
 
 # --------------------------------------------------------------------------- #

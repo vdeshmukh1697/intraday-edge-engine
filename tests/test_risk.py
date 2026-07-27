@@ -255,6 +255,53 @@ def test_edge_cost_gate_rejection():
     assert plan is None
 
 
+def test_max_cost_r_gate_rejects_tight_stop():
+    """P0 friction-in-R gate (STRATEGY_IMPROVEMENT_PLAN_2026-07): cost/stop > max_cost_r -> None.
+
+    breakeven(entry=1000) = 0.1424 (0.0824 charges @1L reference + 0.06 round-trip slippage).
+    atr_stop_multiple=1.0, atr_pct=0.45 -> stop_pct=0.45; 0.1424/0.45 = 0.316 > 0.25 -> rejected.
+    The same plan clears every other gate: t1 = 2*0.45 = 0.90 (rr 2.0 >= 1.0; edge 0.90 >= 3*0.1424).
+    """
+    rm = RiskManager(RiskParams(rr_floor=1.0, atr_stop_multiple=1.0, max_cost_r=0.25))
+    plan = rm.build_trade_plan(_signal(Direction.LONG), {"atr_pct": 0.45}, _cost_model())
+    assert plan is None
+    # Identical params with the gate OFF (0) -> the SAME plan builds, proving the friction gate
+    # (not rr_floor / edge_cost_multiple) was the rejector.
+    rm_off = RiskManager(RiskParams(rr_floor=1.0, atr_stop_multiple=1.0, max_cost_r=0.0))
+    plan_off = rm_off.build_trade_plan(_signal(Direction.LONG), {"atr_pct": 0.45}, _cost_model())
+    assert plan_off is not None
+    assert abs(plan_off.stop_pct - 0.45) < TOL
+
+
+def test_max_cost_r_gate_passes_wide_stop():
+    """Stop wide enough that friction stays within budget -> plan builds with the gate ON.
+
+    atr_pct=0.80 -> stop_pct=0.80; 0.1424/0.80 = 0.178 <= 0.25 -> passes.
+    """
+    rm = RiskManager(RiskParams(rr_floor=1.0, atr_stop_multiple=1.0, max_cost_r=0.25))
+    plan = rm.build_trade_plan(_signal(Direction.LONG), {"atr_pct": 0.80}, _cost_model())
+    assert plan is not None
+    assert abs(plan.stop_pct - 0.80) < TOL
+
+
+def test_max_cost_r_absent_on_legacy_config_means_off():
+    """A config object that predates max_cost_r behaves as gate-off (default 0.0)."""
+    class LegacyRisk:
+        atr_stop_multiple = 1.0
+        min_stop_pct = 0.30
+        max_stop_pct = 3.0
+        target_rr = 2.0
+        rr_floor = 1.0
+        second_target_rr = 3.0
+        edge_cost_multiple = 3.0
+        max_hold_minutes = 90
+
+    rm = RiskManager(LegacyRisk())
+    # A 0.45% stop pays 0.316R friction — rejected when the gate is on; legacy config passes.
+    plan = rm.build_trade_plan(_signal(Direction.LONG), {"atr_pct": 0.45}, _cost_model())
+    assert plan is not None
+
+
 def test_backward_compat_legacy_params_only():
     """A RiskParams missing the new A1-A3 fields still builds a plan (safe defaults).
 

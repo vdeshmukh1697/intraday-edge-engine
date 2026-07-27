@@ -247,4 +247,6 @@ class DhanBroker(BrokerAdapter):
         dhan_ws.run_feed(
             url, msgs, resolve=rev.get, on_tick=self._cb,
             ws_factory=self._ws_factory, stop=stop,
+            # Live sessions must survive clean server closes (2026-07-13 14:02 incident).
+            reconnect_on_close=True,
         )
