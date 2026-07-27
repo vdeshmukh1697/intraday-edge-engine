@@ -47,6 +47,11 @@ accumulated.
   dashboard's Days box (`web/app/backtest/page.tsx`). A session-day costs ~62 s of one core, so a
   stray extra zero in that box used to buy a ~2 h burn with no feedback; 30 caps an accidental run
   at ~30 min. Raise both together if a longer window is ever wanted.
+- **Follow-up 2026-07-27 — dashboard requests now time out at 30 s** (`getJSON` in `web/lib/api.ts`).
+  `fetch` had no timeout, so a stalled tunnel left a page spinning with no error to act on. The
+  bound covers the body read too, and a cold-scan **503 still surfaces its own "still computing"
+  message** rather than a generic timeout. If you see "timed out after 30s — the backend or its
+  tunnel is not responding", that is the tunnel, not the API being slow (its scans self-bound at 20 s).
 
 ## 🟢 2026-07-26 — NIGHTLY QUANT-DESK REVIEW AGENT ("the desk") built + scheduled
 Full design: `docs/DESK_AGENT.md`. Code `signal_engine/desk/`, tests `tests/test_desk.py`, new job

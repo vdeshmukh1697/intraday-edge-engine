@@ -159,25 +159,47 @@ function headers(): HeadersInit {
   return h;
 }
 
+// The backend bounds its own slow paths itself — a cold scan gives up and 503s at 20 s — and the
+// Cloudflare quick tunnel drops a connection at ~100 s. So a request still open at 30 s is a
+// stalled tunnel, not work in progress. Without a bound, `fetch` waits forever and the page shows
+// a spinner with no error the user can act on.
+const REQUEST_TIMEOUT_MS = 30_000;
+
 async function getJSON<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: headers(),
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    let detail = "";
-    try {
-      detail = await res.text();
-    } catch {
-      /* ignore */
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      headers: headers(),
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      let detail = "";
+      try {
+        detail = await res.text();
+      } catch {
+        /* ignore */
+      }
+      throw new Error(
+        `API ${res.status} ${res.statusText} for ${path}${
+          detail ? `: ${detail.slice(0, 200)}` : ""
+        }`
+      );
     }
-    throw new Error(
-      `API ${res.status} ${res.statusText} for ${path}${
-        detail ? `: ${detail.slice(0, 200)}` : ""
-      }`
-    );
+    return (await res.json()) as T;
+  } catch (e) {
+    // Covers the body read too, not just the headers — a half-delivered response stalls the same way.
+    if (controller.signal.aborted) {
+      throw new Error(
+        `API request for ${path} timed out after ${REQUEST_TIMEOUT_MS / 1000}s — ` +
+          `the backend or its tunnel is not responding.`
+      );
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
   }
-  return (await res.json()) as T;
 }
 
 export interface LeaderboardParams {

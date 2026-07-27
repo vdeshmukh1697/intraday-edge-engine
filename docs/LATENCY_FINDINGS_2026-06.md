@@ -104,4 +104,8 @@ Tests: `tests/test_api.py` 20/20 pass; `web` `tsc --noEmit` clean.
    `send_alert` ImportError — already fixed in source; clears at the next coordinated restart).
    On current code it runs a **full 10-day synthetic backtest per request, uncached (>60 s)**.
    Needs a cache or precompute before the backtest page is usable; not a "safe quick fix", so left.
+   > **Superseded 2026-07-27.** Done. The scans moved to a subprocess behind a single-flight,
+   > serve-stale TTL cache (backtest 6 h), then onto their own lane so a backtest cannot starve
+   > the read path; `days` is capped at 30. Measured cost was **623 s** for `days=10`, not >60 s.
+   > Current behaviour: `docs/MORNING_HANDOFF.md` (2026-07-26 / 2026-07-27 entries).
 3. **15 s REST polls** — each poll costs one warm-connection tunnel RTT (~90–120 ms); fine.
