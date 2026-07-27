@@ -37,8 +37,24 @@ the dashboard then shows **Reconnect Dhan** → OTP → token written back to `.
    NXDOMAIN for trycloudflare hostnames (public resolvers 1.1.1.1/8.8.8.8 resolve fine). Browsers with
    DNS-over-HTTPS (Chrome/Firefox default-ish) bypass this; if the dashboard ever shows the red banner
    while the engine is up, set the OS/browser DNS to **1.1.1.1 or 8.8.8.8** (or enable DoH).
-3. **cloudflared-only death** isn't self-healed (the script waits on the API pid, not the tunnel pid);
-   a full crash/sleep is healed, a lone tunnel drop is not.
+3. **Quick-tunnel edge timeout (~100s)** — any request slower than that dies at Cloudflare before the
+   API answers. The three scan endpoints are cached behind a subprocess for exactly this reason
+   (below); don't add a new endpoint that computes for minutes on the request path.
+
+## Child lifecycle (2026-07-26)
+`run-with-tunnel.sh` owns two children (the API and `cloudflared`) and supervises the public URL
+end-to-end every 30s. Two rules keep a self-heal from *adding* a worker instead of replacing one:
+- `stop_children()` runs on **every** exit path (including the INT/TERM trap): SIGTERM, then SIGKILL
+  after a 5s grace. uvicorn's graceful shutdown waits for in-flight requests, so a slow request used
+  to outlive the supervisor entirely.
+- `reap_port "$PORT"` runs **before** binding: it kills whatever holds `:8000`, found via both `lsof`
+  and a `--port 8000`-scoped `pgrep` (a wedged worker can still be spinning after it has dropped its
+  listener socket). Scoped to the port on purpose — a `cli serve` on another port belongs to someone
+  else.
+
+The heavy scans (`/api/leaderboard`, `/api/premarket`, `/api/backtest`) run in a **separate process**
+(`signal_engine/api/scans.py`) behind a single-flight, serve-stale TTL cache. If you see the API
+process at ~0% CPU and a `multiprocessing.spawn` child at 100%, that is working as designed.
 
 **The durable upgrade (manual, one-time):** replace the Quick Tunnel with a **named Cloudflare tunnel**
 on a domain you control → stable hostname that resolves everywhere and never changes, so the dashboard's

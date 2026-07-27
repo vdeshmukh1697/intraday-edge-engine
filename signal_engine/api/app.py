@@ -12,9 +12,12 @@ lock ``allow_origins`` to your dashboard URL in production.
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import threading
 import time as _time
+from concurrent.futures import BrokenExecutor, ProcessPoolExecutor
+from concurrent.futures import TimeoutError as _FutureTimeout
 from datetime import date, datetime, time
 
 import pytz
@@ -40,9 +43,125 @@ _DISCLAIMER = (
 _PENDING_AUTH: dict = {}
 _AUTH_TTL_S = 600
 
-# Cache the (expensive) real-archive leaderboard for the process; recomputing per request
-# would re-read the whole archived universe each time.
-_LEADERBOARD_CACHE: dict = {}
+# --- Heavy scans: one subprocess, one in-flight computation per key --------------------
+#
+# /api/leaderboard (74 s cold), /api/premarket and /api/backtest (623 s for the default 10
+# days on a 40-name watchlist) are pure-Python CPU. Measured on 2026-07-26 with a backtest in
+# flight: /healthz still answered in 0.5 s, but /api/portfolio timed out past 60 s. Sync
+# handlers are already OFF the event loop — FastAPI runs them on Starlette's threadpool — so
+# the threadpool was never the problem. The problem is the GIL: a SELECT-heavy endpoint
+# reacquires it thousands of times and loses every race to the scan thread, which is exactly
+# the reported symptom (health fine, every data endpoint dead). A separate *process* is the
+# only thing that keeps the API's interpreter free, so that is what these run in.
+#
+# Single-flight matters as much as isolation: the cache was only written after a scan
+# finished, so two dashboard tabs asking for the same cold key each ran the full 74 s scan
+# (observed as duplicate "real scan: 517/600" log lines at 150 % CPU).
+_SCAN_POOL = None
+_SCAN_POOL_LOCK = threading.Lock()
+_SCAN_WAIT_S = 20.0     # how long a caller waits when there is NOTHING cached to serve yet
+
+
+def _submit_scan(fn, *args):
+    """Run ``fn(*args)`` in the scan subprocess and return its Future.
+
+    ``fn`` must be a module-level function in ``signal_engine.api.scans`` (it is pickled to the
+    child) returning JSON-ready data. One worker only: two concurrent scans would put us back to
+    two busy cores on a laptop that also runs the live engine. Tests replace this with an inline
+    runner so the suite never spawns a process."""
+    global _SCAN_POOL
+    with _SCAN_POOL_LOCK:
+        if _SCAN_POOL is None:
+            _SCAN_POOL = ProcessPoolExecutor(max_workers=1, initializer=scans.exit_with_parent)
+        try:
+            return _SCAN_POOL.submit(fn, *args)
+        except BrokenExecutor:       # child was killed (OOM, stray SIGKILL) — rebuild once
+            _SCAN_POOL = ProcessPoolExecutor(max_workers=1, initializer=scans.exit_with_parent)
+            return _SCAN_POOL.submit(fn, *args)
+
+
+def _shutdown_scan_pool() -> None:
+    """Drop queued scans on shutdown; a scan already running finishes in the child. If this
+    process is killed outright instead, the child's parent-watchdog takes it down within ~2 s
+    (see ``scans.exit_with_parent``), so no path leaves a scan worker spinning."""
+    global _SCAN_POOL
+    with _SCAN_POOL_LOCK:
+        if _SCAN_POOL is not None:
+            _SCAN_POOL.shutdown(wait=False, cancel_futures=True)
+            _SCAN_POOL = None
+
+
+_NO_VALUE = object()
+
+
+class _ScanCache:
+    """TTL cache with single-flight refresh and stale-while-revalidating reads.
+
+    A request never triggers more than one computation per key, and while a refresh runs the
+    previous payload is served immediately rather than making the caller wait behind it. Only a
+    caller with nothing at all to serve blocks, and only for ``wait_s`` — past that it gets a
+    503 telling it to retry, which beats holding a connection open through a Cloudflare quick
+    tunnel that gives up at ~100 s anyway."""
+
+    def __init__(self, name: str, ttl: float, max_entries: int = 16):
+        self._name = name
+        self._ttl = ttl
+        self._max_entries = max_entries
+        # Re-entrant: an inline runner (tests) completes the future before add_done_callback
+        # returns, so _settle re-enters on the same thread.
+        self._lock = threading.RLock()
+        self._entries: dict = {}     # key -> (computed_epoch, payload)
+        self._inflight: dict = {}    # key -> Future
+
+    def _fresh(self, key):
+        hit = self._entries.get(key)
+        if hit is not None and _time.time() - hit[0] < self._ttl:
+            return hit[1]
+        return _NO_VALUE
+
+    def _settle(self, key, fut) -> None:
+        with self._lock:
+            if self._inflight.get(key) is fut:
+                self._inflight.pop(key, None)
+            try:
+                value = fut.result()
+            except Exception:  # noqa: BLE001 - the waiting caller reports it; keep the old payload
+                return
+            if key not in self._entries and len(self._entries) >= self._max_entries:
+                self._entries.pop(min(self._entries, key=lambda k: self._entries[k][0]), None)
+            self._entries[key] = (_time.time(), value)
+
+    def prime(self, key, fn, *args):
+        """Ensure a computation for `key` is running. Never blocks; returns the Future."""
+        with self._lock:
+            fut = self._inflight.get(key)
+            if fut is None:
+                fut = _submit_scan(fn, *args)
+                self._inflight[key] = fut
+                fut.add_done_callback(functools.partial(self._settle, key))
+            return fut
+
+    def get(self, key, fn, *args, wait_s: float = _SCAN_WAIT_S):
+        with self._lock:
+            fresh = self._fresh(key)
+            if fresh is not _NO_VALUE:
+                return fresh
+            fut = self.prime(key, fn, *args)
+            fresh = self._fresh(key)          # an inline runner has already settled it
+            if fresh is not _NO_VALUE:
+                return fresh
+            hit = self._entries.get(key)
+            stale = hit[1] if hit is not None else _NO_VALUE
+        if stale is not _NO_VALUE:
+            return stale                      # serve the last good payload; refresh runs behind it
+        try:
+            return fut.result(timeout=wait_s)
+        except _FutureTimeout:
+            raise HTTPException(
+                503, f"{self._name} is still computing (first run after a restart) — retry shortly",
+                headers={"Retry-After": "30"}) from None
+        except Exception as exc:  # noqa: BLE001 - surface the child's failure, don't 500 silently
+            raise HTTPException(503, f"{self._name} scan failed: {exc}") from None
 
 
 def _watchlist_sectors() -> dict:
@@ -276,6 +395,12 @@ def create_app() -> FastAPI:
         exp = token_expiry(tok)
         return {"connected": True, "expires_at": (exp.isoformat() + "Z") if exp else None}
 
+    # TTLs: how stale a payload may get before the next reader triggers a refresh. Nothing
+    # recomputes on a timer — an untouched dashboard costs nothing.
+    _leaderboard_cache = _ScanCache("leaderboard", ttl=900.0)
+    _premarket_cache = _ScanCache("premarket briefing", ttl=300.0)
+    _backtest_cache = _ScanCache("backtest", ttl=21600.0)
+
     @app.get("/api/leaderboard", dependencies=[Depends(_require_token)])
     def leaderboard(
         date_str: str = Query(default=None, alias="date"),
@@ -283,35 +408,18 @@ def create_app() -> FastAPI:
         top: int = Query(default=20, ge=1, le=100),
         seed: int = 42, news: bool = True, ml: bool = False,
     ):
-        # Real data: scan the backfilled NSE corpus (recognizable names, real prices).
-        # The cache key includes the archive's symbol count, so the leaderboard auto-refreshes
-        # as the backfill/gap-fill (and nightly archive) grow the corpus — no restart needed.
-        # Falls back to the synthetic universe only if the archive is empty or SE_DATA_SOURCE=mock.
+        # Real data: scan the backfilled NSE corpus (recognizable names, real prices). Falls back
+        # to the synthetic universe only if the archive is empty or SE_DATA_SOURCE=mock.
         #
-        # IMPORTANT: `top` is deliberately NOT part of the cache key. The expensive part is
-        # scanning the corpus; the result is a ranked list that `top` only TRUNCATES. So we
-        # compute the full ranking ONCE (at scans._MAX_LEADERBOARD), cache it per (news, corpus,
-        # date), and slice [:top] per request.
+        # `top` is deliberately NOT part of the cache key. The expensive part is scanning the
+        # corpus; the result is a ranked list that `top` only TRUNCATES, so the full ranking is
+        # computed once and sliced per request — changing the dashboard's stock count is instant.
+        # The 15-min TTL is what picks up a grown corpus (backfill, gap-fill, nightly archive)
+        # without a restart; this is still the most-recent COMPLETE session, not a tick-live
+        # ranking.
         if cfg.env.data_source != "mock":
-            from signal_engine.storage.bars import ParquetBarStore
-
-            store = ParquetBarStore(cfg.env.parquet_dir)
-            syms = store.list_symbols()
-            latest = None
-            for s in syms[:5] + syms[-5:]:  # cheap probe of a few symbols for the newest date
-                d = store.load_latest_session(s)
-                if d is not None and not d.empty:
-                    dt = d.index.max().date()
-                    latest = dt if latest is None or dt > latest else latest
-            ckey = (news, len(syms), str(latest))
-            if ckey not in _LEADERBOARD_CACHE:
-                real = scans.archive_leaderboard(news)
-                if real is not None:
-                    _LEADERBOARD_CACHE.clear()
-                    _LEADERBOARD_CACHE[ckey] = real
-            if ckey in _LEADERBOARD_CACHE:
-                full = _LEADERBOARD_CACHE[ckey]
-                # Slice to the requested size without recomputing (instant on every top change).
+            full = _leaderboard_cache.get((bool(news),), scans.archive_leaderboard, bool(news))
+            if full is not None:                       # None = empty archive; use synthetic below
                 return {**full, "entries": full["entries"][:top]}
 
         from signal_engine.scan.harness import run_scan
@@ -325,35 +433,26 @@ def create_app() -> FastAPI:
                        with_news=news, with_ml=ml)
         return leaderboard_to_json(res, d)
 
-    _premarket_cache: dict = {}    # (date, seed, top, universe) -> (fetched_epoch, payload)
-    _PREMARKET_TTL = 300.0         # seconds — the real path re-fetches Yahoo cues + RSS news per
-                                   # call (measured 2.3–3.6 s); a pre-open briefing doesn't change
-                                   # meaningfully inside 5 min, so serve the warm copy instead.
-
     @app.get("/api/premarket", dependencies=[Depends(_require_token)])
     def premarket(date_str: str = Query(default=None, alias="date"), seed: int = 42,
                   top: int = Query(default=40, ge=1, le=200),
                   universe: int = Query(default=150, ge=10, le=2000)):
         """Pre-open briefing over the most-liquid archived NSE names — see
-        ``scans.premarket_briefing``. TTL-cached per full param set (see _PREMARKET_TTL)."""
-        ckey = (date_str, seed, top, universe)
-        hit = _premarket_cache.get(ckey)
-        if hit and _time.time() - hit[0] < _PREMARKET_TTL:
-            return hit[1]
-
-        payload = scans.premarket_briefing(_parse_date(date_str), seed, top, universe)
-        if len(_premarket_cache) >= 32:      # bound the cache (params are user-controlled)
-            _premarket_cache.pop(min(_premarket_cache, key=lambda k: _premarket_cache[k][0]))
-        _premarket_cache[ckey] = (_time.time(), payload)
-        return payload
+        ``scans.premarket_briefing``. The real path re-fetches Yahoo cues + RSS news per call
+        (measured 2.3–3.6 s) and a pre-open briefing doesn't change meaningfully inside 5 min,
+        so the warm copy is served while a refresh runs behind it."""
+        return _premarket_cache.get((date_str, seed, top, universe), scans.premarket_briefing,
+                                    _parse_date(date_str), seed, top, universe)
 
     @app.get("/api/backtest", dependencies=[Depends(_require_token)])
     def backtest(
         start: str = Query(default=None), days: int = Query(default=10, ge=1, le=120),
         seed: int = 42,
     ):
+        """Replay the watchlist over `days` sessions. Deterministic given (start, days, seed) —
+        hence the long TTL; the result only moves when config or the calendar does."""
         start_d = _parse_date(start) if start else date(2025, 6, 2)
-        return scans.backtest(start_d, days, seed)
+        return _backtest_cache.get((start, days, seed), scans.backtest, start_d, days, seed)
 
     @app.get("/api/chart/{symbol}", dependencies=[Depends(_require_token)])
     def chart(symbol: str, date_str: str = Query(default=None, alias="date"), seed: int = 42):
@@ -905,40 +1004,19 @@ def create_app() -> FastAPI:
             quote_hub.unsubscribe(cid)
 
     @app.on_event("startup")
-    def _prewarm_leaderboard() -> None:
-        """Warm the real-archive leaderboard cache in a background thread so the first user
-        request after a restart isn't the one that pays the corpus scan. No-op for the
-        synthetic universe (that path is already fast)."""
+    def _prewarm_scans() -> None:
+        """Queue the corpus scan for the dashboard's default leaderboard so the first user
+        request after a restart isn't the one that waits on it. Non-blocking — this only hands
+        work to the scan subprocess. No-op for the synthetic universe (already fast)."""
         if cfg.env.data_source == "mock":
             return
+        _leaderboard_cache.prime((True,), scans.archive_leaderboard, True)  # news=True is default
+        # Warm the archive load that /api/premarket shares with it, in the same worker.
+        _submit_scan(scans.warm_liquid_universe, 150)
 
-        def _warm() -> None:
-            try:
-                from signal_engine.storage.bars import ParquetBarStore
-
-                store = ParquetBarStore(cfg.env.parquet_dir)
-                syms = store.list_symbols()
-                if not syms:
-                    return
-                latest = None
-                for s in syms[:5] + syms[-5:]:
-                    d = store.load_latest_session(s)
-                    if d is not None and not d.empty:
-                        dt = d.index.max().date()
-                        latest = dt if latest is None or dt > latest else latest
-                ckey = (True, len(syms), str(latest))  # news=True is the dashboard default
-                if ckey not in _LEADERBOARD_CACHE:
-                    real = scans.archive_leaderboard(True)
-                    if real is not None:
-                        _LEADERBOARD_CACHE.clear()
-                        _LEADERBOARD_CACHE[ckey] = real
-                # Also warm the pre-market liquid universe (the ~2k-session load is the slow part;
-                # do it once here so the first /api/premarket request isn't the one that pays it).
-                scans.warm_liquid_universe(150)
-            except Exception:  # noqa: BLE001 - pre-warm is best-effort; never block startup
-                pass
-
-        threading.Thread(target=_warm, name="leaderboard-prewarm", daemon=True).start()
+    @app.on_event("shutdown")
+    def _stop_scans() -> None:
+        _shutdown_scan_pool()
 
     return app
 

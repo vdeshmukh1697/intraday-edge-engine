@@ -1,10 +1,30 @@
 """Tests for the FastAPI engine API (Phase 6). Uses Starlette's TestClient (no network)."""
 
+from concurrent.futures import Future
+
 import pytest
 from fastapi.testclient import TestClient
 
 import signal_engine.api.app as app_mod
 from signal_engine.api.app import create_app
+
+
+def _inline_submit(fn, *args):
+    """Run a scan on the calling thread and hand back a completed Future."""
+    fut = Future()
+    try:
+        fut.set_result(fn(*args))
+    except Exception as exc:  # noqa: BLE001 - mirror what the process pool reports back
+        fut.set_exception(exc)
+    return fut
+
+
+@pytest.fixture(autouse=True)
+def inline_scans(monkeypatch):
+    """Keep the heavy endpoints in-process for the suite. In production they run in a scan
+    subprocess (see app._submit_scan); spawning one per test would be slow and would put the
+    computation out of reach of monkeypatched env/spies."""
+    monkeypatch.setattr(app_mod, "_submit_scan", _inline_submit)
 
 
 @pytest.fixture()
@@ -230,9 +250,8 @@ def test_leaderboard_top_change_slices_without_rescan(tmp_path, monkeypatch):
         return real_scan(news)
 
     monkeypatch.setattr(scans, "archive_leaderboard", _counting_scan)
-    app_mod._LEADERBOARD_CACHE.clear()  # cold cache for a deterministic count
 
-    c = TestClient(create_app())
+    c = TestClient(create_app())  # a fresh app means a cold cache
     big = c.get("/api/leaderboard", params={"news": "false", "top": 8}).json()["entries"]
     small = c.get("/api/leaderboard", params={"news": "false", "top": 2}).json()["entries"]
     wide = c.get("/api/leaderboard", params={"news": "false", "top": 40}).json()["entries"]
@@ -295,6 +314,65 @@ def test_backtest_endpoint(client):
     data = r.json()
     assert "metrics" in data and "health" in data and "equity_curve" in data
     assert data["metrics"]["trades"] == sum(1 for _ in data["daily_returns"]) or True
+
+
+def test_scan_cache_single_flight_serves_stale_and_bounds_the_wait(monkeypatch):
+    """Regression for the 2026-07-26 outage. The scan cache must:
+      1. run ONE computation per key however many callers arrive — two dashboard tabs used to
+         run the same 74s corpus scan twice, at 150% CPU, because the cache was only written
+         after a scan finished;
+      2. bound how long a caller with nothing to serve waits, instead of holding the connection
+         open past the tunnel's own ~100s ceiling;
+      3. serve the previous payload while a refresh runs, so a stale key never blocks a read."""
+    import threading
+    import time as _t
+    from concurrent.futures import ThreadPoolExecutor
+
+    from fastapi import HTTPException
+
+    from signal_engine.api.app import _ScanCache
+
+    started = threading.Event()
+    release = threading.Event()
+    calls = {"n": 0}
+
+    def _slow_scan(tag):
+        calls["n"] += 1
+        started.set()
+        assert release.wait(10), "scan was never released"
+        return {"tag": tag, "run": calls["n"]}
+
+    pool = ThreadPoolExecutor(max_workers=2)
+    monkeypatch.setattr(app_mod, "_submit_scan", lambda fn, *a: pool.submit(fn, *a))
+    try:
+        cache = _ScanCache("test scan", ttl=0.3)
+        first = {}
+        waiter = threading.Thread(
+            target=lambda: first.update(value=cache.get(("k",), _slow_scan, "one", wait_s=10)))
+        waiter.start()
+        assert started.wait(5), "first scan never started"
+
+        # (2) a second caller, nothing cached yet -> 503 rather than an unbounded wait.
+        with pytest.raises(HTTPException) as err:
+            cache.get(("k",), _slow_scan, "one", wait_s=0.2)
+        assert err.value.status_code == 503
+
+        release.set()
+        waiter.join(10)
+        assert first["value"] == {"tag": "one", "run": 1}
+        assert calls["n"] == 1        # (1) the second caller joined; it did not rescan
+        _t.sleep(0.05)                # let the done-callback store the payload
+
+        # (3) past the TTL the stale payload comes back immediately, refresh runs behind it.
+        started.clear()
+        release.clear()
+        _t.sleep(0.3)
+        assert cache.get(("k",), _slow_scan, "two", wait_s=10) == {"tag": "one", "run": 1}
+        assert started.wait(5), "stale read did not trigger a refresh"
+        assert calls["n"] == 2
+    finally:
+        release.set()
+        pool.shutdown(wait=False)
 
 
 def test_chart_endpoint(client):

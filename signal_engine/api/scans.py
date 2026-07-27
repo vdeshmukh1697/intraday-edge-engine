@@ -1,13 +1,18 @@
-"""The dashboard's expensive scans, extracted from the API app module.
+"""The dashboard's expensive scans, isolated so they can run OUTSIDE the API process.
 
-These are the bodies behind ``/api/leaderboard``, ``/api/premarket`` and ``/api/backtest``.
-They live apart from ``signal_engine/api/app.py`` because that module builds a FastAPI app on
-import, and this one must stay free of import side effects: no app, no broker, no network.
-Entry points take scalars/dates and return the JSON-ready dicts the serializers already
-produce, and each re-reads config rather than taking it as an argument.
+``signal_engine/api/app.py`` hands each of these to a dedicated scan subprocess (see
+``_submit_scan`` there). Two consequences shape this module:
 
-Module-level caches below are per-process and survive across calls, the same way they used to
-survive across requests when this code lived in ``app.py``.
+* **No import side effects.** The child imports this module by name to unpickle the target
+  function, so importing it must not build a FastAPI app, open a broker or touch the network.
+  (That is why these live here and not in ``app.py``, whose import builds the app.)
+* **Plain arguments and plain results.** Everything crossing the process boundary is pickled,
+  so the entry points take scalars/dates and return the same JSON-ready dicts the serializers
+  already produce. Config is re-read here rather than shipped in, which also means a
+  ``config/`` edit takes effect on the next refresh without an API restart.
+
+Module-level caches below are per-child; the scan worker is long-lived, so they survive
+across tasks the same way they used to survive across requests.
 """
 
 from __future__ import annotations
@@ -16,6 +21,26 @@ from datetime import date
 
 from signal_engine.api.serializers import backtest_to_json, leaderboard_to_json, premarket_to_json
 from signal_engine.config import load_config
+
+
+def exit_with_parent() -> None:
+    """Scan-worker initializer: leave when the API process does.
+
+    The supervisor escalates to SIGKILL on a worker that won't stop, and a killed parent takes
+    no children with it. Without this, a heal in the middle of a 10-minute backtest would strand
+    a pinned core with nobody left to hand the result to — the same orphan problem this whole
+    change exists to fix, one level down. macOS has no PDEATHSIG, so watch for reparenting."""
+    import os
+    import threading
+    import time
+
+    def _watch() -> None:
+        while os.getppid() != 1:
+            time.sleep(2.0)
+        os._exit(0)
+
+    threading.Thread(target=_watch, name="parent-watchdog", daemon=True).start()
+
 
 _REAL_SCAN_CAP = 600   # scan at most the N most-liquid archived names (keeps it responsive)
 _MAX_LEADERBOARD = 100  # compute the ranking once at this size; requests slice [:top] from it
@@ -116,7 +141,7 @@ def _prior_state_from_sessions(sessions: dict):
 
 
 def warm_liquid_universe(limit: int) -> int:
-    """Load the liquid-universe archive slice into this process's cache and report its size.
+    """Load the liquid-universe archive slice into this worker's cache and report its size.
 
     The ~2k-session Parquet load is the slow part the pre-market briefing shares with the
     leaderboard, so the API warms it at startup. Deliberately does NOT build the briefing:
@@ -164,7 +189,8 @@ def premarket_briefing(day: date, seed: int, top: int, universe: int) -> dict:
 
 def backtest(start: date, days: int, seed: int) -> dict:
     """Replay the configured watchlist over `days` sessions from `start`. Measured 2026-07-26 at
-    ~62 s per session on a 40-name watchlist — 623 s for the default 10 days."""
+    ~62 s per session on a 40-name watchlist (623 s for the default 10 days), which is why this
+    never runs on the request thread."""
     from signal_engine.backtest.engine import run_backtest
 
     cfg = load_config()
