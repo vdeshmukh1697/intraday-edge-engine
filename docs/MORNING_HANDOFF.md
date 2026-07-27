@@ -1,5 +1,17 @@
 # Morning Handoff — live system ready for the open (updated 2026-07-12 by the P0-implementation session)
 
+## 🟢 2026-07-27 — /paper Trade history filters by session, with that day's net result
+The evening-review question ("what did today actually cost me?") needed summing a column by eye.
+Trade history now has a **Day** picker listing only sessions that have trades (17 of them, newest
+first, each with its trade count), and picking one shows four tiles for that session: net result
+(₹ + % of capital), trades closed with W/L, gross P&L, and charges. A trade is booked on the day it
+CLOSED, matching the ledger's realized-per-day rule. Client-side over the already-fetched rows, so it
+composes with the From/To range filter above and costs no request. Days whose rows predate the ₹1L
+ledger carry a caveat naming how many are modelled — those totals mix two bases and are not ledger
+figures. Verified against the DB for 2026-07-22: net −₹2,531.47, charges ₹332.39, gross −₹2,199.08,
+1W/7L — exact match. Good example of the charge bill on 2026-07-02: gross **+₹554** → net **−₹683**
+after **₹1,237** of charges.
+
 ## 🟢 2026-07-26 — API CPU BURN ROOT-CAUSED AND CURED (the "selector busy-loop" was our scans)
 The spinning workers below were **not** an asyncio selector bug. `/api/leaderboard`, `/api/premarket`
 and `/api/backtest` ran their scans inside the API process: measured **74 s** for a cold corpus scan
@@ -23,6 +35,14 @@ accumulated.
 - **Verified live**: exactly one `cli serve`; with a full scan at 100% CPU in the child, the API
   worker sits at 0.1% and `/api/portfolio` answers in **11–23 ms** (was: timeout). Three concurrent
   `/api/leaderboard` calls returned in 14–21 ms with **zero** extra scans.
+- **Follow-up 2026-07-27 — scan lanes split.** The single shared worker above meant a 623 s backtest
+  starved the read path: every cold `/api/leaderboard`, `/api/premarket` and `/api/movers` key queued
+  behind it and 503'd for the whole run. There are now **two lanes, one worker each** (`_SCAN_POOLS`
+  in `api/app.py`) — read-path scans on `"scan"`, `/api/backtest` on `"backtest"`. Each lane's worker
+  spawns on first use, so the backtest worker exists only once someone runs one, and an idle worker
+  costs 0% CPU. Verified: with a backtest pinned at 100% in its own child, `/api/premarket` still
+  answered **200 in 5.9 s** and a warm `/api/leaderboard` in **2 ms**. So expect **one or two**
+  `multiprocessing.spawn` children at 100%, not just one.
 
 ## 🟢 2026-07-26 — NIGHTLY QUANT-DESK REVIEW AGENT ("the desk") built + scheduled
 Full design: `docs/DESK_AGENT.md`. Code `signal_engine/desk/`, tests `tests/test_desk.py`, new job

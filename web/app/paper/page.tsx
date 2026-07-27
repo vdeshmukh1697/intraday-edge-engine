@@ -1,8 +1,28 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { InfoTip } from "@/components/InfoTip";
+import FeedStatus from "@/components/FeedStatus";
+import { DataTable, type Column } from "@/components/ui/DataTable";
+import {
+  Badge,
+  Callout,
+  Card,
+  EmptyState,
+  ErrorBanner,
+  LoadingBlock,
+  PageHeader,
+  Section,
+} from "@/components/ui/primitives";
+import {
+  AreaChart,
+  BarRows,
+  Histogram,
+  Hero,
+  LineChart,
+  StatTile,
+} from "@/components/ui/stats";
+import { DirectionTag, Money, SymbolLink } from "@/components/ui/cells";
 import {
   getPaperAnalytics,
   getPaperTrades,
@@ -14,12 +34,19 @@ import {
   type OpenPosition,
   type LiveStatus,
 } from "@/lib/api";
-// Shared Indian-locale money helpers: "₹1,00,000" / signed "+₹612".
-import { inr, inrSigned } from "@/lib/format";
-
-const pct = (n: number) => `${n.toFixed(2)}%`;
-const pctSigned = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
-const cls = (n: number) => (n > 0 ? "pos" : n < 0 ? "neg" : "");
+import {
+  conf,
+  dayLabel,
+  hhmm,
+  inr,
+  inrSigned,
+  isoDay,
+  num,
+  pct,
+  pctSigned,
+  signArrow,
+  signCls,
+} from "@/lib/format";
 
 const REFRESH_MS = 15000; // auto-refresh so trades appear without a manual reload
 
@@ -36,16 +63,25 @@ export default function PaperTradingPage() {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [auto, setAuto] = useState(true);
 
-  // Keep the latest filter values for the polling closure without re-arming the timer each keystroke.
+  // Keep the latest filter values for the polling closure without re-arming the
+  // timer on each keystroke.
   const filterRef = useRef({ start, end, symbol });
   filterRef.current = { start, end, symbol };
 
   const load = useCallback((spinner = true) => {
     if (spinner) setLoading(true);
     setError(null);
-    const { start, end, symbol } = filterRef.current;
-    const f = { start: start || undefined, end: end || undefined, symbol: symbol || undefined };
-    Promise.all([getPaperAnalytics(f), getPaperTrades(f), getOpenPositions(), getLiveStatus()])
+    const f = {
+      start: filterRef.current.start || undefined,
+      end: filterRef.current.end || undefined,
+      symbol: filterRef.current.symbol || undefined,
+    };
+    Promise.all([
+      getPaperAnalytics(f),
+      getPaperTrades(f),
+      getOpenPositions(),
+      getLiveStatus(),
+    ])
       .then(([r, t, o, st]) => {
         setReport(r);
         setTrades(t.trades);
@@ -57,408 +93,817 @@ export default function PaperTradingPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  useEffect(() => { load(); }, [load]); // initial load
+  useEffect(() => {
+    load();
+  }, [load]);
 
-  // Auto-refresh: poll every REFRESH_MS so new entries/exits show up live.
   useEffect(() => {
     if (!auto) return;
     const id = setInterval(() => load(false), REFRESH_MS);
     return () => clearInterval(id);
   }, [auto, load]);
 
-  if (error) return <div className="card">Could not load paper trades: {error}</div>;
-  if (!report) return <div className="card">Loading…</div>;
+  if (error && !report) {
+    return (
+      <>
+        <PageHeader title="Paper trading account" />
+        <ErrorBanner>Could not load paper trades: {error}</ErrorBanner>
+      </>
+    );
+  }
+  if (!report) {
+    return (
+      <>
+        <PageHeader title="Paper trading account" />
+        <LoadingBlock label="Loading paper-trading analytics" />
+      </>
+    );
+  }
 
   const s = report.summary;
   const hasData = s.n_trades > 0;
+  const cap = report.account_capital || 0;
+  const unrealized = open.reduce((a, p) => a + (p.unrealized_pnl_abs || 0), 0);
+  const total = s.total_pnl_abs + unrealized;
+  const pctOf = (n: number) => (cap > 0 ? (n / cap) * 100 : 0);
 
   return (
-    <div className="paper">
-      <div className="page-head">
-        <h1>Paper Trading Account</h1>
-        <p className="muted">
-          A simulated broker account: {inr(report.account_capital)} capital, {inr(report.notional_per_trade)}{" "}
-          deployed per trade. Decision-support only — no live orders are ever placed.
-        </p>
-      </div>
+    <>
+      <PageHeader
+        title="Paper trading account"
+        eyebrow="Simulated broker statement"
+        lede={
+          <>
+            A simulated broker account: {inr(report.account_capital)} capital,{" "}
+            {inr(report.notional_per_trade)} deployed per trade, with a real cost model
+            applied to every fill.{" "}
+            <strong>Decision-support only — no live orders are ever placed.</strong>
+          </>
+        }
+        aside={
+          <Badge tone="warning" size="lg">
+            Paper money
+          </Badge>
+        }
+      />
 
-      <LiveBar status={status} lastRefresh={lastRefresh} auto={auto}
-        onToggle={() => setAuto((a) => !a)} onRefresh={() => load(true)} loading={loading} />
+      <FeedStatus
+        status={status}
+        lastRefresh={lastRefresh}
+        auto={auto}
+        onToggleAuto={() => setAuto((a) => !a)}
+        onRefresh={() => load(true)}
+        busy={loading}
+      />
 
-      {/* Broker-style account summary: capital, account value, realized/unrealized/total P&L, ROC. */}
-      <AccountSummary report={report} open={open} />
+      {/* 1 — headline scorecard */}
+      <Card>
+        <div className="hero-split">
+          <Hero
+            label="Account value"
+            value={inr(cap + total)}
+            tone={signCls(total)}
+          >
+            <span className={signCls(total)}>
+              <span className="delta-arrow" aria-hidden="true">
+                {signArrow(total)}
+              </span>{" "}
+              {inrSigned(total)} ({pctSigned(pctOf(total))})
+            </span>
+            <span className="faint">on {inr(cap)} capital</span>
+          </Hero>
+          <div className="stat-grid">
+            <StatTile
+              label={
+                <>
+                  Realized P&amp;L
+                  <InfoTip term="net_pnl" />
+                </>
+              }
+              value={inrSigned(s.total_pnl_abs)}
+              tone={signCls(s.total_pnl_abs)}
+              sub={`closed · ${pctSigned(pctOf(s.total_pnl_abs))} of capital`}
+            />
+            <StatTile
+              label={
+                <>
+                  Unrealized P&amp;L
+                  <InfoTip term="unrealized_pnl" />
+                </>
+              }
+              value={inrSigned(unrealized)}
+              tone={signCls(unrealized)}
+              sub={open.length ? `${open.length} open` : "no open positions"}
+            />
+            <StatTile
+              label={
+                <>
+                  Win rate
+                  <InfoTip term="win_rate" />
+                </>
+              }
+              value={`${s.win_rate.toFixed(1)}%`}
+              sub={`${s.wins}W / ${s.losses}L over ${s.n_trades} trades`}
+            />
+            <StatTile
+              label={
+                <>
+                  Profit factor
+                  <InfoTip term="profit_factor" />
+                </>
+              }
+              value={s.profit_factor === null ? "∞" : s.profit_factor.toFixed(2)}
+              tone={
+                s.profit_factor !== null && s.profit_factor < 1 ? "neg" : undefined
+              }
+              sub="gross win ÷ gross loss · 1.00 is break-even"
+            />
+            <StatTile
+              label={
+                <>
+                  Expectancy
+                  <InfoTip term="expectancy" />
+                </>
+              }
+              value={inrSigned(s.expectancy)}
+              tone={signCls(s.expectancy)}
+              sub="per trade, after costs"
+            />
+            <StatTile
+              label={
+                <>
+                  Max drawdown
+                  <InfoTip term="max_drawdown" />
+                </>
+              }
+              value={inr(s.max_drawdown)}
+              tone="neg"
+              sub={`${pct(pctOf(s.max_drawdown))} of capital, peak to trough`}
+            />
+          </div>
+        </div>
+      </Card>
 
-      {/* Open positions — live entries currently in the market (the piece that was missing). */}
       <OpenPositions positions={open} notional={report.notional_per_trade} />
 
-      <div className="filters card">
-        <label>From <input type="date" value={start} onChange={(e) => setStart(e.target.value)} /></label>
-        <label>To <input type="date" value={end} onChange={(e) => setEnd(e.target.value)} /></label>
-        <label>Symbol <input placeholder="e.g. RELIANCE" value={symbol}
-          onChange={(e) => setSymbol(e.target.value.toUpperCase())} /></label>
-        <button onClick={() => load(true)} disabled={loading}>{loading ? "…" : "Apply"}</button>
-      </div>
+      <form
+        className="control-bar"
+        onSubmit={(e) => {
+          e.preventDefault();
+          load(true);
+        }}
+      >
+        <label className="field">
+          <span>From</span>
+          <input type="date" value={start} onChange={(e) => setStart(e.target.value)} />
+        </label>
+        <label className="field">
+          <span>To</span>
+          <input type="date" value={end} onChange={(e) => setEnd(e.target.value)} />
+        </label>
+        <label className="field">
+          <span>Symbol</span>
+          <input
+            placeholder="e.g. RELIANCE"
+            value={symbol}
+            onChange={(e) => setSymbol(e.target.value.toUpperCase())}
+          />
+        </label>
+        <button type="submit" disabled={loading}>
+          {loading ? "…" : "Apply"}
+        </button>
+      </form>
 
       {!hasData ? (
-        <div className="card empty">
-          No paper trades recorded yet. They appear here automatically once the live paper-trader
-          (or a <code>--persist</code> backtest) records trades.
-        </div>
+        <EmptyState title="No paper trades recorded yet">
+          They appear here automatically once the live paper-trader (or a{" "}
+          <code>--persist</code> backtest) records trades.
+        </EmptyState>
       ) : (
         <>
-          {/* Summary cards */}
-          <div className="cards">
-            <Card label="Net P&L" term="net_pnl" value={inr(s.total_pnl_abs)} tone={cls(s.total_pnl_abs)} sub={pct(s.total_pnl_pct)} />
-            <Card label="Win rate" term="win_rate" value={`${s.win_rate.toFixed(1)}%`} sub={`${s.wins}W / ${s.losses}L`} />
-            <Card label="Trades" term="expectancy" value={String(s.n_trades)} sub={`exp ${inr(s.expectancy)}/trade`} />
-            <Card label="Profit factor" term="profit_factor" value={s.profit_factor === null ? "∞" : s.profit_factor.toFixed(2)}
-              tone={s.profit_factor !== null && s.profit_factor < 1 ? "neg" : "pos"} sub="gross win / gross loss" />
-            <Card label="Avg win / loss" term="avg_win_loss" value={`${inr(s.avg_win)} / ${inr(s.avg_loss)}`} />
-            <Card label="Max drawdown" term="max_drawdown" value={inr(s.max_drawdown)} tone="neg" sub="peak-to-trough" />
-            <Card label="Best trade" term="best_worst" value={s.best_trade ? inr(s.best_trade.net_pnl_abs) : "—"} tone="pos" sub={s.best_trade?.symbol} />
-            <Card label="Worst trade" term="best_worst" value={s.worst_trade ? inr(s.worst_trade.net_pnl_abs) : "—"} tone="neg" sub={s.worst_trade?.symbol} />
-          </div>
-
-          {/* Auto summary */}
+          {/* 2 — interpretation, deliberately styled as commentary, not data */}
           {report.auto_summary.length > 0 && (
-            <div className="card auto">
-              <h3>What the numbers say</h3>
-              <ul>{report.auto_summary.map((x, i) => <li key={i}>{x}</li>)}</ul>
-            </div>
+            <Callout icon="🧭" title="What the numbers say">
+              <ul>
+                {report.auto_summary.map((x, i) => (
+                  <li key={i}>{x}</li>
+                ))}
+              </ul>
+              <p className="tiny faint" style={{ marginTop: "var(--space-2)" }}>
+                Generated from the table above — an interpretation, not extra evidence.
+                The sample is small; none of it demonstrates an edge.
+              </p>
+            </Callout>
           )}
 
-          {/* Equity curve + drawdown */}
-          <div className="card">
-            <h3>Equity curve (cumulative net P&L)<InfoTip term="equity_curve" /></h3>
-            <LineSvg pts={report.equity_curve.map((p) => p.cum_pnl)} fmt={inr} />
-            <h3 style={{ marginTop: 18 }}>Drawdown<InfoTip term="drawdown_series" /></h3>
-            <AreaSvg pts={report.drawdown.map((p) => p.drawdown)} fmt={inr} negative />
+          {/* 3 — equity and drawdown */}
+          <Section
+            titleNode={
+              <>
+                Equity &amp; drawdown
+                <InfoTip term="equity_curve" />
+              </>
+            }
+            note="Cumulative net P&L across the filtered trades, and how far below its own peak the curve sat at each point."
+          >
+            <div className="stack">
+              <LineChart
+                points={report.equity_curve.map((p) => p.cum_pnl)}
+                labels={report.equity_curve.map((p) => `${p.symbol} ${hhmm(p.ts)}`)}
+                fmt={inr}
+                label="Cumulative net profit and loss"
+              />
+              <div>
+                <h3 className="stat-label">
+                  Drawdown
+                  <InfoTip term="drawdown_series" />
+                </h3>
+                <AreaChart
+                  points={report.drawdown.map((p) => p.drawdown)}
+                  fmt={inr}
+                  label="Drawdown from peak"
+                />
+              </div>
+            </div>
+          </Section>
+
+          {/* 4 — distribution */}
+          <Section
+            titleNode={
+              <>
+                P&amp;L distribution
+                <InfoTip term="pnl_distribution" />
+              </>
+            }
+            note="Per-trade results by bucket (₹, mid-point labelled). Losses left of zero, gains right."
+          >
+            <Histogram bins={report.histogram} fmt={inr} />
+          </Section>
+
+          {/* 5 — breakdowns */}
+          <div className="two-col">
+            <GroupTable
+              title="By strategy"
+              titleTerm="by_strategy"
+              rows={report.by_strategy}
+              keyName="strategy"
+            />
+            <GroupTable
+              title="By symbol"
+              titleTerm="by_symbol"
+              rows={report.by_symbol}
+              keyName="symbol"
+            />
           </div>
 
-          {/* P&L distribution */}
-          <div className="card">
-            <h3>P&L distribution (per trade)<InfoTip term="pnl_distribution" /></h3>
-            <Histogram bins={report.histogram} />
-          </div>
+          <Section
+            titleNode={
+              <>
+                By time of day
+                <InfoTip term="by_tod" />
+              </>
+            }
+            note="Net ₹ by entry time. With this few trades per bucket, differences here are almost certainly noise."
+          >
+            <BarRows
+              rows={report.by_time_of_day.map((r) => ({
+                key: r.tod ?? "",
+                label: r.tod ?? "",
+                value: r.total_pnl_abs,
+                valueText: inrSigned(r.total_pnl_abs),
+                meta: `${r.n_trades}t · ${r.win_rate.toFixed(0)}% win`,
+              }))}
+            />
+          </Section>
 
-          {/* By strategy / symbol */}
-          <div className="grid2">
-            <GroupTable title="By strategy" titleTerm="by_strategy" rows={report.by_strategy} keyName="strategy" />
-            <GroupTable title="By symbol" titleTerm="by_symbol" rows={report.by_symbol} keyName="symbol" />
-          </div>
-
-          {/* By time of day */}
-          <div className="card">
-            <h3>By time of day<InfoTip term="by_tod" /></h3>
-            <GroupBars rows={report.by_time_of_day} keyName="tod" />
-          </div>
-
-          {/* Trade history */}
-          <div className="card">
-            <h3>Trade history ({trades.length})</h3>
-            <TradeTable trades={trades} />
-          </div>
+          {/* 6 — the raw record */}
+          <TradeHistory trades={trades} capital={cap} />
         </>
       )}
-    </div>
-  );
-}
-
-// Broker-statement-style account header: the money figures a real account page shows.
-function AccountSummary({ report, open }: { report: PaperReport; open: OpenPosition[] }) {
-  const s = report.summary;
-  const cap = report.account_capital || 0;
-  const notional = report.notional_per_trade || 0;
-  const realized = s.total_pnl_abs;                                   // closed-trade net P&L
-  const unrealized = open.reduce((a, p) => a + (p.unrealized_pnl_abs || 0), 0);
-  const total = realized + unrealized;
-  const invested = open.length * notional;                           // cost basis of open positions
-  const acctValue = cap + total;                                     // capital marked to market
-  const pctOf = (n: number) => (cap > 0 ? (n / cap) * 100 : 0);
-  const ddPct = pctOf(-s.max_drawdown);
-
-  return (
-    <div className="card account-summary">
-      <div className="account-head">
-        <div>
-          <div className="metric-label">Account value</div>
-          <div className={`account-value ${cls(total)}`}>{inr(acctValue)}</div>
-          <div className="metric-sub">
-            {inr(cap)} capital{" "}
-            <span className={cls(total)}>{total >= 0 ? "▲" : "▼"} {inrSigned(total)} ({pctSigned(pctOf(total))})</span>
-          </div>
-        </div>
-        <div className="account-roc">
-          <div className="metric-label">Return on capital<InfoTip term="net_pnl" /></div>
-          <div className={`metric-value ${cls(total)}`}>{pctSigned(pctOf(total))}</div>
-        </div>
-      </div>
-      <div className="cards account-grid">
-        <Card label="Realized P&L" term="net_pnl" value={inrSigned(realized)} tone={cls(realized)} sub={`closed · ${pctSigned(pctOf(realized))}`} />
-        <Card label="Unrealized P&L" term="unrealized_pnl" value={inrSigned(unrealized)} tone={cls(unrealized)}
-          sub={open.length ? `${open.length} open · ${pctSigned(pctOf(unrealized))}` : "no open positions"} />
-        <Card label="Open exposure" value={inr(invested)} sub={`${open.length} position${open.length === 1 ? "" : "s"} · ${pct(pctOf(invested))} of capital`} />
-        <Card label="Capital deployed / trade" value={inr(notional)} sub="fixed notional per entry" />
-        <Card label="Win / loss" term="win_rate" value={`${s.wins}W / ${s.losses}L`} sub={`${s.win_rate.toFixed(1)}% win rate · ${s.n_trades} trades`} />
-        <Card label="Max drawdown" term="max_drawdown" value={inr(s.max_drawdown)} tone={s.max_drawdown > 0 ? "neg" : ""} sub={`${pct(ddPct)} of capital`} />
-      </div>
-    </div>
-  );
-}
-
-function Card({ label, value, sub, tone, term }: { label: string; value: string; sub?: string; tone?: string; term?: string }) {
-  return (
-    <div className="metric">
-      <div className="metric-label">{label}{term && <InfoTip term={term} />}</div>
-      <div className={`metric-value ${tone || ""}`}>{value}</div>
-      {sub && <div className="metric-sub">{sub}</div>}
-    </div>
-  );
-}
-
-// Live-feed status strip: connection dot, last-update age, open/closed counts, auto-refresh toggle.
-function LiveBar({ status, lastRefresh, auto, onToggle, onRefresh, loading }: {
-  status: LiveStatus | null; lastRefresh: Date | null; auto: boolean;
-  onToggle: () => void; onRefresh: () => void; loading: boolean;
-}) {
-  const live = status?.live && !status?.stale;
-  const dot = live ? "live" : status?.live ? "stale" : "off";
-  const label = live
-    ? `Feed live — last bar ${status?.age_seconds != null ? `${status.age_seconds}s ago` : "just now"}`
-    : status?.live
-      ? `Feed stale — no update for ${status?.age_seconds ?? "?"}s (market closed or feed down)`
-      : "Feed offline — start the live session to record trades";
-  return (
-    <div className="card livebar">
-      <span className={`live-dot ${dot}`} />
-      <span className="live-label">{label}</span>
-      {status?.live && (
-        <span className="live-counts">
-          {status.open_count} open · {status.closed_today} closed today · {status.watching} watched
-        </span>
-      )}
-      <span className="live-spacer" />
-      {lastRefresh && (
-        <span className="muted small">refreshed {lastRefresh.toLocaleTimeString("en-IN")}</span>
-      )}
-      <label className="toggle small">
-        <input type="checkbox" checked={auto} onChange={onToggle} /> auto
-      </label>
-      <button className="ghost" onClick={onRefresh} disabled={loading}>
-        {loading ? "…" : "Refresh"}
-      </button>
-    </div>
+    </>
   );
 }
 
 // Live open positions table with entry/stop/target (₹ + %) and unrealized P&L.
-function OpenPositions({ positions, notional }: { positions: OpenPosition[]; notional: number }) {
-  if (positions.length === 0) {
-    return (
-      <div className="card empty small">
-        No open positions right now. Live entries appear here the instant they fill (auto-refreshing).
-      </div>
-    );
-  }
+function OpenPositions({
+  positions,
+  notional,
+}: {
+  positions: OpenPosition[];
+  notional: number;
+}) {
   const totUpnl = positions.reduce((a, p) => a + (p.unrealized_pnl_abs || 0), 0);
+  const columns: Column<OpenPosition>[] = [
+    {
+      id: "symbol",
+      header: "Symbol",
+      primary: true,
+      cell: (p) => (
+        <>
+          <SymbolLink symbol={p.symbol} />
+          <span className="stack-only">
+            <DirectionTag direction={p.direction} />
+          </span>
+        </>
+      ),
+    },
+    {
+      id: "dir",
+      header: (
+        <>
+          Dir
+          <InfoTip term="direction" />
+        </>
+      ),
+      label: "Direction",
+      hideOnStack: true,
+      cell: (p) => <DirectionTag direction={p.direction} />,
+    },
+    {
+      id: "unreal",
+      header: (
+        <>
+          Unrealized
+          <InfoTip term="unrealized_pnl" />
+        </>
+      ),
+      label: "Unrealized",
+      numeric: true,
+      cell: (p) => (
+        <span className={signCls(p.unrealized_pnl_pct)}>
+          {pctSigned(p.unrealized_pnl_pct)}
+          {p.unrealized_pnl_abs != null && (
+            <span className="small"> ({inrSigned(p.unrealized_pnl_abs)})</span>
+          )}
+        </span>
+      ),
+    },
+    {
+      id: "entry",
+      header: (
+        <>
+          Entry ₹<InfoTip term="entry" />
+        </>
+      ),
+      label: "Entry",
+      numeric: true,
+      cell: (p) => <Money value={p.entry} kind="price" />,
+    },
+    {
+      id: "ltp",
+      header: (
+        <>
+          LTP ₹<InfoTip term="ltp" />
+        </>
+      ),
+      label: "Last price",
+      numeric: true,
+      cell: (p) => <Money value={p.last_price} kind="price" />,
+    },
+    {
+      id: "target",
+      header: (
+        <>
+          Target
+          <InfoTip term="target" />
+        </>
+      ),
+      label: "Target",
+      numeric: true,
+      cell: (p) => (
+        <>
+          <Money value={p.target} kind="price" />
+          {p.target_pct != null && (
+            <span className="faint small"> ({pctSigned(p.target_pct)})</span>
+          )}
+        </>
+      ),
+    },
+    {
+      id: "stop",
+      header: (
+        <>
+          Stop
+          <InfoTip term="stop" />
+        </>
+      ),
+      label: "Stop",
+      numeric: true,
+      cell: (p) => (
+        <>
+          <Money value={p.stop_loss} kind="price" />
+          {p.stop_pct != null && (
+            <span className="faint small"> (−{p.stop_pct.toFixed(2)}%)</span>
+          )}
+        </>
+      ),
+    },
+    {
+      id: "since",
+      header: "Since",
+      label: "Open since",
+      cell: (p) => <span className="mono faint">{hhmm(p.entry_ts)}</span>,
+    },
+  ];
+
   return (
-    <div className="card">
-      <h3>
-        Open positions ({positions.length}){" "}
-        <span className={cls(totUpnl)}>· unrealized {inr(totUpnl)}</span>
-      </h3>
-      <table className="grid">
-        <thead>
-          <tr>
-            <th>Symbol</th><th>Dir<InfoTip term="direction" /></th><th className="num">Entry ₹<InfoTip term="entry" /></th>
-            <th className="num">LTP ₹<InfoTip term="ltp" /></th><th className="num">Target<InfoTip term="target" /></th>
-            <th className="num">Stop<InfoTip term="stop" /></th><th className="num">Unrealized<InfoTip term="unrealized_pnl" /></th><th>Since</th>
-          </tr>
-        </thead>
-        <tbody>
-          {positions.map((p) => (
-            <tr key={p.id} className="active-row">
-              <td className="mono">
-                <Link href={`/stock/${encodeURIComponent(p.symbol)}`}>{p.symbol}</Link>
-              </td>
-              <td><span className={`tag ${p.direction === "LONG" ? "pos" : "neg"}`}>{p.direction}</span></td>
-              <td className="num">{p.entry?.toFixed(2)}</td>
-              <td className="num">{p.last_price != null ? p.last_price.toFixed(2) : "—"}</td>
-              <td className="num">
-                {p.target != null ? p.target.toFixed(2) : "—"}
-                {p.target_pct != null && <span className="muted small"> ({p.target_pct >= 0 ? "+" : ""}{p.target_pct.toFixed(2)}%)</span>}
-              </td>
-              <td className="num">
-                {p.stop_loss != null ? p.stop_loss.toFixed(2) : "—"}
-                {p.stop_pct != null && <span className="muted small"> (-{p.stop_pct.toFixed(2)}%)</span>}
-              </td>
-              <td className={`num ${cls(p.unrealized_pnl_pct || 0)}`}>
-                {p.unrealized_pnl_pct != null ? `${p.unrealized_pnl_pct >= 0 ? "+" : ""}${p.unrealized_pnl_pct.toFixed(2)}%` : "—"}
-                {p.unrealized_pnl_abs != null && <span className="small"> ({inr(p.unrealized_pnl_abs)})</span>}
-              </td>
-              <td className="muted small">{p.entry_ts ? p.entry_ts.slice(11, 16) : "—"}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <p className="muted small" style={{ marginTop: 8 }}>
-        Unrealized P&amp;L is gross at the {inr(notional)} reference notional, marked to the latest bar.
-      </p>
-    </div>
+    <Section
+      title={`Open positions (${positions.length})`}
+      aside={
+        positions.length > 0 ? (
+          <span className={signCls(totUpnl)}>
+            unrealized <strong>{inrSigned(totUpnl)}</strong>
+          </span>
+        ) : undefined
+      }
+      note={`Unrealized P&L is gross at the ${inr(notional)} reference notional, marked to the latest bar.`}
+    >
+      <DataTable
+        label="Open paper positions"
+        columns={columns}
+        rows={positions}
+        rowKey={(p) => p.id}
+        rowFlag={() => "active"}
+        empty={
+          <EmptyState title="No open positions right now">
+            Live entries appear here the instant they fill.
+          </EmptyState>
+        }
+      />
+    </Section>
   );
 }
 
-// Minimal dependency-free SVG line (equity curve).
-function LineSvg({ pts, fmt }: { pts: number[]; fmt: (n: number) => string }) {
-  const W = 760, H = 180, P = 28;
-  if (pts.length < 2) return <div className="muted">Not enough points.</div>;
-  const min = Math.min(0, ...pts), max = Math.max(0, ...pts);
-  const x = (i: number) => P + (i / (pts.length - 1)) * (W - 2 * P);
-  const y = (v: number) => H - P - ((v - min) / (max - min || 1)) * (H - 2 * P);
-  const d = pts.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(" ");
-  const zero = y(0);
+function GroupTable({
+  title,
+  titleTerm,
+  rows,
+  keyName,
+}: {
+  title: string;
+  titleTerm?: string;
+  rows: GroupRow[];
+  keyName: "strategy" | "symbol";
+}) {
+  const columns: Column<GroupRow>[] = [
+    {
+      id: keyName,
+      header: keyName === "symbol" ? "Symbol" : "Strategy",
+      primary: true,
+      cell: (r) =>
+        keyName === "symbol" && r.symbol ? (
+          <>
+            <SymbolLink symbol={r.symbol} />
+            <span className={`stack-only ${signCls(r.total_pnl_abs)}`}>
+              {inrSigned(r.total_pnl_abs)}
+            </span>
+          </>
+        ) : (
+          <>
+            <span>{r.strategy}</span>
+            <span className={`stack-only ${signCls(r.total_pnl_abs)}`}>
+              {inrSigned(r.total_pnl_abs)}
+            </span>
+          </>
+        ),
+    },
+    {
+      id: "trades",
+      header: "Trades",
+      label: "Trades",
+      numeric: true,
+      cell: (r) => r.n_trades,
+      sortBy: (r) => r.n_trades,
+    },
+    {
+      id: "win",
+      header: (
+        <>
+          Win %<InfoTip term="win_rate" />
+        </>
+      ),
+      label: "Win rate",
+      numeric: true,
+      cell: (r) => `${r.win_rate.toFixed(0)}%`,
+      sortBy: (r) => r.win_rate,
+    },
+    {
+      id: "pnl",
+      header: "Net P&L",
+      label: "Net P&L",
+      numeric: true,
+      hideOnStack: true,
+      cell: (r) => <Money value={r.total_pnl_abs} kind="signed" />,
+      sortBy: (r) => r.total_pnl_abs,
+    },
+    {
+      id: "pf",
+      header: (
+        <>
+          PF
+          <InfoTip term="profit_factor" />
+        </>
+      ),
+      label: "Profit factor",
+      numeric: true,
+      cell: (r) => (r.profit_factor === null ? "∞" : r.profit_factor.toFixed(2)),
+      sortBy: (r) => r.profit_factor ?? 0,
+    },
+  ];
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="chart-svg">
-      <line x1={P} y1={zero} x2={W - P} y2={zero} className="axis" />
-      <path d={d} className="line" />
-      <text x={P} y={14} className="lbl">{fmt(max)}</text>
-      <text x={P} y={H - 6} className="lbl">{fmt(min)}</text>
-    </svg>
+    <Section
+      titleNode={
+        <>
+          {title}
+          {titleTerm && <InfoTip term={titleTerm} />}
+        </>
+      }
+    >
+      <DataTable
+        label={title}
+        columns={columns}
+        rows={rows}
+        rowKey={(r) => String(r[keyName] ?? "")}
+        tall
+      />
+    </Section>
   );
 }
 
-function AreaSvg({ pts, fmt, negative }: { pts: number[]; fmt: (n: number) => string; negative?: boolean }) {
-  const W = 760, H = 110, P = 24;
-  if (pts.length < 2) return <div className="muted">—</div>;
-  const min = Math.min(0, ...pts), max = Math.max(0, ...pts);
-  const x = (i: number) => P + (i / (pts.length - 1)) * (W - 2 * P);
-  const y = (v: number) => H - P - ((v - min) / (max - min || 1)) * (H - 2 * P);
-  const d = `M${x(0)} ${y(0)} ` + pts.map((v, i) => `L${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(" ") +
-    ` L${x(pts.length - 1)} ${y(0)} Z`;
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="chart-svg">
-      <path d={d} className={negative ? "area-neg" : "area"} />
-      <text x={P} y={H - 4} className="lbl">{fmt(min)}</text>
-    </svg>
-  );
+// A trade's P&L is booked on the day it CLOSED, which is what the ledger's
+// realized-per-day figure uses. Fall back to the entry day for a row missing an exit.
+const tradeDay = (t: PaperTrade) => isoDay(t.exit_ts) || isoDay(t.entry_ts);
+
+// Prefer the real ledger money (₹ written by the portfolio ledger); legacy rows fall
+// back to the fixed-notional modelled figures, and say so.
+const netOf = (t: PaperTrade) => t.pnl_inr ?? t.net_pnl_abs;
+const costOf = (t: PaperTrade) => t.charges_inr ?? t.costs_abs;
+const isModelled = (t: PaperTrade) => t.modeled ?? t.pnl_inr == null;
+
+function dayTotals(rows: PaperTrade[]) {
+  let net = 0;
+  let charges = 0;
+  let wins = 0;
+  let losses = 0;
+  let modelled = 0;
+  for (const t of rows) {
+    const n = netOf(t);
+    net += n;
+    charges += costOf(t);
+    if (n > 0) wins += 1;
+    else if (n < 0) losses += 1;
+    if (isModelled(t)) modelled += 1;
+  }
+  // Derive gross rather than summing gross_pnl_abs: that column is always the
+  // modelled figure, so adding it to ledger rows would mix two bases.
+  return { net, charges, gross: net + charges, wins, losses, modelled, n: rows.length };
 }
 
-function Histogram({ bins }: { bins: { lo: number; hi: number; count: number }[] }) {
-  const max = Math.max(1, ...bins.map((b) => b.count));
-  return (
-    <div className="hist">
-      {bins.map((b, i) => (
-        <div key={i} className="hist-col" title={`${inr(b.lo)}..${inr(b.hi)}: ${b.count}`}>
-          <div className={`hist-bar ${b.hi <= 0 ? "neg" : "pos"}`} style={{ height: `${(b.count / max) * 100}%` }} />
-          <div className="hist-x">{Math.round((b.lo + b.hi) / 2)}</div>
-        </div>
-      ))}
-    </div>
-  );
-}
+/** The raw trade record, filterable down to a single session. */
+function TradeHistory({ trades, capital }: { trades: PaperTrade[]; capital: number }) {
+  const [day, setDay] = useState("");  // "" = every day in the current range
 
-function GroupTable({ title, titleTerm, rows, keyName }: { title: string; titleTerm?: string; rows: GroupRow[]; keyName: "strategy" | "symbol" }) {
-  return (
-    <div className="card">
-      <h3>{title}{titleTerm && <InfoTip term={titleTerm} />}</h3>
-      <table className="tbl">
-        <thead><tr><th>{keyName}</th><th>Trades</th><th>Win%<InfoTip term="win_rate" /></th><th>Net P&L</th><th>PF<InfoTip term="profit_factor" /></th></tr></thead>
-        <tbody>
-          {rows.map((r, i) => (
-            <tr key={i}>
-              <td>
-                {keyName === "symbol" && r.symbol ? (
-                  <Link href={`/stock/${encodeURIComponent(r.symbol)}`} className="sym-link">{r.symbol}</Link>
-                ) : (
-                  r[keyName]
-                )}
-              </td><td>{r.n_trades}</td><td>{r.win_rate.toFixed(0)}%</td>
-              <td className={cls(r.total_pnl_abs)}>{inr(r.total_pnl_abs)}</td>
-              <td>{r.profit_factor === null ? "∞" : r.profit_factor.toFixed(2)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
+  const days = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const t of trades) {
+      const d = tradeDay(t);
+      if (d) counts.set(d, (counts.get(d) ?? 0) + 1);
+    }
+    return [...counts.entries()].sort((a, b) => b[0].localeCompare(a[0]));  // newest first
+  }, [trades]);
 
-function GroupBars({ rows, keyName }: { rows: GroupRow[]; keyName: "tod" }) {
-  const max = Math.max(1, ...rows.map((r) => Math.abs(r.total_pnl_abs)));
+  // The From/To filter above can drop the selected day out of the set entirely;
+  // fall back to all days rather than showing an empty table with no explanation.
+  useEffect(() => {
+    if (day && !days.some(([d]) => d === day)) setDay("");
+  }, [day, days]);
+
+  const visible = useMemo(
+    () => (day ? trades.filter((t) => tradeDay(t) === day) : trades),
+    [trades, day]
+  );
+  const totals = useMemo(() => dayTotals(visible), [visible]);
+
   return (
-    <div className="tod">
-      {rows.map((r, i) => (
-        <div key={i} className="tod-row">
-          <div className="tod-label">{r[keyName]}</div>
-          <div className="tod-track">
-            <div className={`tod-bar ${cls(r.total_pnl_abs)}`} style={{ width: `${(Math.abs(r.total_pnl_abs) / max) * 100}%` }} />
+    <Section
+      title={`Trade history (${visible.length})`}
+      note="Every recorded paper trade. Sort any column; rows marked “modelled” predate the ₹1L ledger and use a fixed reference notional."
+      aside={
+        days.length > 0 ? (
+          <label className="field">
+            <span>Day</span>
+            <select value={day} onChange={(e) => setDay(e.target.value)}>
+              <option value="">All days ({trades.length} trades)</option>
+              {days.map(([d, count]) => (
+                <option key={d} value={d}>
+                  {dayLabel(d)} ({count} {count === 1 ? "trade" : "trades"})
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : undefined
+      }
+    >
+      {day && (
+        <div className="stack">
+          <div className="stat-grid">
+            <StatTile
+              label={
+                <>
+                  Net result · {dayLabel(day)}
+                  <InfoTip term="net_pnl" />
+                </>
+              }
+              value={inrSigned(totals.net)}
+              tone={signCls(totals.net)}
+              sub={
+                capital > 0
+                  ? `${pctSigned((totals.net / capital) * 100)} of capital`
+                  : "after all charges"
+              }
+            />
+            <StatTile
+              label="Trades closed"
+              value={totals.n}
+              sub={`${totals.wins}W / ${totals.losses}L`}
+            />
+            <StatTile
+              label="Gross P&amp;L"
+              value={inrSigned(totals.gross)}
+              tone={signCls(totals.gross)}
+              sub="before charges"
+              emphasis="quiet"
+            />
+            <StatTile
+              label="Charges"
+              value={inr(totals.charges)}
+              sub="brokerage, taxes, slippage"
+              emphasis="quiet"
+            />
           </div>
-          <div className={`tod-val ${cls(r.total_pnl_abs)}`}>{inr(r.total_pnl_abs)} · {r.n_trades}t · {r.win_rate.toFixed(0)}%</div>
+          {totals.modelled > 0 && (
+            <p className="tiny faint">
+              {totals.modelled} of {totals.n} rows on this day are modelled at a fixed
+              reference notional (they predate the ₹1L ledger), so this total mixes two
+              bases and is not a ledger figure.
+            </p>
+          )}
         </div>
-      ))}
-    </div>
+      )}
+      <TradeTable trades={visible} />
+    </Section>
   );
 }
 
 function TradeTable({ trades }: { trades: PaperTrade[] }) {
-  const [sortKey, setSortKey] = useState<keyof PaperTrade>("entry_ts");
-  const [asc, setAsc] = useState(false);
-  const sorted = [...trades].sort((a, b) => {
-    const av = a[sortKey] as number | string, bv = b[sortKey] as number | string;
-    return (av < bv ? -1 : av > bv ? 1 : 0) * (asc ? 1 : -1);
-  });
-  const head = (k: keyof PaperTrade, label: string) => (
-    <th onClick={() => { setSortKey(k); setAsc(sortKey === k ? !asc : true); }} style={{ cursor: "pointer" }}>
-      {label}{sortKey === k ? (asc ? " ▲" : " ▼") : ""}
-    </th>
-  );
+  const columns: Column<PaperTrade>[] = [
+    {
+      id: "symbol",
+      header: "Symbol",
+      primary: true,
+      cell: (t) => (
+        <>
+          <SymbolLink symbol={t.symbol} />
+          <span className={`stack-only mono ${signCls(netOf(t))}`}>
+            {inrSigned(netOf(t))}
+          </span>
+        </>
+      ),
+    },
+    {
+      id: "entry_ts",
+      header: "Entry",
+      label: "Entry time",
+      cell: (t) => (
+        <span className="mono">{(t.entry_ts || "").replace("T", " ").slice(0, 16)}</span>
+      ),
+      sortBy: (t) => t.entry_ts,
+    },
+    {
+      id: "dir",
+      header: "Dir",
+      label: "Direction",
+      cell: (t) => <DirectionTag direction={t.direction} />,
+      sortBy: (t) => t.direction,
+    },
+    {
+      id: "strategy",
+      header: "Strategy",
+      label: "Strategy",
+      hideOnStack: true,
+      cell: (t) => t.strategy,
+      sortBy: (t) => t.strategy,
+    },
+    {
+      id: "rule",
+      header: (
+        <>
+          Rule score
+          <InfoTip term="confidence" />
+        </>
+      ),
+      label: "Rule score (uncalibrated)",
+      numeric: true,
+      hideOnStack: true,
+      cell: (t) => conf(t.confidence),
+      sortBy: (t) => t.confidence,
+    },
+    {
+      id: "entry_fill",
+      header: "Entry ₹",
+      label: "Entry price",
+      numeric: true,
+      cell: (t) => <Money value={t.entry_fill} kind="price" />,
+      sortBy: (t) => t.entry_fill,
+    },
+    {
+      id: "exit_fill",
+      header: "Exit ₹",
+      label: "Exit price",
+      numeric: true,
+      cell: (t) => <Money value={t.exit_fill} kind="price" />,
+      sortBy: (t) => t.exit_fill,
+    },
+    {
+      id: "qty",
+      header: "Qty",
+      label: "Qty",
+      numeric: true,
+      hideOnStack: true,
+      cell: (t) => t.qty,
+      sortBy: (t) => t.qty,
+    },
+    {
+      id: "exit_reason",
+      header: "Exit",
+      label: "Exit reason",
+      cell: (t) => <span className="chip">{t.exit_reason}</span>,
+      sortBy: (t) => t.exit_reason,
+    },
+    {
+      id: "costs",
+      header: "Costs",
+      label: "Charges",
+      numeric: true,
+      cell: (t) => <Money value={costOf(t)} />,
+      sortBy: (t) => costOf(t),
+    },
+    {
+      id: "net",
+      header: "Net P&L",
+      label: "Net P&L",
+      numeric: true,
+      hideOnStack: true,
+      cell: (t) => (
+        <>
+          <Money value={netOf(t)} kind="signed" />
+          {isModelled(t) && (
+            <Badge
+              tone="warning"
+              title="Recorded before the ₹1L ledger — ₹ figures modelled at a fixed reference notional."
+            >
+              modelled
+            </Badge>
+          )}
+        </>
+      ),
+      sortBy: (t) => netOf(t),
+    },
+    {
+      id: "netpct",
+      header: "%",
+      label: "Net %",
+      numeric: true,
+      cell: (t) => (
+        <span className={signCls(t.net_pnl_pct)}>{pctSigned(t.net_pnl_pct)}</span>
+      ),
+      sortBy: (t) => t.net_pnl_pct,
+    },
+    {
+      id: "r",
+      header: (
+        <>
+          R
+          <InfoTip term="r_multiple" />
+        </>
+      ),
+      label: "R-multiple",
+      numeric: true,
+      hideOnStack: true,
+      cell: (t) => (t.r_multiple == null ? "—" : `${num(t.r_multiple)}R`),
+      sortBy: (t) => t.r_multiple ?? 0,
+    },
+  ];
+
   return (
-    <div className="tbl-scroll">
-      <table className="tbl">
-        <thead><tr>
-          {head("entry_ts", "Entry")}{head("symbol", "Symbol")}{head("direction", "Dir")}
-          {head("strategy", "Strategy")}{head("confidence", "Conf")}{head("entry_fill", "Entry ₹")}
-          {head("exit_fill", "Exit ₹")}{head("qty", "Qty")}{head("exit_reason", "Exit")}
-          {head("costs_abs", "Costs")}{head("net_pnl_abs", "Net P&L")}{head("net_pnl_pct", "%")}
-        </tr></thead>
-        <tbody>
-          {sorted.map((t) => {
-            // Prefer the real ledger money (₹ columns written by the portfolio
-            // ledger); legacy rows fall back to the fixed-notional modeled
-            // figures and carry a "modeled" badge so the two never mix silently.
-            const real = t.pnl_inr != null;
-            const modeled = t.modeled ?? !real;
-            const costs = t.charges_inr ?? t.costs_abs;
-            const netPnl = t.pnl_inr ?? t.net_pnl_abs;
-            return (
-              <tr key={t.id}>
-                <td className="mono">{(t.entry_ts || "").replace("T", " ").slice(0, 16)}</td>
-                <td><Link href={`/stock/${encodeURIComponent(t.symbol)}`} className="sym-link">{t.symbol}</Link></td>
-                <td className={t.direction === "LONG" ? "pos" : "neg"}>{t.direction}</td>
-                <td>{t.strategy}</td>
-                <td>{t.confidence?.toFixed(0)}</td>
-                <td className="mono">{t.entry_fill?.toFixed(2)}</td>
-                <td className="mono">{t.exit_fill?.toFixed(2)}</td>
-                <td className="mono">{t.qty}</td>
-                <td>{t.exit_reason}</td>
-                <td className="mono">{inr(costs)}</td>
-                <td className={`mono ${cls(netPnl)}`}>
-                  {inr(netPnl)}
-                  {modeled && (
-                    <span
-                      className="tag small modeled"
-                      title="Recorded before the ₹1L ledger — ₹ figures modeled at a fixed reference notional."
-                    >
-                      modeled
-                    </span>
-                  )}
-                </td>
-                <td className={cls(netPnl)}>{t.net_pnl_pct?.toFixed(2)}%</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+    <DataTable
+      label="Paper trade history"
+      columns={columns}
+      rows={trades}
+      rowKey={(t) => t.id}
+      tall
+      initialSort={{ id: "entry_ts", asc: false }}
+      empty={<EmptyState title="No trades in this range" />}
+    />
   );
 }
