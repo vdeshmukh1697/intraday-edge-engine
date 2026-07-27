@@ -57,38 +57,51 @@ _AUTH_TTL_S = 600
 # Single-flight matters as much as isolation: the cache was only written after a scan
 # finished, so two dashboard tabs asking for the same cold key each ran the full 74 s scan
 # (observed as duplicate "real scan: 517/600" log lines at 150 % CPU).
-_SCAN_POOL = None
+#
+# One worker per LANE, not one worker overall. A backtest runs for minutes (the 623 s above),
+# and with a single shared worker every cold read-path key — leaderboard, premarket, movers —
+# queued behind it and 503'd for the whole run. The read path is what the dashboard blocks on,
+# so it gets a lane of its own. Each lane's worker is spawned on first use, so the backtest
+# worker only exists once someone actually runs a backtest, and an idle one costs 0 % CPU.
+_SCAN_LANE = "scan"             # leaderboard / premarket / movers / startup warm
+_BACKTEST_LANE = "backtest"     # /api/backtest only — minutes-long, must not starve the above
+_SCAN_POOLS: dict = {}          # lane -> ProcessPoolExecutor(max_workers=1)
 _SCAN_POOL_LOCK = threading.Lock()
 _SCAN_WAIT_S = 20.0     # how long a caller waits when there is NOTHING cached to serve yet
 
 
-def _submit_scan(fn, *args):
-    """Run ``fn(*args)`` in the scan subprocess and return its Future.
+def _new_scan_pool() -> ProcessPoolExecutor:
+    """A lane's worker: one process, and it exits with us (macOS has no PDEATHSIG)."""
+    return ProcessPoolExecutor(max_workers=1, initializer=scans.exit_with_parent)
+
+
+def _submit_scan(fn, *args, lane: str = _SCAN_LANE):
+    """Run ``fn(*args)`` in ``lane``'s scan subprocess and return its Future.
 
     ``fn`` must be a module-level function in ``signal_engine.api.scans`` (it is pickled to the
-    child) returning JSON-ready data. One worker only: two concurrent scans would put us back to
-    two busy cores on a laptop that also runs the live engine. Tests replace this with an inline
-    runner so the suite never spawns a process."""
-    global _SCAN_POOL
+    child) returning JSON-ready data. One worker per lane, so work within a lane stays
+    serialised — two concurrent scans in the same lane would put us back to two busy cores on a
+    laptop that also runs the live engine. Tests replace this with an inline runner so the suite
+    never spawns a process."""
     with _SCAN_POOL_LOCK:
-        if _SCAN_POOL is None:
-            _SCAN_POOL = ProcessPoolExecutor(max_workers=1, initializer=scans.exit_with_parent)
+        pool = _SCAN_POOLS.get(lane)
+        if pool is None:
+            pool = _SCAN_POOLS[lane] = _new_scan_pool()
         try:
-            return _SCAN_POOL.submit(fn, *args)
+            return pool.submit(fn, *args)
         except BrokenExecutor:       # child was killed (OOM, stray SIGKILL) — rebuild once
-            _SCAN_POOL = ProcessPoolExecutor(max_workers=1, initializer=scans.exit_with_parent)
-            return _SCAN_POOL.submit(fn, *args)
+            pool = _SCAN_POOLS[lane] = _new_scan_pool()
+            return pool.submit(fn, *args)
 
 
 def _shutdown_scan_pool() -> None:
     """Drop queued scans on shutdown; a scan already running finishes in the child. If this
     process is killed outright instead, the child's parent-watchdog takes it down within ~2 s
     (see ``scans.exit_with_parent``), so no path leaves a scan worker spinning."""
-    global _SCAN_POOL
     with _SCAN_POOL_LOCK:
-        if _SCAN_POOL is not None:
-            _SCAN_POOL.shutdown(wait=False, cancel_futures=True)
-            _SCAN_POOL = None
+        for pool in _SCAN_POOLS.values():
+            pool.shutdown(wait=False, cancel_futures=True)
+        _SCAN_POOLS.clear()
 
 
 _NO_VALUE = object()
@@ -103,10 +116,11 @@ class _ScanCache:
     503 telling it to retry, which beats holding a connection open through a Cloudflare quick
     tunnel that gives up at ~100 s anyway."""
 
-    def __init__(self, name: str, ttl: float, max_entries: int = 16):
+    def __init__(self, name: str, ttl: float, max_entries: int = 16, lane: str = _SCAN_LANE):
         self._name = name
         self._ttl = ttl
         self._max_entries = max_entries
+        self._lane = lane
         # Re-entrant: an inline runner (tests) completes the future before add_done_callback
         # returns, so _settle re-enters on the same thread.
         self._lock = threading.RLock()
@@ -136,7 +150,7 @@ class _ScanCache:
         with self._lock:
             fut = self._inflight.get(key)
             if fut is None:
-                fut = _submit_scan(fn, *args)
+                fut = _submit_scan(fn, *args, lane=self._lane)
                 self._inflight[key] = fut
                 fut.add_done_callback(functools.partial(self._settle, key))
             return fut
@@ -399,7 +413,7 @@ def create_app() -> FastAPI:
     # recomputes on a timer — an untouched dashboard costs nothing.
     _leaderboard_cache = _ScanCache("leaderboard", ttl=900.0)
     _premarket_cache = _ScanCache("premarket briefing", ttl=300.0)
-    _backtest_cache = _ScanCache("backtest", ttl=21600.0)
+    _backtest_cache = _ScanCache("backtest", ttl=21600.0, lane=_BACKTEST_LANE)
 
     @app.get("/api/leaderboard", dependencies=[Depends(_require_token)])
     def leaderboard(
@@ -446,11 +460,16 @@ def create_app() -> FastAPI:
 
     @app.get("/api/backtest", dependencies=[Depends(_require_token)])
     def backtest(
-        start: str = Query(default=None), days: int = Query(default=10, ge=1, le=120),
+        start: str = Query(default=None), days: int = Query(default=10, ge=1, le=30),
         seed: int = 42,
     ):
         """Replay the watchlist over `days` sessions. Deterministic given (start, days, seed) —
-        hence the long TTL; the result only moves when config or the calendar does."""
+        hence the long TTL; the result only moves when config or the calendar does.
+
+        The ceiling is a CPU budget, not a modelling limit: a session-day costs ~62 s of one core
+        (measured 623 s for days=10), so 30 caps an accidental run at ~30 min. It was 120 — a
+        stray extra zero in the dashboard's Days box bought a ~2 h burn with no feedback. Raise
+        it here and in web/app/backtest/page.tsx together if a longer window is ever wanted."""
         start_d = _parse_date(start) if start else date(2025, 6, 2)
         return _backtest_cache.get((start, days, seed), scans.backtest, start_d, days, seed)
 

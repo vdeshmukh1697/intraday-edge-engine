@@ -9,8 +9,14 @@ import signal_engine.api.app as app_mod
 from signal_engine.api.app import create_app
 
 
-def _inline_submit(fn, *args):
-    """Run a scan on the calling thread and hand back a completed Future."""
+# Captured before the autouse fixture below swaps it out, so the pool-lane test can drive the
+# real submitter rather than the inline stub.
+_real_submit_scan = app_mod._submit_scan
+
+
+def _inline_submit(fn, *args, lane=None):
+    """Run a scan on the calling thread and hand back a completed Future (lane is irrelevant
+    in-process — see test_scan_cache_routes_backtest_to_its_own_lane for the routing itself)."""
     fut = Future()
     try:
         fut.set_result(fn(*args))
@@ -343,7 +349,7 @@ def test_scan_cache_single_flight_serves_stale_and_bounds_the_wait(monkeypatch):
         return {"tag": tag, "run": calls["n"]}
 
     pool = ThreadPoolExecutor(max_workers=2)
-    monkeypatch.setattr(app_mod, "_submit_scan", lambda fn, *a: pool.submit(fn, *a))
+    monkeypatch.setattr(app_mod, "_submit_scan", lambda fn, *a, lane=None: pool.submit(fn, *a))
     try:
         cache = _ScanCache("test scan", ttl=0.3)
         first = {}
@@ -373,6 +379,59 @@ def test_scan_cache_single_flight_serves_stale_and_bounds_the_wait(monkeypatch):
     finally:
         release.set()
         pool.shutdown(wait=False)
+
+
+def test_scan_cache_routes_backtest_to_its_own_lane(client, monkeypatch):
+    """A backtest runs for minutes, so it must not share a worker with the read path. On one
+    shared lane every cold leaderboard/premarket/movers request queued behind it and 503'd for
+    the whole run. Stubs stand in for the real scans — this is about routing, not results."""
+    from signal_engine.api import scans as scans_mod
+
+    lanes = {}
+
+    def _recording_submit(fn, *args, lane=None):
+        lanes[fn.__name__] = lane
+        return _inline_submit(fn, *args)
+
+    def premarket_briefing(*_args):
+        return {"picks": []}
+
+    def backtest(*_args):
+        return {"metrics": {}}
+
+    monkeypatch.setattr(app_mod, "_submit_scan", _recording_submit)
+    monkeypatch.setattr(scans_mod, "premarket_briefing", premarket_briefing)
+    monkeypatch.setattr(scans_mod, "backtest", backtest)
+
+    assert client.get("/api/premarket").status_code == 200
+    assert client.get("/api/backtest", params={"days": 1}).status_code == 200
+
+    assert lanes == {"premarket_briefing": app_mod._SCAN_LANE,
+                     "backtest": app_mod._BACKTEST_LANE}
+
+
+def test_submit_scan_keeps_one_pool_per_lane(monkeypatch):
+    """One worker per lane, reused across calls — not one pool for everything (which is what let
+    a backtest starve the read path), and not a fresh process per request."""
+    made = []
+
+    class _FakePool:
+        def __init__(self):
+            made.append(self)
+
+        def submit(self, fn, *args):
+            fut = Future()
+            fut.set_result(fn(*args))
+            return fut
+
+    monkeypatch.setattr(app_mod, "_new_scan_pool", _FakePool)
+    monkeypatch.setattr(app_mod, "_SCAN_POOLS", {})
+
+    assert _real_submit_scan(len, "ab").result() == 2
+    assert _real_submit_scan(len, "abc").result() == 3
+    assert _real_submit_scan(len, "abcd", lane=app_mod._BACKTEST_LANE).result() == 4
+
+    assert len(made) == 2, "expected exactly one pool per lane, reused within a lane"
 
 
 def test_chart_endpoint(client):
