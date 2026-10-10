@@ -9,3 +9,4 @@ One line per delivered session, appended by the daily routine. The next session 
 | 2026-10-07 | 03 | Postgres for startups: indexes, transactions and isolation levels, when Postgres is enough | 2026-10-07_day03_postgres-for-startups.md |
 | 2026-10-08 | 04 | Practical drill: a rate limiter in 90 minutes (token bucket vs sliding window) + DECISIONS.md | 2026-10-08_day04_rate-limiter-drill.md |
 | 2026-10-09 | 05 | API design: REST vs RPC, idempotency keys, pagination, versioning | 2026-10-09_day05_api-design.md |
+| 2026-10-10 | 06 | Background jobs and queues: when to add one, at-least-once delivery, idempotent consumers, the outbox pattern | 2026-10-10_day06_background-jobs-and-queues.md |
