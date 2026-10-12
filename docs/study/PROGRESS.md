@@ -11,3 +11,4 @@ One line per delivered session, appended by the daily routine. The next session 
 | 2026-10-09 | 05 | API design: REST vs RPC, idempotency keys, pagination, versioning | 2026-10-09_day05_api-design.md |
 | 2026-10-10 | 06 | Background jobs and queues: when to add one, at-least-once delivery, idempotent consumers, the outbox pattern | 2026-10-10_day06_background-jobs-and-queues.md |
 | 2026-10-11 | 07 | Review + Mock: design v1 of a webhook delivery service | 2026-10-11_day07_review-mock-webhook-delivery.md |
+| 2026-10-12 | 08 | Timeouts, retries, backoff and jitter; retry storms (your 1,426-reconnect incident as the story) | 2026-10-12_day08_timeouts-retries-backoff-jitter.md |
