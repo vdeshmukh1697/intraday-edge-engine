@@ -13,3 +13,4 @@ One line per delivered session, appended by the daily routine. The next session 
 | 2026-10-11 | 07 | Review + Mock: design v1 of a webhook delivery service | 2026-10-11_day07_review-mock-webhook-delivery.md |
 | 2026-10-12 | 08 | Timeouts, retries, backoff and jitter; retry storms (your 1,426-reconnect incident as the story) | 2026-10-12_day08_timeouts-retries-backoff-jitter.md |
 | 2026-10-13 | 09 | Circuit breakers, bulkheads, load shedding, backpressure | 2026-10-13_day09_circuit-breakers-bulkheads-load-shedding-backpressure.md |
+| 2026-10-14 | 10 | Observability v1: logs, metrics, traces; SLOs and error budgets for a five-person team | 2026-10-14_day10_observability-v1-logs-metrics-traces-slos.md |
