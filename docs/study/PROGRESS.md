@@ -17,3 +17,4 @@ One line per delivered session, appended by the daily routine. The next session 
 | 2026-10-15 | 11 | Long-lived connections: heartbeats, liveness detection, reconnect, gap backfill | 2026-10-15_day11_long-lived-connections.md |
 | 2026-10-16 | 12 | Incident response at a startup: on-call, postmortems, and your incident-command STAR story | 2026-10-16_day12_incident-response-at-a-startup.md |
 | 2026-10-17 | 13 | Practical drill: webhook receiver with signature verification, retries and dedupe | 2026-10-17_day13_webhook-receiver-drill.md |
+| 2026-10-18 | 14 | Review + Mock: real-time notification system, 0→1 then to 1M users | 2026-10-18_day14_review-mock-realtime-notification-system.md |
