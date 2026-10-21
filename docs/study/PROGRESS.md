@@ -20,3 +20,4 @@ One line per delivered session, appended by the daily routine. The next session 
 | 2026-10-18 | 14 | Review + Mock: real-time notification system, 0→1 then to 1M users | 2026-10-18_day14_review-mock-realtime-notification-system.md |
 | 2026-10-19 | 15 | Caching: cache-aside, invalidation, stampedes, TTL strategy | 2026-10-19_day15_caching.md |
 | 2026-10-20 | 16 | Replication and consistency: leader/follower, read-your-writes, CAP/PACELC in practice | 2026-10-20_day16_replication-and-consistency.md |
+| 2026-10-21 | 17 | Partitioning and sharding: key choice, hotspots, resharding | 2026-10-21_day17_partitioning-and-sharding.md |
