@@ -23,3 +23,4 @@ One line per delivered session, appended by the daily routine. The next session 
 | 2026-10-21 | 17 | Partitioning and sharding: key choice, hotspots, resharding | 2026-10-21_day17_partitioning-and-sharding.md |
 | 2026-10-22 | 18 | Event streams: the Kafka model, ordering, consumer groups, the exactly-once myth | 2026-10-22_day18_event-streams-kafka-model.md |
 | 2026-10-23 | 19 | Workshop: turn three LinkedIn projects into quantified scale war stories | 2026-10-23_day19_linkedin-scale-war-stories-workshop.md |
+| 2026-10-24 | 20 | Feeds: fan-out on write vs fan-out on read | 2026-10-24_day20_feeds-fan-out-on-write-vs-read.md |
