@@ -25,3 +25,4 @@ One line per delivered session, appended by the daily routine. The next session 
 | 2026-10-23 | 19 | Workshop: turn three LinkedIn projects into quantified scale war stories | 2026-10-23_day19_linkedin-scale-war-stories-workshop.md |
 | 2026-10-24 | 20 | Feeds: fan-out on write vs fan-out on read | 2026-10-24_day20_feeds-fan-out-on-write-vs-read.md |
 | 2026-10-25 | 21 | Review + Mock: design a news feed / activity stream | 2026-10-25_day21_review-mock-news-feed-activity-stream.md |
+| 2026-10-26 | 22 | LLM application architecture: context, retrieval basics, latency and cost budgets | 2026-10-26_day22_llm-application-architecture.md |
