@@ -27,3 +27,4 @@ One line per delivered session, appended by the daily routine. The next session 
 | 2026-10-25 | 21 | Review + Mock: design a news feed / activity stream | 2026-10-25_day21_review-mock-news-feed-activity-stream.md |
 | 2026-10-26 | 22 | LLM application architecture: context, retrieval basics, latency and cost budgets | 2026-10-26_day22_llm-application-architecture.md |
 | 2026-10-27 | 23 | Agents in production: tool calls, loops, state, durable execution | 2026-10-27_day23_agents-in-production.md |
+| 2026-10-28 | 24 | Evals: offline vs online, LLM-as-judge pitfalls, regression suites | 2026-10-28_day24_evals-offline-online-llm-judge-regression.md |
