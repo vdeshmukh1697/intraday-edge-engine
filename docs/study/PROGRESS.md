@@ -28,3 +28,4 @@ One line per delivered session, appended by the daily routine. The next session 
 | 2026-10-26 | 22 | LLM application architecture: context, retrieval basics, latency and cost budgets | 2026-10-26_day22_llm-application-architecture.md |
 | 2026-10-27 | 23 | Agents in production: tool calls, loops, state, durable execution | 2026-10-27_day23_agents-in-production.md |
 | 2026-10-28 | 24 | Evals: offline vs online, LLM-as-judge pitfalls, regression suites | 2026-10-28_day24_evals-offline-online-llm-judge-regression.md |
+| 2026-10-29 | 25 | Tracing and deterministic replay for agents; turning a production failure into a test | 2026-10-29_day25_tracing-and-deterministic-replay-for-agents.md |
